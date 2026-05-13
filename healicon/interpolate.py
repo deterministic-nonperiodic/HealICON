@@ -123,10 +123,34 @@ def interpolate_unstructured(ds: xr.Dataset, nside: int, source_lon_name: str, s
 
     return out_ds
 
+def _interp_regular_block(data_block, lon_coords, lat_coords, target_lon, target_lat):
+    """
+    Apply bilinear interpolation to a single block of data on a regular grid.
+    """
+    from scipy.interpolate import interpn
+    
+    # interpn requires the interpolation dimensions to be the FIRST dimensions.
+    # apply_ufunc with input_core_dims=[[lat, lon]] puts them at the END of the block.
+    # shape becomes (lat, lon, ...)
+    data_reshaped = np.moveaxis(data_block, [-2, -1], [0, 1])
+    
+    # Prepare the target coordinates: shape (n_target_cells, 2)
+    # The order must match the points tuple: (lat_coords, lon_coords)
+    xi = np.column_stack((target_lat, target_lon))
+    
+    # Perform interpolation. Output shape: (n_target_cells, ...)
+    interpolated = interpn((lat_coords, lon_coords), data_reshaped, xi, 
+                           method='linear', bounds_error=False, fill_value=np.nan)
+    
+    # We want 'cell' to be the LAST dimension for consistency with apply_ufunc
+    interpolated = np.moveaxis(interpolated, 0, -1)
+    
+    return interpolated
+
 def interpolate_regular(ds: xr.Dataset, nside: int, lon_name: str, lat_name: str) -> xr.Dataset:
     """
     Interpolate a regular latitude-longitude grid to a HEALPix grid.
-    Uses xarray's advanced interpolation.
+    Uses scipy.interpolate.interpn wrapped in apply_ufunc for memory efficiency.
     """
     target_lon, target_lat = get_healpix_coords(nside)
     
@@ -135,28 +159,45 @@ def interpolate_regular(ds: xr.Dataset, nside: int, lon_name: str, lat_name: str
     if source_lon_min < 0:
         target_lon = (target_lon + 180) % 360 - 180
     
-    # Create xarray DataArrays for advanced interpolation
-    target_lon_da = xr.DataArray(target_lon, dims="cell")
-    target_lat_da = xr.DataArray(target_lat, dims="cell")
+    source_lon = ds[lon_name].values
+    source_lat = ds[lat_name].values
     
-    # Ensure source coordinates are ordered correctly for xarray interpolation if needed,
-    # but xarray interp handles it automatically if they are dimensions.
-    
-    # Use bilinear interpolation
-    logger.info("Using xarray bilinear interpolation for regular grid.")
-    out_ds = ds.interp(
-        {lon_name: target_lon_da, lat_name: target_lat_da},
-        method="linear",
-        kwargs={"bounds_error": False}
+    # Create the output dataset
+    out_ds = xr.Dataset(
+        coords={
+            "cell": np.arange(len(target_lon)),
+            "lon": ("cell", target_lon),
+            "lat": ("cell", target_lat)
+        }
     )
     
-    # Clean up coords
-    out_ds = out_ds.assign_coords(
-        cell=np.arange(len(target_lon)),
-        lon=("cell", target_lon),
-        lat=("cell", target_lat)
-    )
-    
+    logger.info("Using SciPy interpn bilinear interpolation for regular grid.")
+    for var_name, da in ds.data_vars.items():
+        if lat_name not in da.dims or lon_name not in da.dims:
+            out_ds[var_name] = da
+            continue
+            
+        interpolated_da = xr.apply_ufunc(
+            _interp_regular_block,
+            da,
+            kwargs={
+                'lon_coords': source_lon, 
+                'lat_coords': source_lat, 
+                'target_lon': target_lon, 
+                'target_lat': target_lat
+            },
+            input_core_dims=[[lat_name, lon_name]],
+            output_core_dims=[["cell"]],
+            exclude_dims=set((lat_name, lon_name)),
+            dask="parallelized",
+            output_dtypes=[da.dtype],
+            dask_gufunc_kwargs={'output_sizes': {'cell': len(target_lon)}}
+        )
+        
+        interpolated_da = interpolated_da.assign_coords(cell=out_ds.cell, lon=out_ds.lon, lat=out_ds.lat)
+        out_ds[var_name] = interpolated_da
+        out_ds[var_name].attrs = da.attrs
+        
     return out_ds
 
 def _find_cf_coordinate(ds: xr.Dataset, expected_standard: str, common_names: list) -> str:

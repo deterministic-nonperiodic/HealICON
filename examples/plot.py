@@ -7,7 +7,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def plot_quicklook(ds_orig: xr.Dataset, ds_interp: xr.Dataset, var_name: str, height_idx: int = 0, time_idx: int = 0, save_path: str = None, plot_nodes: bool = False, node_subsample: int = 10, orig_title: str = 'Original Grid'):
+def plot_quicklook(ds_orig: xr.Dataset, ds_interp: xr.Dataset, var_name: str,
+                   height_idx: int = 0, time_idx: int = 0, save_path: str = None,
+                   plot_nodes: bool = False, node_subsample: int = 10, orig_title: str = 'Original Grid'):
     """
     Plots a side-by-side comparison of the original dataset and the interpolated HEALPix dataset.
     

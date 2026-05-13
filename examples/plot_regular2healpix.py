@@ -41,7 +41,8 @@ def main():
     
     # The plot_quicklook handles 1D time/height correctly if passed a full dataset, 
     # but since we already subsetted height and time, they are scalars.
-    plot_quicklook(ds_orig_computed, ds_interp, var_name='u', height_idx=0, time_idx=0, save_path=save_path)
+    plot_quicklook(ds_orig_computed, ds_interp, var_name='u', height_idx=0,
+                   time_idx=0, save_path=save_path, orig_title="Regional lon-lat grid")
     
     print("Done!")
 

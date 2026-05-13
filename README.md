@@ -15,16 +15,32 @@ HealICON is a command-line Python tool that efficiently interpolates atmospheric
 
 ## Installation
 
-You can install `HealICON` directly from the source directory using `pip`.
+### Standard Installation
+
+You can install `HealICON` directly from GitHub using `pip`:
 
 ```bash
-cd HealICON
-pip install .
+pip install git+https://github.com/deterministic-nonperiodic/HealICON.git
 ```
 
 To install with GPU support (requires NVIDIA RAPIDS `cuml` and `cupy` installed in your environment):
 ```bash
-pip install .[gpu]
+pip install "HealICON[gpu] @ git+https://github.com/deterministic-nonperiodic/HealICON.git"
+```
+
+### Manual Installation (For Developers)
+
+If you want to modify the source code, clone the repository and install it in editable mode:
+
+```bash
+git clone https://github.com/deterministic-nonperiodic/HealICON.git
+cd HealICON
+pip install -e .
+```
+
+To include the testing suite and development dependencies:
+```bash
+pip install -e .[test]
 ```
 
 ## Usage

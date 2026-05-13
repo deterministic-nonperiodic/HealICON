@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "healicon"
+version = "0.1.0"
+description = "Command-line tool to interpolate atmospheric model outputs to HEALPix grid."
+authors = [{ name = "Yanmichel A. Morfa", email = "morfa@iap-kborn.de" }]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "xarray",
+    "dask",
+    "netCDF4",
+    "healpy",
+    "numpy",
+    "scipy",
+    "pyyaml",
+    "click",
+]
+
+[project.optional-dependencies]
+gpu = ["cupy", "cuml"] # Assumes RAPIDS cuml for GPU KDTree, cupy for GPU arrays.
+test = ["pytest", "matplotlib"]
+
+[project.scripts]
+healicon = "healicon.cli:cli"

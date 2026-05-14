@@ -40,3 +40,5 @@ share/python-wheels/
 # Specific to this project
 *.nc
 *.png
+*.sh
+*.txt

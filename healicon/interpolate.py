@@ -290,20 +290,11 @@ def interpolate_to_healpix(ds: xr.Dataset, nside: int, use_gpu: bool = False) ->
     out_ds.attrs['healpix_scheme'] = 'RING'
     out_ds.attrs['healpix_cell_area_sr'] = f"{cell_area:.6e}"
     
-    # Add CF-compliant grid mapping
-    out_ds['healpix'] = xr.DataArray(np.int32(0))
-    out_ds['healpix'].attrs = {
-        'grid_mapping_name': 'healpix',
-        'healpix_nside': nside,
-        'healpix_scheme': 'RING'
-    }
-    
+    # Add CF-compliant grid mapping. Remove legacy grid attributes.
     for var in out_ds.data_vars:
-        if var != 'healpix':
-            out_ds[var].attrs['grid_mapping'] = 'healpix'
-            # Remove obsolete CDI grid attributes if present
-            out_ds[var].attrs.pop('CDI_grid_type', None)
-            out_ds[var].attrs.pop('number_of_grid_in_reference', None)
+        out_ds[var].attrs['grid_mapping'] = 'healpix'
+        out_ds[var].attrs.pop('CDI_grid_type', None)
+        out_ds[var].attrs.pop('number_of_grid_in_reference', None)
     
     history_msg = f"Interpolated to HEALPix grid (nside={nside}, scheme=RING) using HealICON."
     if 'history' in out_ds.attrs:

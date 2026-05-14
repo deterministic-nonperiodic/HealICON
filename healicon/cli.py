@@ -14,6 +14,38 @@ def cli():
     """HealICON: Interpolate atmospheric model outputs to HEALPix grid."""
     pass
 
+def _load_and_ensure_healpix(input_file, target_nside=None):
+    import xarray as xr
+    import healpy as hp
+    from .interpolate import interpolate_to_healpix
+    
+    logger.info(f"Opening file: {input_file}")
+    ds = xr.open_dataset(input_file, chunks='auto')
+    
+    is_healpix = False
+    if 'cell' in ds.dims:
+        npix = ds.sizes['cell']
+        try:
+            detected_nside = hp.npix2nside(npix)
+            if hp.isnsideok(detected_nside):
+                is_healpix = True
+        except Exception:
+            pass
+            
+    if ds.attrs.get('healpix_scheme') == 'RING':
+        is_healpix = True
+        
+    for var in ds.data_vars:
+        if ds[var].attrs.get('grid_mapping') == 'healpix':
+            is_healpix = True
+            break
+            
+    if not is_healpix:
+        logger.info("Input dataset is not a HEALPix grid. Auto-interpolating first...")
+        ds = interpolate_to_healpix(ds, nside=target_nside)
+        
+    return ds
+
 @cli.command()
 @click.option('-i', '--input', 'input_pattern', required=True, 
               help='Input file pattern (e.g., "data/icon_*.nc"). Can include wildcards.')
@@ -57,8 +89,7 @@ def extract_lat(input_file, output_file, lat, num_lons):
     import xarray as xr
     from .extract import extract_along_latitude
     
-    logger.info(f"Opening HEALPix file: {input_file}")
-    ds = xr.open_dataset(input_file, chunks='auto')
+    ds = _load_and_ensure_healpix(input_file)
     
     out_ds = extract_along_latitude(ds, lat=lat, num_lons=num_lons)
     
@@ -80,8 +111,7 @@ def extract_lon(input_file, output_file, lon, num_lats):
     import xarray as xr
     from .extract import extract_along_longitude
     
-    logger.info(f"Opening HEALPix file: {input_file}")
-    ds = xr.open_dataset(input_file, chunks='auto')
+    ds = _load_and_ensure_healpix(input_file)
     out_ds = extract_along_longitude(ds, lon=lon, num_lats=num_lats)
     logger.info(f"Computing and saving extracted data to {output_file}")
     out_ds.compute().to_netcdf(output_file)
@@ -99,8 +129,7 @@ def extract_point(input_file, output_file, lat, lon):
     import xarray as xr
     from .extract import extract_point as ep
     
-    logger.info(f"Opening HEALPix file: {input_file}")
-    ds = xr.open_dataset(input_file, chunks='auto')
+    ds = _load_and_ensure_healpix(input_file)
     out_ds = ep(ds, lat=lat, lon=lon)
     logger.info(f"Computing and saving extracted data to {output_file}")
     out_ds.compute().to_netcdf(output_file)
@@ -116,8 +145,7 @@ def zonal_mean(input_file, output_file):
     import xarray as xr
     from .extract import zonal_mean as zm
     
-    logger.info(f"Opening HEALPix file: {input_file}")
-    ds = xr.open_dataset(input_file, chunks='auto')
+    ds = _load_and_ensure_healpix(input_file)
     out_ds = zm(ds)
     logger.info(f"Computing and saving zonal mean to {output_file}")
     out_ds.compute().to_netcdf(output_file)
@@ -137,8 +165,7 @@ def spectrum(input_file, output_file, var_name, lmax):
     import xarray as xr
     from .analysis import compute_spectrum
     
-    logger.info(f"Opening HEALPix file: {input_file}")
-    ds = xr.open_dataset(input_file, chunks='auto')
+    ds = _load_and_ensure_healpix(input_file)
     out_ds = compute_spectrum(ds, var_name=var_name, lmax=lmax)
     logger.info(f"Computing and saving spectrum to {output_file}")
     out_ds.compute().to_netcdf(output_file)
@@ -158,8 +185,7 @@ def filter(input_file, output_file, fwhm, lmax):
     import xarray as xr
     from .analysis import filter_spatial
     
-    logger.info(f"Opening HEALPix file: {input_file}")
-    ds = xr.open_dataset(input_file, chunks='auto')
+    ds = _load_and_ensure_healpix(input_file)
     out_ds = filter_spatial(ds, fwhm_deg=fwhm, lmax=lmax)
     logger.info(f"Computing and saving filtered data to {output_file}")
     out_ds.compute().to_netcdf(output_file)
@@ -177,9 +203,14 @@ def regrade(input_file, output_file, nside):
     import xarray as xr
     from .analysis import regrade_resolution
     
-    logger.info(f"Opening HEALPix file: {input_file}")
-    ds = xr.open_dataset(input_file, chunks='auto')
-    out_ds = regrade_resolution(ds, new_nside=nside)
+    ds = _load_and_ensure_healpix(input_file, target_nside=nside)
+    
+    # Check if we still need to regrade (if auto-interp already hit nside, skip ud_grade to save time)
+    import healpy as hp
+    if 'cell' in ds.dims and ds.sizes['cell'] == hp.nside2npix(nside):
+        out_ds = ds
+    else:
+        out_ds = regrade_resolution(ds, new_nside=nside)
     logger.info(f"Computing and saving regraded data to {output_file}")
     out_ds.compute().to_netcdf(output_file)
     logger.info("Done.")
@@ -197,8 +228,7 @@ def calc_vorticity(input_file, output_file, u_var, v_var, lmax):
     import xarray as xr
     from .analysis import compute_vorticity_divergence
     
-    logger.info(f"Opening HEALPix file: {input_file}")
-    ds = xr.open_dataset(input_file, chunks='auto')
+    ds = _load_and_ensure_healpix(input_file)
     out_ds = compute_vorticity_divergence(ds, u_var=u_var, v_var=v_var, lmax=lmax)
     logger.info(f"Computing and saving vorticity/divergence to {output_file}")
     out_ds.compute().to_netcdf(output_file)

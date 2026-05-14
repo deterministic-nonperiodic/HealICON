@@ -1,6 +1,6 @@
 import xarray as xr
 from healicon.interpolate import interpolate_to_healpix
-from healicon.analysis import filter_spatial
+from healicon.analysis import filter_spatial, degree_to_wavelength
 from plot import plot_quicklook
 import os
 
@@ -36,6 +36,9 @@ def main():
     save_path = "u_wind_filtered_comparison_lmax.png"
     print(f"Generating quicklook plot and saving to {save_path}...")
     
+    # Calculate equivalent wavelength cutoff
+    wavelength_km = degree_to_wavelength(lmax)
+    
     plot_quicklook(
         ds_interp, 
         ds_filtered, 
@@ -45,7 +48,7 @@ def main():
         save_path=save_path,
         plot_nodes=False,
         orig_title=f'Unfiltered HEALPix (nside={nside})',
-        interp_title=f'Filtered HEALPix (lmax={lmax})'
+        interp_title=f'Filtered HEALPix (lmax={lmax}, $\\lambda \\geq$ {wavelength_km:.0f} km)'
     )
     
     print("Done!")

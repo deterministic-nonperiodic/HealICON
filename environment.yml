@@ -1,0 +1,23 @@
+name: healicon
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.9
+  - xarray
+  - dask
+  - netcdf4
+  - healpy
+  - numpy
+  - scipy
+  - pyyaml
+  - click
+  - pip
+  
+  # Visualization and testing (optional but recommended)
+  - matplotlib
+  - cartopy
+  - pytest
+  
+  # Note: GPU acceleration (cuml, cupy) requires the RAPIDS channels
+  # or can be installed separately based on your specific CUDA version.

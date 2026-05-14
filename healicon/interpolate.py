@@ -301,6 +301,9 @@ def interpolate_to_healpix(ds: xr.Dataset, nside: int, use_gpu: bool = False) ->
     for var in out_ds.data_vars:
         if var != 'healpix':
             out_ds[var].attrs['grid_mapping'] = 'healpix'
+            # Remove obsolete CDI grid attributes if present
+            out_ds[var].attrs.pop('CDI_grid_type', None)
+            out_ds[var].attrs.pop('number_of_grid_in_reference', None)
     
     history_msg = f"Interpolated to HEALPix grid (nside={nside}, scheme=RING) using HealICON."
     if 'history' in out_ds.attrs:

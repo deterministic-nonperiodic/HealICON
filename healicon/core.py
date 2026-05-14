@@ -1,10 +1,10 @@
 import glob
 import logging
+import math
 import os
 from typing import Optional
 
 import dask
-import math
 import xarray as xr
 
 from .config import load_variable_mapping, apply_cf_conventions

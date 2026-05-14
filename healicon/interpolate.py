@@ -244,7 +244,8 @@ def interpolate_to_healpix(ds: xr.Dataset, nside: int = None, use_gpu: bool = Fa
             n_orig *= ds.sizes[dim]
         target_nside = math.sqrt(n_orig / 12)
         nside = 2 ** round(math.log2(max(1, target_nside)))
-        logger.info(f"Auto-calculated nside={nside} based on original grid size ({n_orig} spatial points)")
+        logger.info(
+            f"Auto-calculated nside={nside} based on original grid size ({n_orig} spatial points)")
     lon_name = _find_cf_coordinate(ds, "longitude", ["lon", "longitude", "clon"])
     lat_name = _find_cf_coordinate(ds, "latitude", ["lat", "latitude", "clat"])
 

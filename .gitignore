@@ -18,6 +18,7 @@ coverage.xml
 *.cover
 *.log
 .pytest_cache/
+.idea/
 
 # Distributions
 build/

@@ -9,7 +9,8 @@ logger = logging.getLogger(__name__)
 
 def plot_quicklook(ds_orig: xr.Dataset, ds_interp: xr.Dataset, var_name: str,
                    height_idx: int = 0, time_idx: int = 0, save_path: str = None,
-                   plot_nodes: bool = False, node_subsample: int = 10, orig_title: str = 'Original Grid'):
+                   plot_nodes: bool = False, node_subsample: int = 10, 
+                   orig_title: str = 'Original Grid', interp_title: str = None):
     """
     Plots a side-by-side comparison of the original dataset and the interpolated HEALPix dataset.
     
@@ -97,13 +98,17 @@ def plot_quicklook(ds_orig: xr.Dataset, ds_interp: xr.Dataset, var_name: str,
         lat_min = np.nanmin(lat_orig)
         lat_max = np.nanmax(lat_orig)
         
-        # Add a small buffer to the extent
-        lon_buffer = (lon_max - lon_min) * 0.05 if lon_max > lon_min else 1.0
-        lat_buffer = (lat_max - lat_min) * 0.05 if lat_max > lat_min else 1.0
-        
-        extent = [lon_min - lon_buffer, lon_max + lon_buffer, lat_min - lat_buffer, lat_max + lat_buffer]
-        ax1.set_extent(extent, crs=ccrs.PlateCarree())
-        ax2.set_extent(extent, crs=ccrs.PlateCarree())
+        if (lon_max - lon_min) > 350:
+            ax1.set_global()
+            ax2.set_global()
+        else:
+            # Add a small buffer to the extent
+            lon_buffer = (lon_max - lon_min) * 0.05 if lon_max > lon_min else 1.0
+            lat_buffer = (lat_max - lat_min) * 0.05 if lat_max > lat_min else 1.0
+            
+            extent = [lon_min - lon_buffer, lon_max + lon_buffer, lat_min - lat_buffer, lat_max + lat_buffer]
+            ax1.set_extent(extent, crs=ccrs.PlateCarree())
+            ax2.set_extent(extent, crs=ccrs.PlateCarree())
         
         if len(ds_orig[lon_name].dims) == 1 and ds_orig[lon_name].dims[0] == lon_name:
             # Regular Grid
@@ -124,7 +129,10 @@ def plot_quicklook(ds_orig: xr.Dataset, ds_interp: xr.Dataset, var_name: str,
     nside = int(np.sqrt(npix / 12))
     
     # Plot Interpolated (HEALPix is unstructured)
-    ax2.set_title(f'HEALPix Grid (nside={nside})', fontsize=14, pad=10)
+    if interp_title is None:
+        ax2.set_title(f'HEALPix Grid (nside={nside})', fontsize=14, pad=10)
+    else:
+        ax2.set_title(interp_title, fontsize=14, pad=10)
     
     lon_interp = ds_interp['lon'].values
     lat_interp = ds_interp['lat'].values

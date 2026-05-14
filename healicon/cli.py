@@ -196,13 +196,21 @@ def filter(input_file, output_file, fwhm, lmax):
               help='Input HEALPix NetCDF file.')
 @click.option('-o', '--output', 'output_file', required=True,
               help='Output NetCDF file.')
-@click.option('-n', '--nside', type=int, required=True,
+@click.option('-n', '--nside', type=int, default=None,
               help='Target nside for the resolution change.')
-def regrade(input_file, output_file, nside):
+@click.option('-z', '--zoom', type=int, default=None,
+              help='Target zoom level (refinement), where nside = 2**zoom.')
+def regrade(input_file, output_file, nside, zoom):
     """Upgrade or downgrade the HEALPix resolution."""
     import xarray as xr
+    import click
     from .analysis import regrade_resolution
     
+    if nside is None and zoom is None:
+        raise click.UsageError("You must provide either --nside or --zoom.")
+    if zoom is not None:
+        nside = 2 ** zoom
+        
     ds = _load_and_ensure_healpix(input_file, target_nside=nside)
     
     # Check if we still need to regrade (if auto-interp already hit nside, skip ud_grade to save time)

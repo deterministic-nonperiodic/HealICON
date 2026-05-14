@@ -1,5 +1,7 @@
-import click
 import logging
+
+import click
+
 from .core import run_sequential
 
 logging.basicConfig(
@@ -9,19 +11,21 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
 @click.group()
 def cli():
     """HealICON: Interpolate atmospheric model outputs to HEALPix grid."""
     pass
 
+
 def _load_and_ensure_healpix(input_file, target_nside=None):
     import xarray as xr
     import healpy as hp
     from .interpolate import interpolate_to_healpix
-    
+
     logger.info(f"Opening file: {input_file}")
     ds = xr.open_dataset(input_file, chunks='auto')
-    
+
     is_healpix = False
     if 'cell' in ds.dims:
         npix = ds.sizes['cell']
@@ -31,23 +35,24 @@ def _load_and_ensure_healpix(input_file, target_nside=None):
                 is_healpix = True
         except Exception:
             pass
-            
+
     if ds.attrs.get('healpix_scheme') == 'RING':
         is_healpix = True
-        
+
     for var in ds.data_vars:
         if ds[var].attrs.get('grid_mapping') == 'healpix':
             is_healpix = True
             break
-            
+
     if not is_healpix:
         logger.info("Input dataset is not a HEALPix grid. Auto-interpolating first...")
         ds = interpolate_to_healpix(ds, nside=target_nside)
-        
+
     return ds
 
+
 @cli.command()
-@click.option('-i', '--input', 'input_pattern', required=True, 
+@click.option('-i', '--input', 'input_pattern', required=True,
               help='Input file pattern (e.g., "data/icon_*.nc"). Can include wildcards.')
 @click.option('-o', '--output', 'output_template', required=True,
               help='Output file template (e.g., "output_{basename}"). '
@@ -73,6 +78,7 @@ def convert(input_pattern, output_template, nside, config_path, grid_file, gpu):
         use_gpu=gpu
     )
 
+
 @cli.command()
 @click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
               help='Input HEALPix NetCDF file.')
@@ -86,16 +92,16 @@ def extract_lat(input_file, output_file, lat, num_lons):
     """
     Extract data along all longitudes for a specific latitude from a HEALPix dataset.
     """
-    import xarray as xr
     from .extract import extract_along_latitude
-    
+
     ds = _load_and_ensure_healpix(input_file)
-    
+
     out_ds = extract_along_latitude(ds, lat=lat, num_lons=num_lons)
-    
+
     logger.info(f"Computing and saving extracted data to {output_file}")
     out_ds.compute().to_netcdf(output_file)
     logger.info("Done.")
+
 
 @cli.command()
 @click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
@@ -108,14 +114,14 @@ def extract_lat(input_file, output_file, lat, num_lons):
               help='Number of latitude points to extract.')
 def extract_lon(input_file, output_file, lon, num_lats):
     """Extract data along all latitudes for a specific longitude."""
-    import xarray as xr
     from .extract import extract_along_longitude
-    
+
     ds = _load_and_ensure_healpix(input_file)
     out_ds = extract_along_longitude(ds, lon=lon, num_lats=num_lats)
     logger.info(f"Computing and saving extracted data to {output_file}")
     out_ds.compute().to_netcdf(output_file)
     logger.info("Done.")
+
 
 @cli.command()
 @click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
@@ -126,14 +132,14 @@ def extract_lon(input_file, output_file, lon, num_lats):
 @click.option('--lon', type=float, required=True, help='Target longitude.')
 def extract_point(input_file, output_file, lat, lon):
     """Extract full time/height profile for a specific lat/lon point."""
-    import xarray as xr
     from .extract import extract_point as ep
-    
+
     ds = _load_and_ensure_healpix(input_file)
     out_ds = ep(ds, lat=lat, lon=lon)
     logger.info(f"Computing and saving extracted data to {output_file}")
     out_ds.compute().to_netcdf(output_file)
     logger.info("Done.")
+
 
 @cli.command()
 @click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
@@ -142,14 +148,14 @@ def extract_point(input_file, output_file, lat, lon):
               help='Output NetCDF file.')
 def zonal_mean(input_file, output_file):
     """Compute the zonal mean (longitude average) across HEALPix rings."""
-    import xarray as xr
     from .extract import zonal_mean as zm
-    
+
     ds = _load_and_ensure_healpix(input_file)
     out_ds = zm(ds)
     logger.info(f"Computing and saving zonal mean to {output_file}")
     out_ds.compute().to_netcdf(output_file)
     logger.info("Done.")
+
 
 @cli.command()
 @click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
@@ -162,14 +168,14 @@ def zonal_mean(input_file, output_file):
               help='Maximum spherical harmonic degree l.')
 def spectrum(input_file, output_file, var_name, lmax):
     """Compute the angular power spectrum (Cl) of a variable."""
-    import xarray as xr
     from .analysis import compute_spectrum
-    
+
     ds = _load_and_ensure_healpix(input_file)
     out_ds = compute_spectrum(ds, var_name=var_name, lmax=lmax)
     logger.info(f"Computing and saving spectrum to {output_file}")
     out_ds.compute().to_netcdf(output_file)
     logger.info("Done.")
+
 
 @cli.command()
 @click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
@@ -182,14 +188,14 @@ def spectrum(input_file, output_file, var_name, lmax):
               help='Hard low-pass spectral cutoff at degree l.')
 def filter(input_file, output_file, fwhm, lmax):
     """Filter spatial maps using spherical harmonic transforms."""
-    import xarray as xr
     from .analysis import filter_spatial
-    
+
     ds = _load_and_ensure_healpix(input_file)
     out_ds = filter_spatial(ds, fwhm_deg=fwhm, lmax=lmax)
     logger.info(f"Computing and saving filtered data to {output_file}")
     out_ds.compute().to_netcdf(output_file)
     logger.info("Done.")
+
 
 @cli.command()
 @click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
@@ -202,17 +208,15 @@ def filter(input_file, output_file, fwhm, lmax):
               help='Target zoom level (refinement), where nside = 2**zoom.')
 def regrade(input_file, output_file, nside, zoom):
     """Upgrade or downgrade the HEALPix resolution."""
-    import xarray as xr
-    import click
     from .analysis import regrade_resolution
-    
+
     if nside is None and zoom is None:
         raise click.UsageError("You must provide either --nside or --zoom.")
     if zoom is not None:
         nside = 2 ** zoom
-        
+
     ds = _load_and_ensure_healpix(input_file, target_nside=nside)
-    
+
     # Check if we still need to regrade (if auto-interp already hit nside, skip ud_grade to save time)
     import healpy as hp
     if 'cell' in ds.dims and ds.sizes['cell'] == hp.nside2npix(nside):
@@ -222,6 +226,7 @@ def regrade(input_file, output_file, nside, zoom):
     logger.info(f"Computing and saving regraded data to {output_file}")
     out_ds.compute().to_netcdf(output_file)
     logger.info("Done.")
+
 
 @cli.command()
 @click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
@@ -233,14 +238,14 @@ def regrade(input_file, output_file, nside, zoom):
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
 def calc_vorticity(input_file, output_file, u_var, v_var, lmax):
     """Compute horizontal vorticity and divergence from U and V components."""
-    import xarray as xr
     from .analysis import compute_vorticity_divergence
-    
+
     ds = _load_and_ensure_healpix(input_file)
     out_ds = compute_vorticity_divergence(ds, u_var=u_var, v_var=v_var, lmax=lmax)
     logger.info(f"Computing and saving vorticity/divergence to {output_file}")
     out_ds.compute().to_netcdf(output_file)
     logger.info("Done.")
+
 
 if __name__ == '__main__':
     cli()

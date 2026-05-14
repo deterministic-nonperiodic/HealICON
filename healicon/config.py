@@ -1,5 +1,6 @@
 import yaml
 
+
 def load_variable_mapping(config_path: str) -> dict:
     """
     Load a YAML configuration file containing variable mappings.
@@ -10,11 +11,12 @@ def load_variable_mapping(config_path: str) -> dict:
     """
     if config_path is None:
         return {}
-    
+
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-        
+
     return config.get('variables', {})
+
 
 def apply_cf_conventions(ds):
     """

@@ -5,6 +5,39 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+EARTH_RADIUS_KM = 6371.229
+
+def degree_to_wavelength(l, radius=EARTH_RADIUS_KM):
+    """
+    Converts spherical harmonic degree l to characteristic wavelength (scale).
+    
+    Args:
+        l: Spherical harmonic degree (scalar or array)
+        radius: Radius of the sphere (defaults to Earth radius 6371.229 km)
+        
+    Returns:
+        Wavelength matching the units of radius (km).
+    """
+    # Avoid division by zero for l=0
+    l_safe = np.maximum(l, 1e-10)
+    return (2 * np.pi * radius) / np.sqrt(l_safe * (l_safe + 1))
+
+def wavelength_to_degree(wavelength, radius=EARTH_RADIUS_KM):
+    """
+    Converts characteristic wavelength (scale) to spherical harmonic degree l.
+    
+    Args:
+        wavelength: Characteristic wavelength in same units as radius
+        radius: Radius of the sphere (defaults to Earth radius 6371.229 km)
+        
+    Returns:
+        Spherical harmonic degree l (float)
+    """
+    val = (2 * np.pi * radius) / wavelength
+    # Solve l^2 + l - val^2 = 0
+    return (-1.0 + np.sqrt(1.0 + 4.0 * val**2)) / 2.0
+
+
 def _anafast_block(data_block, lmax):
     orig_shape = data_block.shape
     npix = orig_shape[-1]

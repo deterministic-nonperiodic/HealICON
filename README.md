@@ -9,15 +9,20 @@ HealICON is a command-line Python tool that efficiently interpolates atmospheric
 - **Variable Mapping**: Flexibly select and rename variables via CF conventions automatically, or via a simple YAML namelist configuration.
 - **CPU & GPU Acceleration**: Accelerated unstructured interpolation via SciPy `cKDTree` (CPU) or `cuml.NearestNeighbors` (GPU).
 - **Auto-Resolution**: If the `nside` parameter is omitted, `HealICON` automatically computes the closest HEALPix resolution matching the original spatial grid size.
-- **Latitudinal Extraction**: Use `extract-lat` to sample data along specific latitudes directly from HEALPix grids.
-- **Robust Coordinate Handling**: Automatically detects and converts coordinates from radians to degrees based on CF `units` metadata or fallback heuristics.
+- **Analysis Suite**: Includes spherical harmonic spectral analysis, spatial filtering, zonal averaging, and vector calculus (vorticity/divergence).
+- **Auto-Interpolation**: Analysis commands automatically detect raw model output (unstructured/regular) and seamlessly interpolate to HEALPix on the fly!
 - **SLURM Compatible**: Works perfectly within an `sbatch` job.
 
 ## Installation
 
-### Standard Installation
+To install via Conda (recommended):
+```bash
+conda env create -f environment.yml
+conda activate healicon
+pip install -e .
+```
 
-You can install `HealICON` directly from GitHub using `pip`:
+You can also install `HealICON` directly from GitHub using `pip`:
 
 ```bash
 pip install git+https://github.com/deterministic-nonperiodic/HealICON.git
@@ -96,15 +101,32 @@ If you have a GPU and `cuml` installed, you can enable GPU acceleration for the 
 healicon convert -i "data/icon_*.nc" -o "output/hp_{basename}" -n 128 --gpu
 ```
 
-### Extracting Latitudinal Slices
+### Analysis Suite
 
-You can extract data along all longitudes for a specific latitude directly from a processed HEALPix dataset using the `extract-lat` command.
+`HealICON` includes a powerful set of analysis tools that leverage `healpy` for spherical harmonic transforms. **Note:** If you pass a raw ICON native grid to any of these commands, it will automatically interpolate to HEALPix first!
 
 ```bash
-healicon extract-lat -i "output/hp_data.nc" -o "slice_45N.nc" -l 45.0 --num-lons 360
+# 1. Zonal Mean: Compute longitudinal averages over HEALPix latitude rings
+healicon zonal-mean -i "data.nc" -o "zonal.nc"
+
+# 2. Spectral Analysis: Compute angular power spectrum (C_l)
+healicon spectrum -i "data.nc" -o "spectrum.nc" -v u --lmax 256
+
+# 3. Spatial Filtering: Apply a Gaussian beam (FWHM) or hard spectral cutoff (lmax)
+healicon filter -i "data.nc" -o "filtered.nc" --fwhm 5.0
+healicon filter -i "data.nc" -o "filtered.nc" --lmax 15
+
+# 4. Vector Calculus: Compute vorticity and divergence perfectly from U/V
+healicon calc-vorticity -i "winds.nc" -o "vort.nc" --u u --v v
+
+# 5. Extraction: Extract slices or points instantly
+healicon extract-lat -i "data.nc" -o "slice_lat.nc" -l 45.0
+healicon extract-lon -i "data.nc" -o "slice_lon.nc" -l 180.0
+healicon extract-point -i "data.nc" -o "point.nc" --lat 45.0 --lon 10.0
+
+# 6. Regrade Resolution: Change HEALPix resolution using nside or zoom (nside=2^zoom)
+healicon regrade -i "data.nc" -o "regraded.nc" --zoom 6
 ```
-- `-l`, `--lat`: The target latitude in degrees.
-- `--num-lons`: Optional. Number of longitude points to sample. If omitted, it defaults to the total number of pixels (`npix`) in the HEALPix grid.
 
 ## Output Metadata
 

@@ -74,7 +74,7 @@ def extract_along_latitude(ds: xr.Dataset, lat: float, num_lons: int = None) -> 
                 output_core_dims=[['lon']],
                 dask="parallelized",
                 output_dtypes=[ds[var].dtype],
-                dask_gufunc_kwargs={'output_sizes': {'lon': len(lons)}}
+                dask_gufunc_kwargs={'output_sizes': {'lon': len(lons)}, 'allow_rechunk': True}
             )
             out_ds[var] = da
             
@@ -135,7 +135,7 @@ def extract_along_longitude(ds: xr.Dataset, lon: float, num_lats: int = None) ->
                 output_core_dims=[['lat']],
                 dask="parallelized",
                 output_dtypes=[ds[var].dtype],
-                dask_gufunc_kwargs={'output_sizes': {'lat': len(lats)}}
+                dask_gufunc_kwargs={'output_sizes': {'lat': len(lats)}, 'allow_rechunk': True}
             )
             out_ds[var] = da
             out_ds[var].attrs = ds[var].attrs
@@ -207,7 +207,7 @@ def zonal_mean(ds: xr.Dataset) -> xr.Dataset:
                 output_core_dims=[['lat']],
                 dask="parallelized",
                 output_dtypes=[ds[var].dtype],
-                dask_gufunc_kwargs={'output_sizes': {'lat': n_rings}}
+                dask_gufunc_kwargs={'output_sizes': {'lat': n_rings}, 'allow_rechunk': True}
             )
             out_ds[var] = da.assign_coords(lat=lats)
             out_ds[var].attrs = ds[var].attrs

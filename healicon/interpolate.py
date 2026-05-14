@@ -114,7 +114,7 @@ def interpolate_unstructured(ds: xr.Dataset, nside: int, source_lon_name: str, s
             exclude_dims=set((spatial_dim, "cell")),
             dask="parallelized",
             output_dtypes=[da.dtype],
-            dask_gufunc_kwargs={'output_sizes': {'cell': len(target_lon)}}
+            dask_gufunc_kwargs={'output_sizes': {'cell': len(target_lon)}, 'allow_rechunk': True}
         )
         # Assign coordinates
         interpolated_da = interpolated_da.assign_coords(cell=out_ds.cell, lon=out_ds.lon, lat=out_ds.lat)
@@ -191,7 +191,7 @@ def interpolate_regular(ds: xr.Dataset, nside: int, lon_name: str, lat_name: str
             exclude_dims=set((lat_name, lon_name)),
             dask="parallelized",
             output_dtypes=[da.dtype],
-            dask_gufunc_kwargs={'output_sizes': {'cell': len(target_lon)}}
+            dask_gufunc_kwargs={'output_sizes': {'cell': len(target_lon)}, 'allow_rechunk': True}
         )
         
         interpolated_da = interpolated_da.assign_coords(cell=out_ds.cell, lon=out_ds.lon, lat=out_ds.lat)

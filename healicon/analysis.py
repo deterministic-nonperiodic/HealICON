@@ -45,7 +45,7 @@ def compute_spectrum(ds: xr.Dataset, var_name: str, lmax: int = None) -> xr.Data
         output_core_dims=[['l']],
         dask="parallelized",
         output_dtypes=[ds[var_name].dtype],
-        dask_gufunc_kwargs={'output_sizes': {'l': len(l_coords)}}
+        dask_gufunc_kwargs={'output_sizes': {'l': len(l_coords)}, 'allow_rechunk': True}
     )
     
     out_ds = xr.Dataset(
@@ -111,7 +111,8 @@ def filter_spatial(ds: xr.Dataset, fwhm_deg: float = None, lmax: int = None) -> 
                 input_core_dims=[['cell']],
                 output_core_dims=[['cell']],
                 dask="parallelized",
-                output_dtypes=[ds[var].dtype]
+                output_dtypes=[ds[var].dtype],
+                dask_gufunc_kwargs={'allow_rechunk': True}
             )
             out_ds[var] = da
             out_ds[var].attrs = ds[var].attrs
@@ -174,7 +175,7 @@ def regrade_resolution(ds: xr.Dataset, new_nside: int) -> xr.Dataset:
                 exclude_dims=set(('cell',)),
                 dask="parallelized",
                 output_dtypes=[ds[var].dtype],
-                dask_gufunc_kwargs={'output_sizes': {'cell': new_npix}}
+                dask_gufunc_kwargs={'output_sizes': {'cell': new_npix}, 'allow_rechunk': True}
             )
             out_ds[var] = da.assign_coords(cell=out_ds.cell, lon=out_ds.lon, lat=out_ds.lat)
             out_ds[var].attrs = ds[var].attrs
@@ -255,7 +256,8 @@ def compute_vorticity_divergence(ds: xr.Dataset, u_var: str, v_var: str, lmax: i
         input_core_dims=[['cell'], ['cell']],
         output_core_dims=[['cell'], ['cell']],
         dask="parallelized",
-        output_dtypes=[ds[u_var].dtype, ds[v_var].dtype]
+        output_dtypes=[ds[u_var].dtype, ds[v_var].dtype],
+        dask_gufunc_kwargs={'allow_rechunk': True}
     )
     
     out_ds = xr.Dataset(coords=ds.coords)

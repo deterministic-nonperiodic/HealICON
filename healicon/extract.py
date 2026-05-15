@@ -80,14 +80,13 @@ def extract_along_latitude(ds: xr.Dataset, lat: float, num_lons: int = None) -> 
                 dask_gufunc_kwargs={'output_sizes': {'lon': len(lons)}, 'allow_rechunk': True}
             )
             out_ds[var] = da
-
-            # Carry over attributes
             out_ds[var].attrs = ds[var].attrs
 
-            # Carry over non-spatial coords
+            # Carry over non-spatial coords (e.g. time, height)
             for coord in ds[var].coords:
                 if coord not in ['cell', 'lon', 'lat'] and coord in ds.coords:
                     out_ds.coords[coord] = ds.coords[coord]
+        else:
             out_ds[var] = ds[var]
             out_ds[var].attrs = ds[var].attrs
 
@@ -198,9 +197,10 @@ def zonal_mean(ds: xr.Dataset) -> xr.Dataset:
     ring_indices = hp.pix2ring(nside, np.arange(npix)) - 1
     theta, _ = hp.pix2ang(nside, np.arange(npix))
 
-    lats = np.zeros(n_rings)
-    for i in range(n_rings):
-        lats[i] = 90.0 - np.rad2deg(theta[ring_indices == i][0])
+    # Vectorized: for each ring, pick the colatitude of the first pixel in that ring
+    sort_order = np.argsort(ring_indices, kind='stable')
+    ring_first = np.searchsorted(ring_indices[sort_order], np.arange(n_rings))
+    lats = 90.0 - np.rad2deg(theta[sort_order[ring_first]])
 
     out_ds = xr.Dataset(coords={'lat': lats})
     out_ds.lat.attrs = {"standard_name": "latitude", "units": "degrees_north"}

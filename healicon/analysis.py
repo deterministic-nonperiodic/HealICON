@@ -90,6 +90,14 @@ def compute_spectrum(ds: xr.Dataset, var_name: str, lmax: int = None) -> xr.Data
         coords={'l': l_coords}
     )
 
+    # Attach wavelength as a secondary coordinate on l for convenience
+    wavelength_km = degree_to_wavelength(np.maximum(l_coords, 1))  # avoid l=0 singularity
+    out_ds = out_ds.assign_coords(wavelength_km=('l', wavelength_km))
+    out_ds['wavelength_km'].attrs = {
+        'long_name': 'Equivalent wavelength',
+        'units': 'km',
+    }
+
     for coord in ds[var_name].coords:
         if coord not in ['cell', 'l', 'lat', 'lon'] and coord in ds.coords:
             out_ds.coords[coord] = ds.coords[coord]
@@ -106,6 +114,8 @@ def compute_spectrum(ds: xr.Dataset, var_name: str, lmax: int = None) -> xr.Data
 def _filter_block(data_block, fwhm_rad, lmax):
     orig_shape = data_block.shape
     npix = orig_shape[-1]
+    # Cache nside once per block rather than re-computing per iteration
+    nside = hp.npix2nside(npix)
     data_2d = data_block.reshape(-1, npix)
 
     out_data = np.zeros_like(data_2d)
@@ -115,27 +125,44 @@ def _filter_block(data_block, fwhm_rad, lmax):
             out_data[i] = hp.smoothing(data_2d[i], fwhm=fwhm_rad)
         elif lmax is not None:
             alm = hp.map2alm(data_2d[i], lmax=lmax, iter=1)
-            out_data[i] = hp.alm2map(alm, nside=hp.npix2nside(npix))
+            out_data[i] = hp.alm2map(alm, nside=nside)
 
     return out_data.reshape(orig_shape)
 
 
-def filter_spatial(ds: xr.Dataset, fwhm_deg: float = None, lmax: int = None) -> xr.Dataset:
+def filter_spatial(ds: xr.Dataset, fwhm_deg: float = None, lmax: int = None,
+                   wavelength_km: float = None) -> xr.Dataset:
     """
-    Filters spatial data using spherical harmonics. 
-    Either via Gaussian smoothing (fwhm_deg) or a hard low-pass cutoff (lmax).
+    Filters spatial data using spherical harmonics.
+
+    Specify exactly one of:
+        fwhm_deg     : Full-width at half-maximum (degrees) for a Gaussian beam.
+        lmax         : Hard low-pass cutoff — retain only spherical harmonic degrees <= lmax.
+        wavelength_km: Hard low-pass cutoff expressed as a physical scale. Equivalent to
+                       passing lmax=int(wavelength_to_degree(wavelength_km)).
     """
     if 'cell' not in ds.dims:
         raise ValueError("Dataset must have a 'cell' dimension.")
 
-    if (fwhm_deg is None and lmax is None) or (fwhm_deg is not None and lmax is not None):
-        raise ValueError("Must specify exactly one of: fwhm_deg or lmax.")
+    n_specified = sum(x is not None for x in [fwhm_deg, lmax, wavelength_km])
+    if n_specified != 1:
+        raise ValueError("Must specify exactly one of: fwhm_deg, lmax, or wavelength_km.")
+
+    # Convert wavelength_km → lmax so the rest of the code is unchanged
+    if wavelength_km is not None:
+        lmax = int(wavelength_to_degree(wavelength_km))
+        logger.info(
+            f"Converting wavelength {wavelength_km} km to lmax={lmax} for hard spectral cutoff."
+        )
 
     fwhm_rad = np.deg2rad(fwhm_deg) if fwhm_deg is not None else None
 
     if fwhm_deg is not None:
         logger.info(f"Applying Gaussian smoothing filter with FWHM = {fwhm_deg} degrees.")
         hist_msg = f"Filtered using Gaussian smoothing (FWHM={fwhm_deg} deg)."
+    elif wavelength_km is not None:
+        logger.info(f"Applying hard spectral low-pass filter at {wavelength_km} km (lmax={lmax}).")
+        hist_msg = f"Filtered using hard spectral cutoff at {wavelength_km} km (lmax={lmax})."
     else:
         logger.info(f"Applying hard spectral low-pass filter with lmax = {lmax}.")
         hist_msg = f"Filtered using hard spectral cutoff (lmax={lmax})."

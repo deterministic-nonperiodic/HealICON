@@ -168,12 +168,18 @@ def zonal_mean(input_file, output_file):
               help='Maximum spherical harmonic degree l.')
 def spectrum(input_file, output_file, var_name, lmax):
     """Compute the angular power spectrum (Cl) of a variable."""
-    from .analysis import compute_spectrum
+    import healpy as hp
+    from .analysis import compute_spectrum, degree_to_wavelength
 
     ds = _load_and_ensure_healpix(input_file)
     out_ds = compute_spectrum(ds, var_name=var_name, lmax=lmax)
     logger.info(f"Computing and saving spectrum to {output_file}")
-    out_ds.compute().to_netcdf(output_file)
+    out_ds = out_ds.compute()
+    # Log effective resolution after computing
+    actual_lmax = int(out_ds['l'].max())
+    nyquist_km = degree_to_wavelength(actual_lmax)
+    logger.info(f"Spectrum resolved up to lmax={actual_lmax} (~{nyquist_km:.0f} km Nyquist scale).")
+    out_ds.to_netcdf(output_file)
     logger.info("Done.")
 
 
@@ -185,13 +191,15 @@ def spectrum(input_file, output_file, var_name, lmax):
 @click.option('--fwhm', type=float, default=None,
               help='Full-width half-max in degrees for Gaussian smoothing.')
 @click.option('--lmax', type=int, default=None,
-              help='Hard low-pass spectral cutoff at degree l.')
-def filter(input_file, output_file, fwhm, lmax):
+              help='Hard low-pass spectral cutoff at spherical harmonic degree l.')
+@click.option('--wavelength', 'wavelength_km', type=float, default=None,
+              help='Hard low-pass spectral cutoff expressed as a physical wavelength in km.')
+def filter(input_file, output_file, fwhm, lmax, wavelength_km):
     """Filter spatial maps using spherical harmonic transforms."""
     from .analysis import filter_spatial
 
     ds = _load_and_ensure_healpix(input_file)
-    out_ds = filter_spatial(ds, fwhm_deg=fwhm, lmax=lmax)
+    out_ds = filter_spatial(ds, fwhm_deg=fwhm, lmax=lmax, wavelength_km=wavelength_km)
     logger.info(f"Computing and saving filtered data to {output_file}")
     out_ds.compute().to_netcdf(output_file)
     logger.info("Done.")

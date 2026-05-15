@@ -77,29 +77,19 @@ def process_file(
         drop_vars = [v for v in ds.variables if v not in all_vars and v not in ds.dims]
         ds = ds.drop_vars(drop_vars, errors='ignore')
 
-    # Ensure spatial dimensions are contiguous before interpolation!
-    # xarray.interp fails or returns NaNs if the interpolation dimensions are chunked.
+    # Rechunk: spatial dims fully contiguous, all others chunked by 1 (time, height, etc.)
     spatial_dims = []
-    if 'lon_name' in locals() and lon_name in ds:
-        spatial_dims.extend(ds[lon_name].dims)
-    if 'lat_name' in locals() and lat_name in ds:
-        for d in ds[lat_name].dims:
-            if d not in spatial_dims:
-                spatial_dims.append(d)
-
-    if not spatial_dims:
-        # Fallback securely:
-        for name in ["lon", "longitude", "clon", "lat", "latitude", "clat"]:
-            if name in ds.coords or name in ds.data_vars:
-                for dim in ds[name].dims:
-                    if dim not in spatial_dims:
-                        spatial_dims.append(dim)
+    for name in ["lon", "longitude", "clon", "lat", "latitude", "clat"]:
+        if name in ds.coords or name in ds.data_vars:
+            for dim in ds[name].dims:
+                if dim not in spatial_dims:
+                    spatial_dims.append(dim)
 
     if spatial_dims:
         chunk_dict = {dim: -1 for dim in spatial_dims}
         for dim in ds.dims:
             if dim not in spatial_dims:
-                chunk_dict[dim] = 1  # Chunk aggressively along time, level, etc.
+                chunk_dict[dim] = 1
         ds = ds.chunk(chunk_dict)
 
     if nside is None:

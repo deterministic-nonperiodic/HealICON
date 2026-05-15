@@ -55,7 +55,7 @@ def main():
         
     # 3. Plotting
     print("Generating plot...")
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(9, 6))
     
     l_values = ds_spc_orig['l'].values
     
@@ -71,6 +71,12 @@ def main():
     gauss_key = list(spectra.keys())[-1]
     plt.loglog(l_values[1:], spectra[gauss_key][1:], label=gauss_key,
                color='tab:purple', linewidth=2, linestyle='--')
+
+    # Noise floor: estimated from the mean of the top 10% of l in the unfiltered spectrum
+    n_tail = max(1, len(l_values) // 10)
+    noise_floor = np.mean(spectra['Unfiltered'][-n_tail:])
+    ax1 = plt.gca()
+    ax1.axhline(noise_floor, color='gray', linewidth=1.5, linestyle=':', label=f"Noise floor (~{noise_floor:.2e})")
 
     plt.title("Effect of Spectral Filtering on Kinetic Energy Spectrum ($u$ wind)", fontsize=14)
     plt.xlabel("Spherical Harmonic Degree (l)", fontsize=12)

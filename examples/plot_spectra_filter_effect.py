@@ -4,7 +4,7 @@ import xarray as xr
 import numpy as np
 
 from healicon.interpolate import interpolate_to_healpix
-from healicon.analysis import filter_spatial, compute_spectrum, wavelength_to_degree
+from healicon.analysis import filter_spatial, compute_spectrum, wavelength_to_degree, EARTH_RADIUS_KM
 
 def main():
     input_file = "UA-ICON_NWP_u_DOM01_ML_20250123T000000Z.nc"
@@ -42,7 +42,16 @@ def main():
         # Actually, compute_spectrum will just compute up to 3*nside-1 automatically
         ds_spc_filt = compute_spectrum(ds_filtered, var_name='u').compute()
         
-        spectra[f"Filtered < {scale} km (lmax={lmax_cutoff})"] = ds_spc_filt['u_cl'].values.flatten()
+        spectra[f"Hard cutoff $\\lambda \\geq$ {scale} km (lmax={lmax_cutoff})"] = ds_spc_filt['u_cl'].values.flatten()
+
+    # 2b. Gaussian filter at 1000 km FWHM for comparison
+    gauss_scale_km = 1000.0
+    # Convert km FWHM to degrees on the sphere
+    fwhm_deg = np.rad2deg(gauss_scale_km / EARTH_RADIUS_KM)
+    print(f"Applying Gaussian filter (FWHM={gauss_scale_km:.0f} km = {fwhm_deg:.2f} deg)...")
+    ds_gauss = filter_spatial(ds_hp, fwhm_deg=fwhm_deg).compute()
+    ds_spc_gauss = compute_spectrum(ds_gauss, var_name='u').compute()
+    spectra[f"Gaussian FWHM {gauss_scale_km:.0f} km"] = ds_spc_gauss['u_cl'].values.flatten()
         
     # 3. Plotting
     print("Generating plot...")
@@ -55,11 +64,15 @@ def main():
     
     colors = ['tab:red', 'tab:blue', 'tab:green']
     for idx, scale in enumerate(scales_km):
-        label = f"Filtered $\\ge$ {scale} km"
-        key = list(spectra.keys())[idx+1] # skip 'Unfiltered'
+        key = list(spectra.keys())[idx + 1]  # skip 'Unfiltered'
         plt.loglog(l_values[1:], spectra[key][1:], label=key, color=colors[idx], alpha=0.8)
 
-    plt.title("Effect of Hard Spectral Low-Pass Filtering on Kinetic Energy Spectrum", fontsize=14)
+    # Gaussian filter line — dashed to distinguish from hard cutoffs
+    gauss_key = list(spectra.keys())[-1]
+    plt.loglog(l_values[1:], spectra[gauss_key][1:], label=gauss_key,
+               color='tab:purple', linewidth=2, linestyle='--')
+
+    plt.title("Effect of Spectral Filtering on Kinetic Energy Spectrum ($u$ wind)", fontsize=14)
     plt.xlabel("Spherical Harmonic Degree (l)", fontsize=12)
     plt.ylabel("Angular Power Spectrum $C_l$", fontsize=12)
     plt.grid(True, which="both", ls="--", alpha=0.5)

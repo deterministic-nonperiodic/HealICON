@@ -244,8 +244,8 @@ def regrade(input_file, output_file, nside, zoom):
 @click.option('--u', 'u_var', required=True, help='Name of eastward wind variable.')
 @click.option('--v', 'v_var', required=True, help='Name of northward wind variable.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
-def calc_vorticity(input_file, output_file, u_var, v_var, lmax):
-    """Compute horizontal vorticity and divergence from U and V components."""
+def calc_kinematics(input_file, output_file, u_var, v_var, lmax):
+    """Compute horizontal divergence and vorticity from U and V wind components."""
     from .analysis import compute_vorticity_divergence
 
     ds = _load_and_ensure_healpix(input_file)

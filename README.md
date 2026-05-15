@@ -116,8 +116,8 @@ healicon spectrum -i "data.nc" -o "spectrum.nc" -v u --lmax 256
 healicon filter -i "data.nc" -o "filtered.nc" --fwhm 5.0
 healicon filter -i "data.nc" -o "filtered.nc" --lmax 15
 
-# 4. Vector Calculus: Compute vorticity and divergence perfectly from U/V
-healicon calc-vorticity -i "winds.nc" -o "vort.nc" --u u --v v
+# 4. Vector Calculus: Compute divergence and vorticity from U/V
+healicon calc-kinematics -i "winds.nc" -o "kinematics.nc" --u u --v v
 
 # 5. Extraction: Extract slices or points instantly
 healicon extract-lat -i "data.nc" -o "slice_lat.nc" -l 45.0

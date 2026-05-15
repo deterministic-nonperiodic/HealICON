@@ -255,5 +255,34 @@ def calc_kinematics(input_file, output_file, u_var, v_var, lmax):
     logger.info("Done.")
 
 
+@cli.command()
+@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
+              help='Input file (HEALPix or native grid).')
+@click.option('-o', '--output', 'output_file', required=True,
+              help='Output NetCDF file.')
+@click.option('--u', 'u_var', required=True, help='Name of eastward wind variable.')
+@click.option('--v', 'v_var', required=True, help='Name of northward wind variable.')
+@click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
+@click.option('--psi/--no-psi', default=True, show_default=True,
+              help='Include streamfunction ψ [m² s⁻¹] in output.')
+@click.option('--chi/--no-chi', default=True, show_default=True,
+              help='Include velocity potential χ [m² s⁻¹] in output.')
+def helmholtz(input_file, output_file, u_var, v_var, lmax, psi, chi):
+    """Helmholtz decomposition: split wind into rotational and divergent components.
+
+    Outputs u_rot, v_rot (rotational wind) and u_div, v_div (divergent wind).
+    Optionally also computes the streamfunction (--psi) and velocity potential
+    (--chi), both in units of m² s⁻¹.
+    """
+    from .analysis import compute_helmholtz
+
+    ds = _load_and_ensure_healpix(input_file)
+    out_ds = compute_helmholtz(ds, u_var=u_var, v_var=v_var, lmax=lmax,
+                                include_psi=psi, include_chi=chi)
+    logger.info(f"Computing and saving Helmholtz decomposition to {output_file}")
+    out_ds.compute().to_netcdf(output_file)
+    logger.info("Done.")
+
+
 if __name__ == '__main__':
     cli()

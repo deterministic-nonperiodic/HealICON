@@ -267,6 +267,178 @@ def regrade_resolution(ds: xr.Dataset, new_nside: int) -> xr.Dataset:
     return out_ds
 
 
+# Earth radius in metres (used to scale streamfunction / velocity potential to m²/s)
+_EARTH_RADIUS_M = EARTH_RADIUS_KM * 1e3
+
+
+def _helmholtz_block(u_block, v_block, lmax, nside):
+    """
+    Helmholtz decomposition of a single block of wind data.
+
+    Returns 6 maps, always in this order:
+        u_rot, v_rot  – rotational (non-divergent) wind  [m/s]
+        u_div, v_div  – divergent  (irrotational)  wind  [m/s]
+        psi           – streamfunction                    [m²/s]
+        chi           – velocity potential               [m²/s]
+
+    Method (healpy spin-1 SHT):
+      1. map2alm_spin([−v, u], spin=1) → almE (divergent mode), almB (rotational mode)
+      2. Rotational wind  ← alm2map_spin([0,   almB], spin=1)
+         Divergent  wind  ← alm2map_spin([almE, 0  ], spin=1)
+      3. ψ_lm = −almB_lm / √[l(l+1)]   → alm2map → × a
+         χ_lm =  almE_lm / √[l(l+1)]   → alm2map → × a
+    """
+    orig_shape = u_block.shape
+    npix = orig_shape[-1]
+
+    u_2d = u_block.reshape(-1, npix)
+    v_2d = v_block.reshape(-1, npix)
+    n = u_2d.shape[0]
+
+    u_rot = np.zeros_like(u_2d)
+    v_rot = np.zeros_like(u_2d)
+    u_div = np.zeros_like(u_2d)
+    v_div = np.zeros_like(u_2d)
+    psi   = np.zeros_like(u_2d)
+    chi   = np.zeros_like(u_2d)
+
+    l_arr, _ = hp.Alm.getlm(lmax)
+    fl = np.sqrt(l_arr * (l_arr + 1.0))
+    # Safe denominator: avoid division by zero at l=0 (monopole, physically meaningless for wind)
+    fl_safe = np.where(l_arr > 0, fl, 1.0)
+    zeros = np.zeros(len(l_arr), dtype=np.complex128)
+
+    for i in range(n):
+        v_theta = -v_2d[i]   # healpy: theta points South  →  v points North  → v_theta = -v
+        v_phi   =  u_2d[i]   # healpy: phi   points East   →  u points East   → v_phi   =  u
+
+        almE, almB = hp.map2alm_spin([v_theta, v_phi], spin=1, lmax=lmax)
+
+        # Rotational wind: keep only B-mode
+        m_rot = hp.alm2map_spin([zeros.copy(), almB], nside, 1, lmax=lmax)
+        u_rot[i] =  m_rot[1]   # v_phi   →  u
+        v_rot[i] = -m_rot[0]   # -v_theta →  v
+
+        # Divergent wind: keep only E-mode
+        m_div = hp.alm2map_spin([almE, zeros.copy()], nside, 1, lmax=lmax)
+        u_div[i] =  m_div[1]
+        v_div[i] = -m_div[0]
+
+        # Streamfunction ψ: ζ = ∇²ψ  →  ψ_lm = -almB_lm / fl  (× a for m²/s)
+        psi_alm = np.where(l_arr > 0, -almB / fl_safe, 0.0 + 0.0j)
+        psi[i] = hp.alm2map(psi_alm, nside, lmax=lmax) * _EARTH_RADIUS_M
+
+        # Velocity potential χ: D = ∇²χ  →  χ_lm = almE_lm / fl  (× a for m²/s)
+        chi_alm = np.where(l_arr > 0, almE / fl_safe, 0.0 + 0.0j)
+        chi[i] = hp.alm2map(chi_alm, nside, lmax=lmax) * _EARTH_RADIUS_M
+
+    s = orig_shape
+    return (u_rot.reshape(s), v_rot.reshape(s),
+            u_div.reshape(s), v_div.reshape(s),
+            psi.reshape(s),   chi.reshape(s))
+
+
+def compute_helmholtz(ds: xr.Dataset, u_var: str, v_var: str,
+                      lmax: int = None,
+                      include_psi: bool = True,
+                      include_chi: bool = True) -> xr.Dataset:
+    """
+    Helmholtz decomposition of horizontal wind (u, v) on a HEALPix sphere.
+
+    The wind is split into:
+        rotational (non-divergent) component  →  u_rot, v_rot
+        divergent  (irrotational)  component  →  u_div, v_div
+
+    Optionally:
+        streamfunction    ψ  [m²/s]  (include_psi=True)
+        velocity potential χ  [m²/s]  (include_chi=True)
+
+    Args:
+        ds         : HEALPix xr.Dataset with a 'cell' dimension.
+        u_var      : Name of the eastward  wind variable.
+        v_var      : Name of the northward wind variable.
+        lmax       : Maximum spherical harmonic degree (default: 3*nside-1).
+        include_psi: Include streamfunction in the output.
+        include_chi: Include velocity potential in the output.
+
+    Returns:
+        xr.Dataset containing u_rot, v_rot, u_div, v_div, and optionally ψ, χ.
+    """
+    if 'cell' not in ds.dims:
+        raise ValueError("Dataset must have a 'cell' dimension.")
+
+    npix  = ds.sizes['cell']
+    nside = hp.npix2nside(npix)
+
+    if lmax is None:
+        lmax = 3 * nside - 1
+
+    logger.info(
+        f"Computing Helmholtz decomposition from '{u_var}' and '{v_var}' "
+        f"(lmax={lmax}, psi={include_psi}, chi={include_chi})."
+    )
+
+    dtype = ds[u_var].dtype
+    u_rot, v_rot, u_div, v_div, psi, chi = xr.apply_ufunc(
+        _helmholtz_block,
+        ds[u_var], ds[v_var],
+        kwargs={'lmax': lmax, 'nside': nside},
+        input_core_dims=[['cell'], ['cell']],
+        output_core_dims=[['cell']] * 6,
+        dask="parallelized",
+        output_dtypes=[dtype] * 6,
+        dask_gufunc_kwargs={'allow_rechunk': True}
+    )
+
+    coords = ds.coords
+    wind_attrs_base = {'units': ds[u_var].attrs.get('units', 'm s-1'), 'grid_mapping': 'healpix'}
+
+    out_ds = xr.Dataset(coords=coords)
+    out_ds['u_rot'] = u_rot.assign_coords(cell=ds.cell)
+    out_ds['u_rot'].attrs = {**wind_attrs_base,
+                              'long_name': 'Rotational (non-divergent) eastward wind'}
+    out_ds['v_rot'] = v_rot.assign_coords(cell=ds.cell)
+    out_ds['v_rot'].attrs = {**wind_attrs_base,
+                              'long_name': 'Rotational (non-divergent) northward wind'}
+    out_ds['u_div'] = u_div.assign_coords(cell=ds.cell)
+    out_ds['u_div'].attrs = {**wind_attrs_base,
+                              'long_name': 'Divergent (irrotational) eastward wind'}
+    out_ds['v_div'] = v_div.assign_coords(cell=ds.cell)
+    out_ds['v_div'].attrs = {**wind_attrs_base,
+                              'long_name': 'Divergent (irrotational) northward wind'}
+
+    if include_psi:
+        out_ds['psi'] = psi.assign_coords(cell=ds.cell)
+        out_ds['psi'].attrs = {
+            'standard_name': 'atmosphere_horizontal_streamfunction',
+            'long_name': 'Streamfunction',
+            'units': 'm2 s-1',
+            'grid_mapping': 'healpix',
+        }
+
+    if include_chi:
+        out_ds['chi'] = chi.assign_coords(cell=ds.cell)
+        out_ds['chi'].attrs = {
+            'standard_name': 'atmosphere_horizontal_velocity_potential',
+            'long_name': 'Velocity potential',
+            'units': 'm2 s-1',
+            'grid_mapping': 'healpix',
+        }
+
+    # Pass through any other variables unchanged
+    for var in ds.data_vars:
+        if var not in [u_var, v_var]:
+            out_ds[var] = ds[var]
+
+    out_ds.attrs = ds.attrs
+    history = ds.attrs.get('history', '')
+    sep = "\n" if history else ""
+    out_ds.attrs['history'] = (
+        f"{history}{sep}Helmholtz decomposition of ({u_var}, {v_var}), lmax={lmax}."
+    )
+    return out_ds
+
+
 def _vorticity_divergence_block(u_block, v_block, lmax, nside):
     # u_block, v_block shape (..., npix)
     orig_shape = u_block.shape

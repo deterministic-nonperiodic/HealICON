@@ -7,7 +7,7 @@ def get_healpix_coords(nside: int):
     """
     Generate longitude and latitude coordinates for a HEALPix grid.
     Returns:
-        lon: numpy array of longitudes in degrees [0, 360)
+        lon: numpy array of longitudes in degrees [0, 360]
         lat: numpy array of latitudes in degrees [-90, 90]
     """
     npix = hp.nside2npix(nside)

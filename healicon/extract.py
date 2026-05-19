@@ -23,7 +23,7 @@ def _interp_healpix(data, theta, phi):
     return interp_vals.reshape(out_shape)
 
 
-def extract_along_latitude(ds: xr.Dataset, lat: float, num_lons: int = None) -> xr.Dataset:
+def extract_along_latitude(ds: xr.Dataset, lat: float, num_lons: int | None = None) -> xr.Dataset:
     """
     Extracts data along all longitudes for a specific latitude from a HEALPix dataset.
     
@@ -100,7 +100,7 @@ def extract_along_latitude(ds: xr.Dataset, lat: float, num_lons: int = None) -> 
     return out_ds
 
 
-def extract_along_longitude(ds: xr.Dataset, lon: float, num_lats: int = None) -> xr.Dataset:
+def extract_along_longitude(ds: xr.Dataset, lon: float, num_lats: int | None = None) -> xr.Dataset:
     """
     Extracts data along all latitudes for a specific longitude from a HEALPix dataset.
     """

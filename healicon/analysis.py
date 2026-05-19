@@ -278,7 +278,7 @@ def _helmholtz_block(u_block, v_block, lmax, nside):
     Returns 6 maps, always in this order:
         u_rot, v_rot  – rotational (non-divergent) wind  [m/s]
         u_div, v_div  – divergent  (irrotational)  wind  [m/s]
-        psi           – streamfunction                    [m²/s]
+        psi           – streamfunction                   [m²/s]
         chi           – velocity potential               [m²/s]
 
     Method (healpy spin-1 SHT):
@@ -299,8 +299,8 @@ def _helmholtz_block(u_block, v_block, lmax, nside):
     v_rot = np.zeros_like(u_2d)
     u_div = np.zeros_like(u_2d)
     v_div = np.zeros_like(u_2d)
-    psi   = np.zeros_like(u_2d)
-    chi   = np.zeros_like(u_2d)
+    psi = np.zeros_like(u_2d)
+    chi = np.zeros_like(u_2d)
 
     l_arr, _ = hp.Alm.getlm(lmax)
     fl = np.sqrt(l_arr * (l_arr + 1.0))
@@ -309,19 +309,19 @@ def _helmholtz_block(u_block, v_block, lmax, nside):
     zeros = np.zeros(len(l_arr), dtype=np.complex128)
 
     for i in range(n):
-        v_theta = -v_2d[i]   # healpy: theta points South  →  v points North  → v_theta = -v
-        v_phi   =  u_2d[i]   # healpy: phi   points East   →  u points East   → v_phi   =  u
+        v_theta = -v_2d[i]  # healpy: theta points South  →  v points North  → v_theta = -v
+        v_phi = u_2d[i]  # healpy: phi   points East   →  u points East   → v_phi   =  u
 
         almE, almB = hp.map2alm_spin([v_theta, v_phi], spin=1, lmax=lmax)
 
         # Rotational wind: keep only B-mode
         m_rot = hp.alm2map_spin([zeros.copy(), almB], nside, 1, lmax=lmax)
-        u_rot[i] =  m_rot[1]   # v_phi   →  u
-        v_rot[i] = -m_rot[0]   # -v_theta →  v
+        u_rot[i] = m_rot[1]  # v_phi   →  u
+        v_rot[i] = -m_rot[0]  # -v_theta →  v
 
         # Divergent wind: keep only E-mode
         m_div = hp.alm2map_spin([almE, zeros.copy()], nside, 1, lmax=lmax)
-        u_div[i] =  m_div[1]
+        u_div[i] = m_div[1]
         v_div[i] = -m_div[0]
 
         # Streamfunction ψ: ζ = ∇²ψ  →  ψ_lm = -almB_lm / fl  (× a for m²/s)
@@ -335,11 +335,11 @@ def _helmholtz_block(u_block, v_block, lmax, nside):
     s = orig_shape
     return (u_rot.reshape(s), v_rot.reshape(s),
             u_div.reshape(s), v_div.reshape(s),
-            psi.reshape(s),   chi.reshape(s))
+            psi.reshape(s), chi.reshape(s))
 
 
 def compute_helmholtz(ds: xr.Dataset, u_var: str, v_var: str,
-                      lmax: int = None,
+                      lmax: int | None = None,
                       include_psi: bool = True,
                       include_chi: bool = True) -> xr.Dataset:
     """
@@ -367,7 +367,7 @@ def compute_helmholtz(ds: xr.Dataset, u_var: str, v_var: str,
     if 'cell' not in ds.dims:
         raise ValueError("Dataset must have a 'cell' dimension.")
 
-    npix  = ds.sizes['cell']
+    npix = ds.sizes['cell']
     nside = hp.npix2nside(npix)
 
     if lmax is None:
@@ -396,16 +396,16 @@ def compute_helmholtz(ds: xr.Dataset, u_var: str, v_var: str,
     out_ds = xr.Dataset(coords=coords)
     out_ds['u_rot'] = u_rot.assign_coords(cell=ds.cell)
     out_ds['u_rot'].attrs = {**wind_attrs_base,
-                              'long_name': 'Rotational (non-divergent) eastward wind'}
+                             'long_name': 'Rotational (non-divergent) eastward wind'}
     out_ds['v_rot'] = v_rot.assign_coords(cell=ds.cell)
     out_ds['v_rot'].attrs = {**wind_attrs_base,
-                              'long_name': 'Rotational (non-divergent) northward wind'}
+                             'long_name': 'Rotational (non-divergent) northward wind'}
     out_ds['u_div'] = u_div.assign_coords(cell=ds.cell)
     out_ds['u_div'].attrs = {**wind_attrs_base,
-                              'long_name': 'Divergent (irrotational) eastward wind'}
+                             'long_name': 'Divergent (irrotational) eastward wind'}
     out_ds['v_div'] = v_div.assign_coords(cell=ds.cell)
     out_ds['v_div'].attrs = {**wind_attrs_base,
-                              'long_name': 'Divergent (irrotational) northward wind'}
+                             'long_name': 'Divergent (irrotational) northward wind'}
 
     if include_psi:
         out_ds['psi'] = psi.assign_coords(cell=ds.cell)
@@ -478,7 +478,7 @@ def _vorticity_divergence_block(u_block, v_block, lmax, nside):
 
 
 def compute_vorticity_divergence(ds: xr.Dataset, u_var: str, v_var: str,
-                                 lmax: int = None) -> xr.Dataset:
+                                 lmax: int | None = None) -> xr.Dataset:
     """
     Computes horizontal vorticity and divergence from U and V wind components.
     """

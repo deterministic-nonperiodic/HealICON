@@ -66,7 +66,7 @@ def interpolate_unstructured(ds: xr.Dataset, nside: int, source_lon_name: str, s
     if use_gpu:
         try:
             import cuml
-            logger.info("Using cuML for KDTree.")
+            logger.info("Using cuML for KDTree with GPU support.")
             nn = cuml.neighbors.NearestNeighbors(n_neighbors=k)
             nn.fit(source_xyz)
             distances, indices = nn.kneighbors(target_xyz)
@@ -75,11 +75,16 @@ def interpolate_unstructured(ds: xr.Dataset, nside: int, source_lon_name: str, s
             if hasattr(distances, 'get'):
                 distances = distances.get()
                 indices = indices.get()
-        except ImportError:
-            logger.warning("cuML not found. Falling back to SciPy cKDTree for GPU execution.")
+        except Exception as e:
+            # Covers ImportError, CUDARuntimeError, and any other GPU initialisation failure
+            logger.warning(
+                f"GPU KDTree failed ({type(e).__name__}: {e}). "
+                "Falling back to SciPy cKDTree on CPU."
+            )
             from scipy.spatial import cKDTree
             tree = cKDTree(source_xyz)
             distances, indices = tree.query(target_xyz, k=k)
+
     else:
         logger.info("Using SciPy cKDTree for interpolation.")
         from scipy.spatial import cKDTree

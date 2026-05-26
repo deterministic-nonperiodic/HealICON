@@ -336,6 +336,16 @@ def interpolate_to_healpix(ds: xr.Dataset, nside: int = None, use_gpu: bool = Fa
         out_ds[var].attrs.pop('CDI_grid_type', None)
         out_ds[var].attrs.pop('number_of_grid_in_reference', None)
 
+    # Add CDO-compatible grid mapping variable
+    out_ds["healpix"] = xr.DataArray(
+        np.int32(0),
+        attrs={
+            "grid_mapping_name": "healpix",
+            "healpix_nside": np.int32(nside),
+            "healpix_order": "ring"
+        }
+    )
+
     history_msg = f"Interpolated to HEALPix grid (nside={nside}, scheme=RING) using HealICON."
     if 'history' in out_ds.attrs:
         out_ds.attrs['history'] = out_ds.attrs['history'] + '\n' + history_msg

@@ -27,14 +27,18 @@ def _load_and_ensure_healpix(input_file, target_nside=None):
     ds = xr.open_dataset(input_file, chunks='auto')
 
     is_healpix = False
-    if 'cell' in ds.dims:
-        npix = ds.sizes['cell']
+    try:
+        from .grid import get_cells_dim
+        cell_dim = get_cells_dim(ds)
+        npix = ds.sizes[cell_dim]
         try:
             detected_nside = hp.npix2nside(npix)
             if hp.isnsideok(detected_nside):
                 is_healpix = True
         except Exception:
             pass
+    except ValueError:
+        pass
 
     if ds.attrs.get('healpix_scheme') == 'RING':
         is_healpix = True
@@ -227,9 +231,14 @@ def regrade(input_file, output_file, nside, zoom):
 
     # Check if we still need to regrade (if auto-interp already hit nside, skip ud_grade to save time)
     import healpy as hp
-    if 'cell' in ds.dims and ds.sizes['cell'] == hp.nside2npix(nside):
-        out_ds = ds
-    else:
+    try:
+        from .grid import get_cells_dim
+        cell_dim = get_cells_dim(ds)
+        if ds.sizes[cell_dim] == hp.nside2npix(nside):
+            out_ds = ds
+        else:
+            out_ds = regrade_resolution(ds, new_nside=nside)
+    except ValueError:
         out_ds = regrade_resolution(ds, new_nside=nside)
     logger.info(f"Computing and saving regraded data to {output_file}")
     out_ds.compute().to_netcdf(output_file)
@@ -244,13 +253,32 @@ def regrade(input_file, output_file, nside, zoom):
 @click.option('--u', 'u_var', required=True, help='Name of eastward wind variable.')
 @click.option('--v', 'v_var', required=True, help='Name of northward wind variable.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
-def calc_kinematics(input_file, output_file, u_var, v_var, lmax):
+def uv2dv(input_file, output_file, u_var, v_var, lmax):
     """Compute horizontal divergence and vorticity from U and V wind components."""
     from .analysis import compute_vorticity_divergence
 
     ds = _load_and_ensure_healpix(input_file)
     out_ds = compute_vorticity_divergence(ds, u_var=u_var, v_var=v_var, lmax=lmax)
     logger.info(f"Computing and saving vorticity/divergence to {output_file}")
+    out_ds.compute().to_netcdf(output_file)
+    logger.info("Done.")
+
+
+@cli.command()
+@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
+              help='Input HEALPix NetCDF file.')
+@click.option('-o', '--output', 'output_file', required=True,
+              help='Output NetCDF file.')
+@click.option('--div', 'div_var', required=True, help='Name of divergence variable.')
+@click.option('--vor', 'vor_var', required=True, help='Name of vorticity variable.')
+@click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
+def dv2uv(input_file, output_file, div_var, vor_var, lmax):
+    """Compute U and V wind components from horizontal divergence and vorticity."""
+    from .analysis import compute_uv_from_vorticity_divergence
+
+    ds = _load_and_ensure_healpix(input_file)
+    out_ds = compute_uv_from_vorticity_divergence(ds, div_var=div_var, vor_var=vor_var, lmax=lmax)
+    logger.info(f"Computing and saving U/V to {output_file}")
     out_ds.compute().to_netcdf(output_file)
     logger.info("Done.")
 

@@ -13,7 +13,7 @@ def test_extract_along_latitude():
     
     # Simple data: latitude itself
     # So if we extract along latitude=45, the data should be close to 45.
-    ds['test_var'] = (('cell',), ds.lat.values)
+    ds['test_var'] = (('cells',), ds.lat.values)
     
     # Extract at 45 N
     target_lat = 45.0

@@ -8,7 +8,7 @@ import dask
 import xarray as xr
 
 from .config import load_variable_mapping, apply_cf_conventions
-from .interpolate import interpolate_to_healpix
+from .interpolate import HealpixInterpolator
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,8 @@ def process_file(
         nside: Optional[int] = None,
         config_path: Optional[str] = None,
         grid_file: Optional[str] = None,
-        use_gpu: bool = False
+        use_gpu: bool = False,
+        interpolator: Optional[HealpixInterpolator] = None
 ):
     """
     Process a single input file, interpolate to HEALPix, and save to output file.
@@ -92,23 +93,14 @@ def process_file(
                 chunk_dict[dim] = 1
         ds = ds.chunk(chunk_dict)
 
-    if nside is None:
-        if not spatial_dims:
-            raise ValueError(
-                "nside must be provided if spatial dimensions cannot be determined from the dataset")
-        n_orig = 1
-        for dim in spatial_dims:
-            n_orig *= ds.sizes[dim]
-        target_nside = math.sqrt(n_orig / 12)
-        nside = 2 ** round(math.log2(max(1, target_nside)))
-        logger.info(
-            f"Auto-calculated nside={nside} based on original grid size ({n_orig} spatial points)")
+    if interpolator is None:
+        interpolator = HealpixInterpolator(nside=nside, use_gpu=use_gpu)
 
     # Perform interpolation
-    out_ds = interpolate_to_healpix(ds, nside, use_gpu=use_gpu)
+    out_ds = interpolator(ds)
 
     # Ensure chunking is reasonable for output writing
-    out_ds = out_ds.chunk({'cell': -1})  # Output spatial dimension contiguous for HEALPix maps
+    out_ds = out_ds.chunk({'cells': -1})  # Output spatial dimension contiguous for HEALPix maps
 
     # Save to NetCDF
     logger.info(f"Saving to {output_file}")
@@ -153,6 +145,8 @@ def run_sequential(
         logger.info("Using default Dask threaded scheduler.")
         client = None
 
+    interpolator = HealpixInterpolator(nside=nside, use_gpu=use_gpu)
+
     for input_file in input_files:
         basename = os.path.basename(input_file)
         # Remove extension for templating
@@ -164,7 +158,7 @@ def run_sequential(
         # Ensure output directory exists
         os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
 
-        process_file(input_file, output_file, nside, config_path, grid_file, use_gpu)
+        process_file(input_file, output_file, nside, config_path, grid_file, use_gpu, interpolator=interpolator)
 
     if client:
         client.close()

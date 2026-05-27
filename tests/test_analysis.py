@@ -6,7 +6,9 @@ from healicon.analysis import (
     compute_spectrum,
     filter_spatial,
     regrade_resolution,
-    compute_vorticity_divergence
+    compute_vorticity_divergence,
+    compute_uv_from_vorticity_divergence,
+    compute_helmholtz
 )
 from healicon.extract import (
     extract_along_longitude,
@@ -31,13 +33,13 @@ def synthetic_healpix_ds():
     
     ds = xr.Dataset(
         data_vars={
-            'temp': (['time', 'cell'], data[np.newaxis, :]),
-            'u': (['time', 'cell'], u[np.newaxis, :]),
-            'v': (['time', 'cell'], v[np.newaxis, :])
+            'temp': (['time', 'cells'], data[np.newaxis, :]),
+            'u': (['time', 'cells'], u[np.newaxis, :]),
+            'v': (['time', 'cells'], v[np.newaxis, :])
         },
         coords={
             'time': [1],
-            'cell': np.arange(npix)
+            'cells': np.arange(npix)
         }
     )
     return ds
@@ -65,7 +67,7 @@ def test_filter_spatial(synthetic_healpix_ds):
 
 def test_regrade_resolution(synthetic_healpix_ds):
     ds_regraded = regrade_resolution(synthetic_healpix_ds, new_nside=8)
-    assert ds_regraded.sizes['cell'] == hp.nside2npix(8)
+    assert ds_regraded.sizes['cells'] == hp.nside2npix(8)
     assert 'temp' in ds_regraded
     assert ds_regraded['temp'].shape == (1, hp.nside2npix(8))
 
@@ -74,6 +76,22 @@ def test_compute_vorticity_divergence(synthetic_healpix_ds):
     assert 'vorticity' in ds_vd
     assert 'divergence' in ds_vd
     assert ds_vd['vorticity'].shape == (1, hp.nside2npix(4))
+
+def test_compute_uv_from_vorticity_divergence(synthetic_healpix_ds):
+    ds_vd = compute_vorticity_divergence(synthetic_healpix_ds, 'u', 'v', lmax=3)
+    ds_uv = compute_uv_from_vorticity_divergence(ds_vd, 'divergence', 'vorticity', lmax=3)
+    assert 'u' in ds_uv
+    assert 'v' in ds_uv
+    assert ds_uv['u'].shape == (1, hp.nside2npix(4))
+
+def test_compute_helmholtz(synthetic_healpix_ds):
+    ds_helm = compute_helmholtz(synthetic_healpix_ds, 'u', 'v', lmax=3)
+    assert 'u_rot' in ds_helm
+    assert 'v_rot' in ds_helm
+    assert 'u_div' in ds_helm
+    assert 'v_div' in ds_helm
+    assert 'psi' in ds_helm
+    assert 'chi' in ds_helm
 
 def test_extract_along_longitude(synthetic_healpix_ds):
     ds_lon = extract_along_longitude(synthetic_healpix_ds, lon=45.0, num_lats=10)
@@ -91,6 +109,6 @@ def test_zonal_mean(synthetic_healpix_ds):
 def test_extract_point(synthetic_healpix_ds):
     ds_pt = extract_point(synthetic_healpix_ds, lat=0.0, lon=0.0)
     # The cell dimension is gone or size 1? isel drops the dimension if scalar
-    assert 'cell' not in ds_pt.dims
+    assert 'cells' not in ds_pt.dims
     assert 'temp' in ds_pt
     assert 'time' in ds_pt.dims

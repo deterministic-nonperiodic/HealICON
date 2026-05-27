@@ -116,26 +116,31 @@ healicon spectrum -i "data.nc" -o "spectrum.nc" -v u --lmax 256
 healicon filter -i "data.nc" -o "filtered.nc" --fwhm 5.0
 healicon filter -i "data.nc" -o "filtered.nc" --lmax 15
 
-# 4. Vector Calculus: Compute divergence and vorticity from U/V
-healicon calc-kinematics -i "winds.nc" -o "kinematics.nc" --u u --v v
+# 4. Vector Calculus: Convert between U/V winds and divergence/vorticity
+healicon uv2dv -i "winds.nc" -o "kinematics.nc" --u u --v v
+healicon dv2uv -i "kinematics.nc" -o "winds_recon.nc" --div divergence --vor vorticity
 
-# 5. Extraction: Extract slices or points instantly
+# 5. Helmholtz Decomposition: Split wind into rotational and divergent components
+healicon helmholtz -i "winds.nc" -o "helmholtz.nc" --u u --v v
+
+# 6. Extraction: Extract slices or points instantly
 healicon extract-lat -i "data.nc" -o "slice_lat.nc" -l 45.0
 healicon extract-lon -i "data.nc" -o "slice_lon.nc" -l 180.0
 healicon extract-point -i "data.nc" -o "point.nc" --lat 45.0 --lon 10.0
 
-# 6. Regrade Resolution: Change HEALPix resolution using nside or zoom (nside=2^zoom)
+# 7. Regrade Resolution: Change HEALPix resolution using nside or zoom (nside=2^zoom)
 healicon regrade -i "data.nc" -o "regraded.nc" --zoom 6
 ```
 
 ## Output Metadata
 
-`HealICON` preserves the global metadata from your input files and injects specific attributes describing the HEALPix transformation:
+`HealICON` preserves the global metadata from your input files and injects CDO-compliant variables describing the HEALPix grid:
 
-- `healpix_nside`: The resolution parameter of the HEALPix grid.
-- `healpix_npix`: The total number of pixels on the sphere.
-- `healpix_scheme`: Always set to **`RING`**. In the RING scheme, pixels are numbered continuously along lines of constant latitude (rings). This is highly optimized for computing spherical harmonics and latitudinal slices.
-- `healpix_cell_area_sr`: The area of a single grid cell in **steradians** (`sr`). Because HEALPix is an equal-area grid, every cell has the exact same area: 4π / N_pix. *(To calculate the area in square meters, multiply this value by the square of your planetary radius).*
+- **Spatial Dimension**: The grid points are flattened into a 1D spatial dimension named `cells`.
+- **Coordinates**: `lat` and `lon` are standard data variables (not dimension coordinates), avoiding strict 1D coordinate matching issues in `xarray`.
+- **Grid Mapping Variable**: A dummy integer variable named `healpix` is added, containing standard CF grid mapping attributes (`grid_mapping_name`, `healpix_nside`, `healpix_order`). All data variables are linked to it via `grid_mapping = "healpix"`.
+
+HealICON interpolations natively output in the `RING` HEALPix ordering, but analysis tools will automatically detect and adapt to `NESTED` data if processing CDO-generated files.
 
 ## SLURM Example
 

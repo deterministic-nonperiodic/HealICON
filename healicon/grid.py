@@ -33,12 +33,56 @@ def create_healpix_dataset(nside: int) -> xr.Dataset:
 
     ds = xr.Dataset(
         coords={
-            "cell": np.arange(npix),
-            "lon": ("cell", lon),
-            "lat": ("cell", lat)
+            "cells": np.arange(npix),
         }
     )
+    ds["lon"] = ("cells", lon)
+    ds["lat"] = ("cells", lat)
     ds.lon.attrs = {"standard_name": "longitude", "units": "degrees_east"}
     ds.lat.attrs = {"standard_name": "latitude", "units": "degrees_north"}
 
     return ds
+
+
+def get_healpix_order(ds: xr.Dataset) -> str:
+    """
+    Get the HEALPix ordering from the dataset attributes.
+    Returns 'nested' or 'ring'.
+    """
+    for name, var in ds.variables.items():
+        if var.attrs.get('grid_mapping_name') == 'healpix':
+            return var.attrs.get('healpix_order', 'ring').lower()
+    return ds.attrs.get('healpix_scheme', 'ring').lower()
+
+
+def ensure_ring(data: np.ndarray, order: str) -> np.ndarray:
+    """
+    Ensure the data array is in RING ordering.
+    If order is 'nested', converts to 'ring'.
+    Assumes HEALPix dimension is the last axis.
+    """
+    if order == 'nested':
+        return hp.reorder(data, n2r=True)
+    return data
+
+
+def ensure_original_order(data: np.ndarray, original_order: str) -> np.ndarray:
+    """
+    Convert RING array back to its original order if it was 'nested'.
+    Assumes HEALPix dimension is the last axis.
+    """
+    if original_order == 'nested':
+        return hp.reorder(data, r2n=True)
+    return data
+
+
+def get_cells_dim(ds: xr.Dataset) -> str:
+    """
+    Return the spatial dimension name. Tries 'cells' then 'cell'.
+    Raises ValueError if neither found.
+    """
+    if 'cells' in ds.dims:
+        return 'cells'
+    if 'cell' in ds.dims:
+        return 'cell'
+    raise ValueError("Dataset must have a 'cells' or 'cell' dimension.")

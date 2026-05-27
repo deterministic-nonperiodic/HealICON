@@ -29,7 +29,7 @@ def test_interpolate_regular():
     nside = 4
     out_ds = interpolate_to_healpix(ds, nside=nside)
     
-    assert 'cell' in out_ds.dims
+    assert 'cells' in out_ds.dims
     assert 'test_var' in out_ds.data_vars
     
     print("max:", np.nanmax(out_ds['test_var'].values))
@@ -66,7 +66,7 @@ def test_interpolate_unstructured():
     nside = 4
     out_ds = interpolate_to_healpix(ds, nside=nside)
     
-    assert 'cell' in out_ds.dims
+    assert 'cells' in out_ds.dims
     assert 'test_var' in out_ds.data_vars
     
     # The random unstructured grid might not perfectly cover the poles, 
@@ -118,5 +118,5 @@ def test_radian_conversion():
     # Should convert automatically
     out_ds = interpolate_to_healpix(ds, nside=2)
     
-    assert 'cell' in out_ds.dims
+    assert 'cells' in out_ds.dims
     assert 'test_var' in out_ds.data_vars

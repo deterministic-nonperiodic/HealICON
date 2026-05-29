@@ -127,7 +127,7 @@ def _filter_block(data_block, fwhm_rad, lmax, is_nested):
         if fwhm_rad is not None:
             filtered = hp.smoothing(d, fwhm=fwhm_rad)
         elif lmax is not None:
-            alm = hp.map2alm(d, lmax=lmax, iter=1)
+            alm = hp.map2alm(d, lmax=lmax, iter=3)
             filtered = hp.alm2map(alm, nside=nside)
         out_data[i] = ensure_original_order(filtered, 'nested' if is_nested else 'ring')
 
@@ -228,7 +228,7 @@ def regrade_resolution(ds: xr.Dataset, new_nside: int) -> xr.Dataset:
 
     logger.info(f"Regrading resolution from nside={old_nside} to nside={new_nside}.")
 
-    target_lon, target_lat = hp.pix2ang(new_nside, np.arange(new_npix), lonlat=True)
+    target_lon, target_lat = hp.pix2ang(new_nside, np.arange(new_npix), lonlat=True, nest=is_nested)
 
     out_ds = xr.Dataset(
         coords={
@@ -627,4 +627,193 @@ def compute_uv_from_vorticity_divergence(ds: xr.Dataset, div_var: str, vor_var: 
     sep = "\n" if history else ""
     out_ds.attrs['history'] = f"{history}{sep}Computed U and V from vorticity and divergence."
 
+    return out_ds
+
+
+def _directional_filter_block(a_block, b_block, target_m, lmax, is_nested):
+    print(f"DEBUG: _directional_filter_block called with lmax={lmax}")
+    orig_shape = a_block.shape
+    npix = orig_shape[-1]
+    nside = hp.npix2nside(npix)
+    
+    a_2d = a_block.reshape(-1, npix)
+    b_2d = b_block.reshape(-1, npix)
+    
+    out_a = np.zeros_like(a_2d)
+    out_b = np.zeros_like(b_2d)
+    
+    l_arr, m_arr = hp.Alm.getlm(lmax)
+    abs_m = abs(target_m)
+    mask = (m_arr == abs_m)
+    
+    for i in range(a_2d.shape[0]):
+        a_ring = ensure_ring(a_2d[i], 'nested' if is_nested else 'ring')
+        b_ring = ensure_ring(b_2d[i], 'nested' if is_nested else 'ring')
+        
+        alm_a = hp.map2alm(a_ring, lmax=lmax, iter=3)
+        alm_b = hp.map2alm(b_ring, lmax=lmax, iter=3)
+        
+        if target_m > 0:
+            alm_a_out = 0.5 * (alm_a + 1j * alm_b) * mask
+            alm_b_out = -1j * alm_a_out
+        elif target_m < 0:
+            alm_a_out = 0.5 * (alm_a - 1j * alm_b) * mask
+            alm_b_out = 1j * alm_a_out
+        else:
+            alm_a_out = alm_a * mask
+            alm_b_out = alm_b * mask
+            
+        a_filtered = hp.alm2map(alm_a_out, nside=nside)
+        b_filtered = hp.alm2map(alm_b_out, nside=nside)
+        
+        out_a[i] = ensure_original_order(a_filtered, 'nested' if is_nested else 'ring')
+        out_b[i] = ensure_original_order(b_filtered, 'nested' if is_nested else 'ring')
+        
+    return out_a.reshape(orig_shape), out_b.reshape(orig_shape)
+
+
+def _get_symmetric_pixels(nside, is_nested=False):
+    """
+    Returns an array of pixel indices that correspond to the exact reflection
+    across the equator for each pixel in a HEALPix grid.
+    """
+    npix = hp.nside2npix(nside)
+    theta, phi = hp.pix2ang(nside, np.arange(npix), nest=is_nested)
+    theta_sym = np.pi - theta
+    return hp.ang2pix(nside, theta_sym, phi, nest=is_nested)
+
+
+def _extract_spatial_tide_components(da_cos: xr.DataArray, da_sin: xr.DataArray,
+                                     m_filters: list[int] | None, cell_dim: str,
+                                     sym_idx_da: xr.DataArray, apply_filter_fn) -> dict:
+    """
+    Decomposes the cosine and sine tidal coefficients into symmetric/antisymmetric 
+    amplitudes and phases, optionally filtering by specific wavenumbers.
+    """
+    ms = m_filters if m_filters is not None else [None]
+    results = {'amp_sym': [], 'pha_sym': [], 'amp_asy': [], 'pha_asy': []}
+    
+    for m in ms:
+        cos_m, sin_m = apply_filter_fn(da_cos, da_sin, m) if m is not None else (da_cos, da_sin)
+            
+        cos_sym = 0.5 * (cos_m + cos_m.isel({cell_dim: sym_idx_da}))
+        cos_asy = 0.5 * (cos_m - cos_m.isel({cell_dim: sym_idx_da}))
+        
+        sin_sym = 0.5 * (sin_m + sin_m.isel({cell_dim: sym_idx_da}))
+        sin_asy = 0.5 * (sin_m - sin_m.isel({cell_dim: sym_idx_da}))
+        
+        res_m = {
+            'amp_sym': np.sqrt(cos_sym**2 + sin_sym**2),
+            'pha_sym': np.arctan2(sin_sym, cos_sym),
+            'amp_asy': np.sqrt(cos_asy**2 + sin_asy**2),
+            'pha_asy': np.arctan2(sin_asy, cos_asy)
+        }
+        
+        if m is not None:
+            res_m = {k: v.expand_dims(m=[m]) for k, v in res_m.items()}
+            
+        for k in results:
+            results[k].append(res_m[k])
+            
+    if m_filters is not None:
+        return {k: xr.concat(v, dim='m') for k, v in results.items()}
+    return {k: v[0] for k, v in results.items()}
+
+
+
+def compute_tidal_analysis(ds: xr.Dataset, var_name: str, periods_hours: list[float], 
+                           m_filters: list[int] | None = None, lmax: int | None = None) -> xr.Dataset:
+    """
+    Performs a full tidal analysis on a HEALPix dataset over time.
+    
+    1. Extracts the temporal harmonic coefficients for the specified periods (in hours).
+    2. Optionally filters the spatial field to specific zonal wavenumbers (m_filters).
+    3. Decomposes the spatial field into symmetric and antisymmetric components relative to the equator.
+    4. Computes Amplitude and Phase for symmetric and antisymmetric components.
+    """
+    if 'time' not in ds.dims:
+        raise ValueError("Dataset must have a 'time' dimension for temporal tidal analysis.")
+        
+    cell_dim = get_cells_dim(ds)
+    is_nested = get_healpix_order(ds) == 'nested'
+    npix = ds.sizes[cell_dim]
+    nside = hp.npix2nside(npix)
+    
+    if lmax is None:
+        lmax = 3 * nside - 1
+        
+    t_days = (ds['time'] - ds['time'][0]).dt.total_seconds() / 86400.0
+    t_days_vals = t_days.values
+    
+    sym_idx = _get_symmetric_pixels(nside, is_nested=is_nested)
+    sym_idx_da = xr.DataArray(sym_idx, dims=[cell_dim])
+    
+    def apply_directional_filter(da_a, da_b, m):
+        return xr.apply_ufunc(
+            _directional_filter_block,
+            da_a, da_b,
+            kwargs={'target_m': m, 'lmax': lmax, 'is_nested': is_nested},
+            input_core_dims=[[cell_dim], [cell_dim]],
+            output_core_dims=[[cell_dim], [cell_dim]],
+            dask="parallelized",
+            output_dtypes=[da_a.dtype, da_b.dtype],
+            dask_gufunc_kwargs={'allow_rechunk': True}
+        )
+
+    periods_arr = np.array(periods_hours)
+    freq_cpd = 24.0 / periods_arr
+    
+    logger.info(f"Extracting temporal periods {periods_hours} hours for '{var_name}'.")
+    
+    omega = 2 * np.pi * freq_cpd[:, None]
+    
+    X = np.stack([
+        np.cos(omega * t_days_vals),
+        np.sin(omega * t_days_vals),
+        np.ones((len(periods_hours), len(t_days_vals)))
+    ], axis=-1)
+    
+    X_T = X.transpose(0, 2, 1)
+    XTX = X_T @ X
+    M = np.linalg.pinv(XTX) @ X_T
+    
+    M_A = xr.DataArray(M[:, 0, :], dims=['period', 'time'], coords={'period': periods_hours, 'time': ds['time']})
+    M_B = xr.DataArray(M[:, 1, :], dims=['period', 'time'], coords={'period': periods_hours, 'time': ds['time']})
+    
+    da_cos = xr.dot(ds[var_name], M_A, dims=['time'])
+    da_sin = xr.dot(ds[var_name], M_B, dims=['time'])
+    
+    spatial_res = _extract_spatial_tide_components(
+        da_cos, da_sin, m_filters, cell_dim, sym_idx_da, apply_directional_filter
+    )
+            
+    out_ds = xr.Dataset(coords={c: ds.coords[c] for c in ds.coords if c != 'time'})
+    out_ds.attrs = ds.attrs
+    var_units = ds[var_name].attrs.get('units', '')
+    
+    # Preserve CF grid mapping variables (which are dimensionless data vars)
+    for v in ds.data_vars:
+        if len(ds[v].dims) == 0:
+            out_ds[v] = ds[v]
+            
+    for k, combined in spatial_res.items():
+        combined = combined.assign_coords({cell_dim: ds[cell_dim]})
+        comp_type = 'Symmetric' if 'sym' in k else 'Antisymmetric'
+        metric = 'Amplitude' if 'amp' in k else 'Phase'
+        units = var_units if 'amp' in k else 'rad'
+        combined.attrs = {
+            'units': units, 
+            'grid_mapping': 'healpix', 
+            'long_name': f'{comp_type} {metric}'
+        }
+        out_ds[f'{var_name}_{k}'] = combined
+    
+    out_ds['period'].attrs = {'units': 'hours', 'long_name': 'Tidal Period'}
+    if m_filters is not None:
+        out_ds['m'].attrs = {'long_name': 'Zonal Wavenumber'}
+        
+    history = ds.attrs.get('history', '')
+    sep = "\n" if history else ""
+    out_ds.attrs['history'] = f"{history}{sep}Full tidal analysis (periods: {periods_hours}h, m: {m_filters})."
+    
     return out_ds

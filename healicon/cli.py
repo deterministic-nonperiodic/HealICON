@@ -1,6 +1,7 @@
 import logging
 
 import click
+from typing import Dict, Any
 
 from .core import run_sequential
 
@@ -10,6 +11,49 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+_CF_VARS_LOOKUP: Dict[str, Dict[str, Any]] = {
+    "u": {"standard_names": {"eastward_wind"}, "units": {"m s-1", "m/s"}},
+    "v": {"standard_names": {"northward_wind"}, "units": {"m s-1", "m/s"}},
+    "w": {"standard_names": {"upward_air_velocity", "vertical_velocity_in_air"},
+          "units": {"m s-1", "Pa s-1"}},
+    "pressure": {"standard_names": {"air_pressure"}, "units": {"Pa", "pascal"}},
+    "temperature": {"standard_names": {"air_temperature"}, "units": {"K", "kelvin"}},
+    "density": {"standard_names": {"air_density"}, "units": {"kg / m**3", "kg m-3"}},
+    "theta": {"standard_names": {"air_potential_temperature"}, "units": {"K", "kelvin"}},
+    "divergence": {"standard_names": {"divergence_of_wind"}, "units": {"s-1"}},
+    "vorticity": {"standard_names": {"relative_vorticity"}, "units": {"s-1"}},
+}
+
+def _cf_guess(ds, target: str) -> str | None:
+    """
+    Very light CF-based guess for a logical variable name.
+
+    Looks at ``standard_name`` and common units to suggest a candidate
+    when a configured variable is missing. Advisory only.
+    """
+    rule = _CF_VARS_LOOKUP.get(target)
+    if rule is None:
+        return None
+    for name, da in ds.data_vars.items():
+        std = str(da.attrs.get("standard_name", "")).strip()
+        units = str(da.attrs.get("units", "")).strip()
+        if std in rule["standard_names"] or any(u in units for u in rule["units"]):
+            return name
+    return None
+
+def _guess_variable(ds, target_type: str) -> str:
+    name = _cf_guess(ds, target_type)
+    if name is not None:
+        logger.info(f"Auto-detected {target_type} variable: '{name}'")
+        return name
+        
+    if len(ds.data_vars) == 1:
+        name = list(ds.data_vars.keys())[0]
+        logger.info(f"Auto-detected {target_type} variable (only var in dataset): '{name}'")
+        return name
+        
+    raise ValueError(f"Could not automatically detect {target_type} variable. Please specify it explicitly.")
 
 
 @click.group()
@@ -166,7 +210,7 @@ def zonal_mean(input_file, output_file):
               help='Input HEALPix NetCDF file.')
 @click.option('-o', '--output', 'output_file', required=True,
               help='Output NetCDF file.')
-@click.option('-v', '--var', 'var_name', required=True,
+@click.option('-v', '--var', 'var_name', default=None,
               help='Variable to compute power spectrum for.')
 @click.option('--lmax', type=int, default=None,
               help='Maximum spherical harmonic degree l.')
@@ -176,6 +220,8 @@ def spectrum(input_file, output_file, var_name, lmax):
     from .analysis import compute_spectrum, degree_to_wavelength
 
     ds = _load_and_ensure_healpix(input_file)
+    if var_name is None:
+        var_name = _guess_variable(ds, "temperature")
     out_ds = compute_spectrum(ds, var_name=var_name, lmax=lmax)
     logger.info(f"Computing and saving spectrum to {output_file}")
     out_ds = out_ds.compute()
@@ -250,14 +296,18 @@ def regrade(input_file, output_file, nside, zoom):
               help='Input HEALPix NetCDF file.')
 @click.option('-o', '--output', 'output_file', required=True,
               help='Output NetCDF file.')
-@click.option('--u', 'u_var', required=True, help='Name of eastward wind variable.')
-@click.option('--v', 'v_var', required=True, help='Name of northward wind variable.')
+@click.option('--u', 'u_var', default=None, help='Name of eastward wind variable.')
+@click.option('--v', 'v_var', default=None, help='Name of northward wind variable.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
 def uv2dv(input_file, output_file, u_var, v_var, lmax):
     """Compute horizontal divergence and vorticity from U and V wind components."""
     from .analysis import compute_vorticity_divergence
 
     ds = _load_and_ensure_healpix(input_file)
+    if u_var is None:
+        u_var = _guess_variable(ds, "u")
+    if v_var is None:
+        v_var = _guess_variable(ds, "v")
     out_ds = compute_vorticity_divergence(ds, u_var=u_var, v_var=v_var, lmax=lmax)
     logger.info(f"Computing and saving vorticity/divergence to {output_file}")
     out_ds.compute().to_netcdf(output_file)
@@ -269,14 +319,18 @@ def uv2dv(input_file, output_file, u_var, v_var, lmax):
               help='Input HEALPix NetCDF file.')
 @click.option('-o', '--output', 'output_file', required=True,
               help='Output NetCDF file.')
-@click.option('--div', 'div_var', required=True, help='Name of divergence variable.')
-@click.option('--vor', 'vor_var', required=True, help='Name of vorticity variable.')
+@click.option('--div', 'div_var', default=None, help='Name of divergence variable.')
+@click.option('--vor', 'vor_var', default=None, help='Name of vorticity variable.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
 def dv2uv(input_file, output_file, div_var, vor_var, lmax):
     """Compute U and V wind components from horizontal divergence and vorticity."""
     from .analysis import compute_uv_from_vorticity_divergence
 
     ds = _load_and_ensure_healpix(input_file)
+    if div_var is None:
+        div_var = _guess_variable(ds, "divergence")
+    if vor_var is None:
+        vor_var = _guess_variable(ds, "vorticity")
     out_ds = compute_uv_from_vorticity_divergence(ds, div_var=div_var, vor_var=vor_var, lmax=lmax)
     logger.info(f"Computing and saving U/V to {output_file}")
     out_ds.compute().to_netcdf(output_file)
@@ -288,8 +342,8 @@ def dv2uv(input_file, output_file, div_var, vor_var, lmax):
               help='Input file (HEALPix or native grid).')
 @click.option('-o', '--output', 'output_file', required=True,
               help='Output NetCDF file.')
-@click.option('--u', 'u_var', required=True, help='Name of eastward wind variable.')
-@click.option('--v', 'v_var', required=True, help='Name of northward wind variable.')
+@click.option('--u', 'u_var', default=None, help='Name of eastward wind variable.')
+@click.option('--v', 'v_var', default=None, help='Name of northward wind variable.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
 @click.option('--psi/--no-psi', default=True, show_default=True,
               help='Include streamfunction ψ [m² s⁻¹] in output.')
@@ -305,9 +359,85 @@ def helmholtz(input_file, output_file, u_var, v_var, lmax, psi, chi):
     from .analysis import compute_helmholtz
 
     ds = _load_and_ensure_healpix(input_file)
+    if u_var is None:
+        u_var = _guess_variable(ds, "u")
+    if v_var is None:
+        v_var = _guess_variable(ds, "v")
     out_ds = compute_helmholtz(ds, u_var=u_var, v_var=v_var, lmax=lmax,
                                 include_psi=psi, include_chi=chi)
     logger.info(f"Computing and saving Helmholtz decomposition to {output_file}")
+    out_ds.compute().to_netcdf(output_file)
+    logger.info("Done.")
+
+
+@cli.command()
+@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
+              help='Input HEALPix NetCDF file with a time dimension.')
+@click.option('-o', '--output', 'output_file', required=True,
+              help='Output NetCDF file.')
+@click.option('-v', '--var', 'var_name', default=None,
+              help='Variable to compute tidal analysis for.')
+@click.option('-p', '--periods', 'periods_str', default=None,
+              help='Comma-separated tidal periods in hours. E.g., 12.0,24.0 for semidiurnal and diurnal.')
+@click.option('-m', '--m-filters', 'm_str', default=None,
+              help='Optional comma-separated zonal wavenumbers. E.g., 1,2,3.')
+@click.option('--modes', 'modes_str', default=None,
+              help='Comma-separated tidal modes. E.g., DW1, SW2, DE3, SE2. '
+                   'If provided, automatically configures periods and m-filters.')
+@click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
+def tides(input_file, output_file, var_name, periods_str, m_str, modes_str, lmax):
+    """
+    Perform a full tidal analysis (temporal fit and spatial symmetry decomposition).
+    
+    Extracts the amplitude and phase of given periods (in hours), optionally 
+    filters to specific zonal wavenumbers (-m), and decomposes the resulting 
+    spatial patterns into symmetric and antisymmetric components relative to the equator.
+    """
+    from .analysis import compute_tidal_analysis
+
+    if modes_str:
+        if periods_str or m_str:
+            raise click.UsageError("Cannot specify --periods or -m when --modes is used.")
+            
+        periods_hours, m_filters = [], []
+        period_map = {'D': 24.0, 'S': 12.0, 'T': 8.0, 'Q': 6.0}
+        
+        for mode in [m.strip().upper() for m in modes_str.split(',')]:
+            if not mode: continue
+            
+            p_char = mode[0]
+            if p_char not in period_map:
+                raise click.UsageError(f"Unknown period identifier '{p_char}' in mode '{mode}'. Use D (24h), S (12h), T (8h), Q (6h).")
+            periods_hours.append(period_map[p_char])
+            
+            if len(mode) < 2:
+                raise click.UsageError(f"Invalid mode format '{mode}'.")
+                
+            if mode[1] == 'W':
+                m_filters.append(-int(mode[2:]))
+            elif mode[1] in ('E', 'S'):
+                m_filters.append(int(mode[2:]))
+            else:
+                try:
+                    m_filters.append(int(mode[1:]))
+                except ValueError:
+                    raise click.UsageError(f"Unknown direction/wavenumber in mode '{mode}'. Use W, E, or numbers.")
+                    
+        periods_hours = sorted(list(set(periods_hours)), reverse=True)
+        m_filters = sorted(list(set(m_filters)))
+        logger.info(f"Parsed modes into periods: {periods_hours} and wavenumbers: {m_filters}")
+    else:
+        if not periods_str:
+            raise click.UsageError("Must specify either --periods or --modes.")
+        periods_hours = [float(p.strip()) for p in periods_str.split(',')]
+        m_filters = [int(m.strip()) for m in m_str.split(',')] if m_str else None
+
+    ds = _load_and_ensure_healpix(input_file)
+    if var_name is None:
+        var_name = _guess_variable(ds, "temperature")
+    out_ds = compute_tidal_analysis(ds, var_name=var_name, periods_hours=periods_hours, 
+                                    m_filters=m_filters, lmax=lmax)
+    logger.info(f"Computing and saving tidal analysis to {output_file}")
     out_ds.compute().to_netcdf(output_file)
     logger.info("Done.")
 

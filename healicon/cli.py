@@ -9,8 +9,10 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-
 logger = logging.getLogger(__name__)
+
+# Suppress overly verbose healpy INFO logs
+logging.getLogger('healpy').setLevel(logging.WARNING)
 
 _CF_VARS_LOOKUP: Dict[str, Dict[str, Any]] = {
     "u": {"standard_names": {"eastward_wind"}, "units": {"m s-1", "m/s"}},
@@ -62,13 +64,13 @@ def cli():
     pass
 
 
-def _load_and_ensure_healpix(input_file, target_nside=None):
+def _load_and_ensure_healpix(ifile, target_nside=None):
     import xarray as xr
     import healpy as hp
     from .interpolate import interpolate_to_healpix
 
-    logger.info(f"Opening file: {input_file}")
-    ds = xr.open_dataset(input_file, chunks='auto')
+    logger.info(f"Opening file: {ifile}")
+    ds = xr.open_dataset(ifile, chunks='auto')
 
     is_healpix = False
     try:
@@ -100,11 +102,8 @@ def _load_and_ensure_healpix(input_file, target_nside=None):
 
 
 @cli.command()
-@click.option('-i', '--input', 'input_pattern', required=True,
-              help='Input file pattern (e.g., "data/icon_*.nc"). Can include wildcards.')
-@click.option('-o', '--output', 'output_template', required=True,
-              help='Output file template (e.g., "output_{basename}"). '
-                   '{basename} will be replaced by the input file name.')
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
 @click.option('-n', '--nside', type=int, required=False, default=None,
               help='HEALPix Nside resolution parameter (e.g., 32, 64, 128). If omitted, defaults to closest resolution.')
 @click.option('-c', '--config', 'config_path', type=click.Path(exists=True), default=None,
@@ -113,13 +112,21 @@ def _load_and_ensure_healpix(input_file, target_nside=None):
               help='Optional path to external grid file containing coordinates (e.g., clat, clon).')
 @click.option('--gpu', is_flag=True, default=False,
               help='Enable GPU acceleration for KDTree interpolation if available.')
-def convert(input_pattern, output_template, nside, config_path, grid_file, gpu):
+def convert(ifile, ofile, nside, config_path, grid_file, gpu):
     """
     Convert model output to HEALPix grid sequentially.
+
+    ifile: Path to input model output file (NetCDF).
+    ofile: Path to output HEALPix file (NetCDF).
+    nside: HEALPix Nside resolution parameter (e.g., 32, 64, 128).
+           If omitted, defaults to closest resolution.
+    config_path: Optional path to YAML configuration file for variable mapping.
+    grid_file: Optional path to external grid file containing coordinates.
+    gpu: Enable GPU acceleration for KDTree interpolation if available.
     """
     run_sequential(
-        input_pattern=input_pattern,
-        output_template=output_template,
+        input_pattern=ifile,
+        output_template=ofile,
         nside=nside,
         config_path=config_path,
         grid_file=grid_file,
@@ -128,143 +135,129 @@ def convert(input_pattern, output_template, nside, config_path, grid_file, gpu):
 
 
 @cli.command()
-@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
-              help='Input HEALPix NetCDF file.')
-@click.option('-o', '--output', 'output_file', required=True,
-              help='Output NetCDF file.')
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
 @click.option('-l', '--lat', type=float, required=True,
               help='Target latitude in degrees [-90, 90].')
 @click.option('--num-lons', type=int, default=None,
               help='Number of longitude points to extract (default: number of HEALPix grid points).')
-def extract_lat(input_file, output_file, lat, num_lons):
+def extract_lat(ifile, ofile, lat, num_lons):
     """
     Extract data along all longitudes for a specific latitude from a HEALPix dataset.
     """
     from .extract import extract_along_latitude
 
-    ds = _load_and_ensure_healpix(input_file)
+    ds = _load_and_ensure_healpix(ifile)
 
     out_ds = extract_along_latitude(ds, lat=lat, num_lons=num_lons)
 
-    logger.info(f"Computing and saving extracted data to {output_file}")
-    out_ds.compute().to_netcdf(output_file)
+    logger.info(f"Computing and saving extracted data to {ofile}")
+    out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")
 
 
 @cli.command()
-@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
-              help='Input HEALPix NetCDF file.')
-@click.option('-o', '--output', 'output_file', required=True,
-              help='Output NetCDF file.')
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
 @click.option('-l', '--lon', type=float, required=True,
               help='Target longitude in degrees [-180, 180] or [0, 360].')
 @click.option('--num-lats', type=int, default=None,
               help='Number of latitude points to extract.')
-def extract_lon(input_file, output_file, lon, num_lats):
+def extract_lon(ifile, ofile, lon, num_lats):
     """Extract data along all latitudes for a specific longitude."""
     from .extract import extract_along_longitude
 
-    ds = _load_and_ensure_healpix(input_file)
+    ds = _load_and_ensure_healpix(ifile)
     out_ds = extract_along_longitude(ds, lon=lon, num_lats=num_lats)
-    logger.info(f"Computing and saving extracted data to {output_file}")
-    out_ds.compute().to_netcdf(output_file)
+    logger.info(f"Computing and saving extracted data to {ofile}")
+    out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")
 
 
 @cli.command()
-@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
-              help='Input HEALPix NetCDF file.')
-@click.option('-o', '--output', 'output_file', required=True,
-              help='Output NetCDF file.')
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
 @click.option('--lat', type=float, required=True, help='Target latitude.')
 @click.option('--lon', type=float, required=True, help='Target longitude.')
-def extract_point(input_file, output_file, lat, lon):
+def extract_point(ifile, ofile, lat, lon):
     """Extract full time/height profile for a specific lat/lon point."""
     from .extract import extract_point as ep
 
-    ds = _load_and_ensure_healpix(input_file)
+    ds = _load_and_ensure_healpix(ifile)
     out_ds = ep(ds, lat=lat, lon=lon)
-    logger.info(f"Computing and saving extracted data to {output_file}")
-    out_ds.compute().to_netcdf(output_file)
+    logger.info(f"Computing and saving extracted data to {ofile}")
+    out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")
 
 
 @cli.command()
-@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
-              help='Input HEALPix NetCDF file.')
-@click.option('-o', '--output', 'output_file', required=True,
-              help='Output NetCDF file.')
-def zonal_mean(input_file, output_file):
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
+def zonal_mean(ifile, ofile):
     """Compute the zonal mean (longitude average) across HEALPix rings."""
     from .extract import zonal_mean as zm
 
-    ds = _load_and_ensure_healpix(input_file)
+    ds = _load_and_ensure_healpix(ifile)
     out_ds = zm(ds)
-    logger.info(f"Computing and saving zonal mean to {output_file}")
-    out_ds.compute().to_netcdf(output_file)
+    logger.info(f"Computing and saving zonal mean to {ofile}")
+    out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")
 
 
 @cli.command()
-@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
-              help='Input HEALPix NetCDF file.')
-@click.option('-o', '--output', 'output_file', required=True,
-              help='Output NetCDF file.')
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
 @click.option('-v', '--var', 'var_name', default=None,
               help='Variable to compute power spectrum for.')
 @click.option('--lmax', type=int, default=None,
               help='Maximum spherical harmonic degree l.')
-def spectrum(input_file, output_file, var_name, lmax):
+def spectrum(ifile, ofile, var_name, lmax):
     """Compute the angular power spectrum (Cl) of a variable."""
     import healpy as hp
     from .analysis import compute_spectrum, degree_to_wavelength
 
-    ds = _load_and_ensure_healpix(input_file)
+    ds = _load_and_ensure_healpix(ifile)
     if var_name is None:
         var_name = _guess_variable(ds, "temperature")
     out_ds = compute_spectrum(ds, var_name=var_name, lmax=lmax)
-    logger.info(f"Computing and saving spectrum to {output_file}")
+    logger.info(f"Computing and saving spectrum to {ofile}")
     out_ds = out_ds.compute()
     # Log effective resolution after computing
     actual_lmax = int(out_ds['l'].max())
     nyquist_km = degree_to_wavelength(actual_lmax)
     logger.info(f"Spectrum resolved up to lmax={actual_lmax} (~{nyquist_km:.0f} km Nyquist scale).")
-    out_ds.to_netcdf(output_file)
+    out_ds.to_netcdf(ofile)
     logger.info("Done.")
 
 
 @cli.command()
-@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
-              help='Input HEALPix NetCDF file.')
-@click.option('-o', '--output', 'output_file', required=True,
-              help='Output NetCDF file.')
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
 @click.option('--fwhm', type=float, default=None,
               help='Full-width half-max in degrees for Gaussian smoothing.')
 @click.option('--lmax', type=int, default=None,
               help='Hard low-pass spectral cutoff at spherical harmonic degree l.')
 @click.option('--wavelength', 'wavelength_km', type=float, default=None,
               help='Hard low-pass spectral cutoff expressed as a physical wavelength in km.')
-def filter(input_file, output_file, fwhm, lmax, wavelength_km):
+def filter(ifile, ofile, fwhm, lmax, wavelength_km):
     """Filter spatial maps using spherical harmonic transforms."""
     from .analysis import filter_spatial
 
-    ds = _load_and_ensure_healpix(input_file)
+    ds = _load_and_ensure_healpix(ifile)
     out_ds = filter_spatial(ds, fwhm_deg=fwhm, lmax=lmax, wavelength_km=wavelength_km)
-    logger.info(f"Computing and saving filtered data to {output_file}")
-    out_ds.compute().to_netcdf(output_file)
+    logger.info(f"Computing and saving filtered data to {ofile}")
+    out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")
 
 
 @cli.command()
-@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
-              help='Input HEALPix NetCDF file.')
-@click.option('-o', '--output', 'output_file', required=True,
-              help='Output NetCDF file.')
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
 @click.option('-n', '--nside', type=int, default=None,
               help='Target nside for the resolution change.')
 @click.option('-z', '--zoom', type=int, default=None,
               help='Target zoom level (refinement), where nside = 2**zoom.')
-def regrade(input_file, output_file, nside, zoom):
+def regrade(ifile, ofile, nside, zoom):
     """Upgrade or downgrade the HEALPix resolution."""
     from .analysis import regrade_resolution
 
@@ -273,7 +266,7 @@ def regrade(input_file, output_file, nside, zoom):
     if zoom is not None:
         nside = 2 ** zoom
 
-    ds = _load_and_ensure_healpix(input_file, target_nside=nside)
+    ds = _load_and_ensure_healpix(ifile, target_nside=nside)
 
     # Check if we still need to regrade (if auto-interp already hit nside, skip ud_grade to save time)
     import healpy as hp
@@ -286,62 +279,56 @@ def regrade(input_file, output_file, nside, zoom):
             out_ds = regrade_resolution(ds, new_nside=nside)
     except ValueError:
         out_ds = regrade_resolution(ds, new_nside=nside)
-    logger.info(f"Computing and saving regraded data to {output_file}")
-    out_ds.compute().to_netcdf(output_file)
+    logger.info(f"Computing and saving regraded data to {ofile}")
+    out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")
 
 
 @cli.command()
-@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
-              help='Input HEALPix NetCDF file.')
-@click.option('-o', '--output', 'output_file', required=True,
-              help='Output NetCDF file.')
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
 @click.option('--u', 'u_var', default=None, help='Name of eastward wind variable.')
 @click.option('--v', 'v_var', default=None, help='Name of northward wind variable.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
-def uv2dv(input_file, output_file, u_var, v_var, lmax):
+def uv2dv(ifile, ofile, u_var, v_var, lmax):
     """Compute horizontal divergence and vorticity from U and V wind components."""
     from .analysis import compute_vorticity_divergence
 
-    ds = _load_and_ensure_healpix(input_file)
+    ds = _load_and_ensure_healpix(ifile)
     if u_var is None:
         u_var = _guess_variable(ds, "u")
     if v_var is None:
         v_var = _guess_variable(ds, "v")
     out_ds = compute_vorticity_divergence(ds, u_var=u_var, v_var=v_var, lmax=lmax)
-    logger.info(f"Computing and saving vorticity/divergence to {output_file}")
-    out_ds.compute().to_netcdf(output_file)
+    logger.info(f"Computing and saving vorticity/divergence to {ofile}")
+    out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")
 
 
 @cli.command()
-@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
-              help='Input HEALPix NetCDF file.')
-@click.option('-o', '--output', 'output_file', required=True,
-              help='Output NetCDF file.')
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
 @click.option('--div', 'div_var', default=None, help='Name of divergence variable.')
 @click.option('--vor', 'vor_var', default=None, help='Name of vorticity variable.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
-def dv2uv(input_file, output_file, div_var, vor_var, lmax):
+def dv2uv(ifile, ofile, div_var, vor_var, lmax):
     """Compute U and V wind components from horizontal divergence and vorticity."""
     from .analysis import compute_uv_from_vorticity_divergence
 
-    ds = _load_and_ensure_healpix(input_file)
+    ds = _load_and_ensure_healpix(ifile)
     if div_var is None:
         div_var = _guess_variable(ds, "divergence")
     if vor_var is None:
         vor_var = _guess_variable(ds, "vorticity")
     out_ds = compute_uv_from_vorticity_divergence(ds, div_var=div_var, vor_var=vor_var, lmax=lmax)
-    logger.info(f"Computing and saving U/V to {output_file}")
-    out_ds.compute().to_netcdf(output_file)
+    logger.info(f"Computing and saving U/V to {ofile}")
+    out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")
 
 
 @cli.command()
-@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
-              help='Input file (HEALPix or native grid).')
-@click.option('-o', '--output', 'output_file', required=True,
-              help='Output NetCDF file.')
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
 @click.option('--u', 'u_var', default=None, help='Name of eastward wind variable.')
 @click.option('--v', 'v_var', default=None, help='Name of northward wind variable.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
@@ -349,7 +336,7 @@ def dv2uv(input_file, output_file, div_var, vor_var, lmax):
               help='Include streamfunction ψ [m² s⁻¹] in output.')
 @click.option('--chi/--no-chi', default=True, show_default=True,
               help='Include velocity potential χ [m² s⁻¹] in output.')
-def helmholtz(input_file, output_file, u_var, v_var, lmax, psi, chi):
+def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
     """Helmholtz decomposition: split wind into rotational and divergent components.
 
     Outputs u_rot, v_rot (rotational wind) and u_div, v_div (divergent wind).
@@ -358,23 +345,21 @@ def helmholtz(input_file, output_file, u_var, v_var, lmax, psi, chi):
     """
     from .analysis import compute_helmholtz
 
-    ds = _load_and_ensure_healpix(input_file)
+    ds = _load_and_ensure_healpix(ifile)
     if u_var is None:
         u_var = _guess_variable(ds, "u")
     if v_var is None:
         v_var = _guess_variable(ds, "v")
     out_ds = compute_helmholtz(ds, u_var=u_var, v_var=v_var, lmax=lmax,
                                 include_psi=psi, include_chi=chi)
-    logger.info(f"Computing and saving Helmholtz decomposition to {output_file}")
-    out_ds.compute().to_netcdf(output_file)
+    logger.info(f"Computing and saving Helmholtz decomposition to {ofile}")
+    out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")
 
 
 @cli.command()
-@click.option('-i', '--input', 'input_file', required=True, type=click.Path(exists=True),
-              help='Input HEALPix NetCDF file with a time dimension.')
-@click.option('-o', '--output', 'output_file', required=True,
-              help='Output NetCDF file.')
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
 @click.option('-v', '--var', 'var_name', default=None,
               help='Variable to compute tidal analysis for.')
 @click.option('-p', '--periods', 'periods_str', default=None,
@@ -385,7 +370,7 @@ def helmholtz(input_file, output_file, u_var, v_var, lmax, psi, chi):
               help='Comma-separated tidal modes. E.g., DW1, SW2, DE3, SE2. '
                    'If provided, automatically configures periods and m-filters.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
-def tides(input_file, output_file, var_name, periods_str, m_str, modes_str, lmax):
+def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax):
     """
     Perform a full tidal analysis (temporal fit and spatial symmetry decomposition).
     
@@ -432,13 +417,13 @@ def tides(input_file, output_file, var_name, periods_str, m_str, modes_str, lmax
         periods_hours = [float(p.strip()) for p in periods_str.split(',')]
         m_filters = [int(m.strip()) for m in m_str.split(',')] if m_str else None
 
-    ds = _load_and_ensure_healpix(input_file)
+    ds = _load_and_ensure_healpix(ifile)
     if var_name is None:
         var_name = _guess_variable(ds, "temperature")
     out_ds = compute_tidal_analysis(ds, var_name=var_name, periods_hours=periods_hours, 
                                     m_filters=m_filters, lmax=lmax)
-    logger.info(f"Computing and saving tidal analysis to {output_file}")
-    out_ds.compute().to_netcdf(output_file)
+    logger.info(f"Computing and saving tidal analysis to {ofile}")
+    out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")
 
 

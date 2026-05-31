@@ -101,6 +101,24 @@ class HealpixInterpolator:
         if self._is_setup:
             return
 
+        # Check if already HEALPix
+        try:
+            from .grid import get_cells_dim
+            cell_dim = get_cells_dim(ds)
+            npix = ds.sizes[cell_dim]
+            nside_float = math.sqrt(npix / 12)
+            if nside_float.is_integer():
+                self._grid_type = 'healpix'
+                self._spatial_dim = cell_dim
+                self._current_nside = int(nside_float)
+                if self.nside is None:
+                    self.nside = self._current_nside
+                logger.info(f"Setup complete for hp2hp grid (current nside={self._current_nside}).")
+                self._is_setup = True
+                return
+        except ValueError:
+            pass
+
         if self.nside is None:
             self.nside = self._determine_nside(ds)
             logger.info(f"Auto-calculated nside={self.nside}")
@@ -179,6 +197,15 @@ class HealpixInterpolator:
     def __call__(self, ds: xr.Dataset) -> xr.Dataset:
         if not self._is_setup:
             self.setup(ds)
+
+        if self._grid_type == 'healpix':
+            if self.nside == self._current_nside:
+                logger.info("Dataset is already on the target HEALPix grid. Returning original dataset.")
+                return ds
+            else:
+                logger.info(f"Dataset is HEALPix (nside={self._current_nside}), but target is nside={self.nside}. Regrading resolution...")
+                from .analysis import regrade_resolution
+                return regrade_resolution(ds, new_nside=self.nside)
 
         # Handle rad/deg conversion on the fly if needed
         lon_units = str(ds[self._lon_name].attrs.get('units', '')).lower()

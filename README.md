@@ -11,7 +11,6 @@ HealICON is a command-line Python tool that efficiently interpolates atmospheric
 - **Auto-Resolution**: If the `nside` parameter is omitted, `HealICON` automatically computes the closest HEALPix resolution matching the original spatial grid size.
 - **Analysis Suite**: Includes spherical harmonic spectral analysis, spatial filtering, zonal averaging, and vector calculus (vorticity/divergence).
 - **Auto-Interpolation**: Analysis commands automatically detect raw model output (unstructured/regular) and seamlessly interpolate to HEALPix on the fly!
-- **SLURM Compatible**: Works perfectly within an `sbatch` job.
 
 ## Installation
 
@@ -55,7 +54,7 @@ pip install -e .[test]
 Interpolate a single file to a HEALPix grid with `nside=64`. If `-n` is omitted, the resolution will be inferred automatically:
 
 ```bash
-healicon convert -i "path/to/icon_output.nc" -o "path/to/healpix_{basename}" -n 64
+healicon convert -n 64 "path/to/icon_output.nc" "path/to/healpix_{basename}"
 ```
 
 ### Processing Multiple Files
@@ -63,7 +62,7 @@ healicon convert -i "path/to/icon_output.nc" -o "path/to/healpix_{basename}" -n 
 Use wildcards in the input string to process multiple files sequentially:
 
 ```bash
-healicon convert -i "data/raw_*.nc" -o "output/hp_{basename}" -n 64
+healicon convert -n 64 "data/raw_*.nc" "output/hp_{basename}"
 ```
 _Note: `{basename}` in the output template will automatically be replaced by the input file's name (e.g. `raw_01.nc`). You can also use `{name_no_ext}`._
 
@@ -81,7 +80,7 @@ variables:
 
 **Command:**
 ```bash
-healicon convert -i "data/icon_*.nc" -o "output/hp_{basename}" -n 64 -c config.yaml
+healicon convert -n 64 -c config.yaml "data/icon_*.nc" "output/hp_{basename}"
 ```
 If no config is provided, HealICON will attempt to use CF conventions (checking for the `standard_name` attribute) to select variables. If neither is found, all variables will be interpolated.
 
@@ -90,7 +89,7 @@ If no config is provided, HealICON will attempt to use CF conventions (checking 
 For ICON output, the variables `clon` and `clat` (or `lon` and `lat`) are sometimes omitted from the model outputs and saved in a separate grid file. You can pass the external grid file via the `--grid` or `-g` parameter so that `HealICON` can successfully load the unstructured coordinates.
 
 ```bash
-healicon convert -i "data/icon_*.nc" -o "output/hp_{basename}" -n 64 -g "data/icon_grid.nc"
+healicon convert -n 64 -g "data/icon_grid.nc" "data/icon_*.nc" "output/hp_{basename}"
 ```
 
 ### GPU Acceleration
@@ -98,7 +97,7 @@ healicon convert -i "data/icon_*.nc" -o "output/hp_{basename}" -n 64 -g "data/ic
 If you have a GPU and `cuml` installed, you can enable GPU acceleration for the KDTree search when interpolating unstructured grids:
 
 ```bash
-healicon convert -i "data/icon_*.nc" -o "output/hp_{basename}" -n 128 --gpu
+healicon convert -n 128 --gpu "data/icon_*.nc" "output/hp_{basename}"
 ```
 
 ### Analysis Suite
@@ -107,29 +106,32 @@ healicon convert -i "data/icon_*.nc" -o "output/hp_{basename}" -n 128 --gpu
 
 ```bash
 # 1. Zonal Mean: Compute longitudinal averages over HEALPix latitude rings
-healicon zonal-mean -i "data.nc" -o "zonal.nc"
+healicon zonal-mean "data.nc" "zonal.nc"
 
 # 2. Spectral Analysis: Compute angular power spectrum (C_l)
-healicon spectrum -i "data.nc" -o "spectrum.nc" -v u --lmax 256
+healicon spectrum -v u --lmax 256 "data.nc" "spectrum.nc"
 
 # 3. Spatial Filtering: Apply a Gaussian beam (FWHM) or hard spectral cutoff (lmax)
-healicon filter -i "data.nc" -o "filtered.nc" --fwhm 5.0
-healicon filter -i "data.nc" -o "filtered.nc" --lmax 15
+healicon filter --fwhm 5.0 "data.nc" "filtered.nc"
+healicon filter --lmax 15 "data.nc" "filtered.nc"
 
 # 4. Vector Calculus: Convert between U/V winds and divergence/vorticity
-healicon uv2dv -i "winds.nc" -o "kinematics.nc" --u u --v v
-healicon dv2uv -i "kinematics.nc" -o "winds_recon.nc" --div divergence --vor vorticity
+healicon uv2dv --u u --v v "winds.nc" "kinematics.nc"
+healicon dv2uv --div divergence --vor vorticity "kinematics.nc" "winds_recon.nc"
 
 # 5. Helmholtz Decomposition: Split wind into rotational and divergent components
-healicon helmholtz -i "winds.nc" -o "helmholtz.nc" --u u --v v
+healicon helmholtz --u u --v v "winds.nc" "helmholtz.nc"
 
 # 6. Extraction: Extract slices or points instantly
-healicon extract-lat -i "data.nc" -o "slice_lat.nc" -l 45.0
-healicon extract-lon -i "data.nc" -o "slice_lon.nc" -l 180.0
-healicon extract-point -i "data.nc" -o "point.nc" --lat 45.0 --lon 10.0
+healicon extract-lat -l 45.0 "data.nc" "slice_lat.nc"
+healicon extract-lon -l 180.0 "data.nc" "slice_lon.nc"
+healicon extract-point --lat 45.0 --lon 10.0 "data.nc" "point.nc"
 
-# 7. Regrade Resolution: Change HEALPix resolution using nside or zoom (nside=2^zoom)
-healicon regrade -i "data.nc" -o "regraded.nc" --zoom 6
+# 7. Tidal Analysis: Extract tidal amplitude and phase, with optional wavenumber filtering and symmetric/antisymmetric decomposition
+healicon tides --modes DW1,SW2,DE3,SE2 "input_time_series.nc" "output_tides.nc"
+
+# 8. Regrade Resolution: Change HEALPix resolution using nside or zoom (nside=2^zoom)
+healicon regrade --zoom 6 "data.nc" "regraded.nc"
 ```
 
 ## Output Metadata
@@ -160,6 +162,6 @@ To run `HealICON` on a compute node using SLURM, simply write an `sbatch` script
 source activate your_env
 
 # Run healicon
-healicon convert -i "/data/models/icon_output_*.nc" -o "/data/processed/hp_{basename}" -n 128
+healicon convert -n 128 "/data/models/icon_output_*.nc" "/data/processed/hp_{basename}"
 ```
 Dask will automatically detect the available CPUs via SLURM and utilize them.

@@ -100,7 +100,12 @@ def process_file(
     out_ds = interpolator(ds)
 
     # Ensure chunking is reasonable for output writing
-    out_ds = out_ds.chunk({'cells': -1})  # Output spatial dimension contiguous for HEALPix maps
+    try:
+        from .grid import get_cells_dim
+        out_cell_dim = get_cells_dim(out_ds)
+        out_ds = out_ds.chunk({out_cell_dim: -1})  # Output spatial dimension contiguous for HEALPix maps
+    except ValueError:
+        pass
 
     # Save to NetCDF
     logger.info(f"Saving to {output_file}")

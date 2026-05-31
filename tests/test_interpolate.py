@@ -120,3 +120,18 @@ def test_radian_conversion():
     
     assert 'cells' in out_ds.dims
     assert 'test_var' in out_ds.data_vars
+
+def test_interpolate_already_healpix():
+    from healicon.grid import create_healpix_dataset
+    import xarray as xr
+    
+    nside = 8
+    ds = create_healpix_dataset(nside)
+    ds['dummy'] = xr.DataArray(np.zeros(len(ds.cells)), dims=['cells'])
+    
+    # Should return identical dataset if nside matches or is None
+    ds_out_1 = interpolate_to_healpix(ds)
+    ds_out_2 = interpolate_to_healpix(ds, nside=nside)
+    
+    assert ds_out_1 is ds, "Should return original dataset when nside is omitted"
+    assert ds_out_2 is ds, "Should return original dataset when nside matches"

@@ -631,7 +631,6 @@ def compute_uv_from_vorticity_divergence(ds: xr.Dataset, div_var: str, vor_var: 
 
 
 def _directional_filter_block(a_block, b_block, target_m, lmax, is_nested):
-    print(f"DEBUG: _directional_filter_block called with lmax={lmax}")
     orig_shape = a_block.shape
     npix = orig_shape[-1]
     nside = hp.npix2nside(npix)
@@ -685,7 +684,8 @@ def _get_symmetric_pixels(nside, is_nested=False):
 
 def _extract_spatial_tide_components(da_cos: xr.DataArray, da_sin: xr.DataArray,
                                      m_filters: list[int] | None, cell_dim: str,
-                                     sym_idx_da: xr.DataArray, apply_filter_fn) -> dict:
+                                     sym_idx_da: xr.DataArray, phi_da: xr.DataArray,
+                                     apply_filter_fn) -> dict:
     """
     Decomposes the cosine and sine tidal coefficients into symmetric/antisymmetric 
     amplitudes and phases, optionally filtering by specific wavenumbers.
@@ -702,11 +702,18 @@ def _extract_spatial_tide_components(da_cos: xr.DataArray, da_sin: xr.DataArray,
         sin_sym = 0.5 * (sin_m + sin_m.isel({cell_dim: sym_idx_da}))
         sin_asy = 0.5 * (sin_m - sin_m.isel({cell_dim: sym_idx_da}))
         
+        def get_phase(c, s_coef, target_m):
+            if target_m is None:
+                return np.arctan2(s_coef, c)
+            real_part = c * np.cos(target_m * phi_da) + s_coef * np.sin(target_m * phi_da)
+            imag_part = s_coef * np.cos(target_m * phi_da) - c * np.sin(target_m * phi_da)
+            return np.arctan2(imag_part, real_part)
+        
         res_m = {
             'amp_sym': np.sqrt(cos_sym**2 + sin_sym**2),
-            'pha_sym': np.arctan2(sin_sym, cos_sym),
+            'pha_sym': get_phase(cos_sym, sin_sym, m),
             'amp_asy': np.sqrt(cos_asy**2 + sin_asy**2),
-            'pha_asy': np.arctan2(sin_asy, cos_asy)
+            'pha_asy': get_phase(cos_asy, sin_asy, m)
         }
         
         if m is not None:
@@ -748,6 +755,10 @@ def compute_tidal_analysis(ds: xr.Dataset, var_name: str, periods_hours: list[fl
     sym_idx = _get_symmetric_pixels(nside, is_nested=is_nested)
     sym_idx_da = xr.DataArray(sym_idx, dims=[cell_dim])
     
+    # Compute phi array for phase extraction
+    _, phi = hp.pix2ang(nside, np.arange(npix), nest=is_nested)
+    phi_da = xr.DataArray(phi, dims=[cell_dim], coords={cell_dim: ds.coords[cell_dim] if cell_dim in ds.coords else np.arange(npix)})
+
     def apply_directional_filter(da_a, da_b, m):
         return xr.apply_ufunc(
             _directional_filter_block,
@@ -784,7 +795,7 @@ def compute_tidal_analysis(ds: xr.Dataset, var_name: str, periods_hours: list[fl
     da_sin = xr.dot(ds[var_name], M_B, dims=['time'])
     
     spatial_res = _extract_spatial_tide_components(
-        da_cos, da_sin, m_filters, cell_dim, sym_idx_da, apply_directional_filter
+        da_cos, da_sin, m_filters, cell_dim, sym_idx_da, phi_da, apply_directional_filter
     )
             
     out_ds = xr.Dataset(coords={c: ds.coords[c] for c in ds.coords if c != 'time'})

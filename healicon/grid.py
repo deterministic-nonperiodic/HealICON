@@ -84,4 +84,5 @@ def get_cells_dim(ds: xr.Dataset) -> str:
     for dim in ['cells', 'cell', 'ncells', 'x']:
         if dim in ds.dims:
             return dim
-    raise ValueError("Dataset must have a HEALPix spatial dimension (e.g. 'cell', 'cells', 'ncells', or 'x').")
+    raise ValueError(
+        "Dataset must have a HEALPix spatial dimension (e.g. 'cell', 'cells', 'ncells', or 'x').")

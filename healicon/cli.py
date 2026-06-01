@@ -1,7 +1,7 @@
 import logging
+from typing import Dict, Any
 
 import click
-from typing import Dict, Any
 
 from .core import run_sequential
 
@@ -27,6 +27,7 @@ _CF_VARS_LOOKUP: Dict[str, Dict[str, Any]] = {
     "vorticity": {"standard_names": {"relative_vorticity"}, "units": {"s-1"}},
 }
 
+
 def _cf_guess(ds, target: str) -> str | None:
     """
     Very light CF-based guess for a logical variable name.
@@ -44,18 +45,20 @@ def _cf_guess(ds, target: str) -> str | None:
             return name
     return None
 
+
 def _guess_variable(ds, target_type: str) -> str:
     name = _cf_guess(ds, target_type)
     if name is not None:
         logger.info(f"Auto-detected {target_type} variable: '{name}'")
         return name
-        
+
     if len(ds.data_vars) == 1:
         name = list(ds.data_vars.keys())[0]
         logger.info(f"Auto-detected {target_type} variable (only var in dataset): '{name}'")
         return name
-        
-    raise ValueError(f"Could not automatically detect {target_type} variable. Please specify it explicitly.")
+
+    raise ValueError(
+        f"Could not automatically detect {target_type} variable. Please specify it explicitly.")
 
 
 @click.group()
@@ -95,28 +98,38 @@ def _load_and_ensure_healpix(ifile, target_nside=None):
             break
 
     if not is_healpix:
-        logger.info("Input dataset is not a HEALPix grid. Auto-interpolating first...")
-        ds = interpolate_to_healpix(ds, nside=target_nside)
+        # Detect SABER data
+        if ds.attrs.get('Mission') == 'TIMED' and 'SABER' in str(ds.attrs.get('Title', '')):
+            logger.info("Detected SABER dataset. Using native parser.")
+            from .parsers import parse_saber
+            ds = parse_saber(ds, nside=target_nside)
+        else:
+            logger.info("Input dataset is not a HEALPix grid. Auto-interpolating first...")
+            ds = interpolate_to_healpix(ds, nside=target_nside)
 
     return ds
 
 
 @cli.command()
-@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ifile', type=str)
 @click.argument('ofile')
 @click.option('-n', '--nside', type=int, required=False, default=None,
               help='HEALPix Nside resolution parameter (e.g., 32, 64, 128). If omitted, defaults to closest resolution.')
+@click.option('--lst-bins', type=int, default=None,
+              help='Number of Local Solar Time bins (e.g. 24). Only applicable for native parsers (like SABER) that support LST binning.')
 @click.option('-c', '--config', 'config_path', type=click.Path(exists=True), default=None,
               help='Path to YAML configuration file for variable mapping.')
 @click.option('-g', '--grid', 'grid_file', type=click.Path(exists=True), default=None,
               help='Optional path to external grid file containing coordinates (e.g., clat, clon).')
 @click.option('--gpu', is_flag=True, default=False,
               help='Enable GPU acceleration for KDTree interpolation if available.')
-def convert(ifile, ofile, nside, config_path, grid_file, gpu):
+@click.option('--cat', is_flag=True, default=False,
+              help='Combine files matching the input pattern into a single dataset before processing (mimics CDO cat).')
+def convert(ifile, ofile, nside, lst_bins, config_path, grid_file, gpu, cat):
     """
-    Convert model output to HEALPix grid sequentially.
+    Convert model output to HEALPix grid.
 
-    ifile: Path to input model output file (NetCDF).
+    ifile: Path or wildcard pattern to input model output file(s) (NetCDF).
     ofile: Path to output HEALPix file (NetCDF).
     nside: HEALPix Nside resolution parameter (e.g., 32, 64, 128).
            If omitted, defaults to closest resolution.
@@ -130,7 +143,9 @@ def convert(ifile, ofile, nside, config_path, grid_file, gpu):
         nside=nside,
         config_path=config_path,
         grid_file=grid_file,
-        use_gpu=gpu
+        use_gpu=gpu,
+        lst_bins=lst_bins,
+        cat=cat
     )
 
 
@@ -193,6 +208,30 @@ def extract_point(ifile, ofile, lat, lon):
 @cli.command()
 @click.argument('ifile', type=click.Path(exists=True))
 @click.argument('ofile')
+@click.option('--spatial-dim', type=str, default='cells',
+              help='Name of the spatial dimension (default: cells).')
+@click.option('--time-dim', type=str, default=None,
+              help='Optional name of the time/LST dimension to interpolate across temporally.')
+def fill(ifile, ofile, spatial_dim, time_dim):
+    """
+    Fill missing values (NaNs) natively using HEALPix KDTree spatial nearest-neighbor and temporal 1D linear interpolation.
+    """
+    from .curation import fill_healpix_gaps
+    import xarray as xr
+
+    # Load dataset
+    ds = xr.open_dataset(ifile, chunks='auto')
+
+    out_ds = fill_healpix_gaps(ds, spatial_dim=spatial_dim, time_dim=time_dim)
+
+    logger.info(f"Saving filled dataset to {ofile}")
+    out_ds.compute().to_netcdf(ofile)
+    logger.info("Done.")
+
+
+@cli.command()
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
 def zonal_mean(ifile, ofile):
     """Compute the zonal mean (longitude average) across HEALPix rings."""
     from .extract import zonal_mean as zm
@@ -213,7 +252,6 @@ def zonal_mean(ifile, ofile):
               help='Maximum spherical harmonic degree l.')
 def spectrum(ifile, ofile, var_name, lmax):
     """Compute the angular power spectrum (Cl) of a variable."""
-    import healpy as hp
     from .analysis import compute_spectrum, degree_to_wavelength
 
     ds = _load_and_ensure_healpix(ifile)
@@ -351,7 +389,7 @@ def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
     if v_var is None:
         v_var = _guess_variable(ds, "v")
     out_ds = compute_helmholtz(ds, u_var=u_var, v_var=v_var, lmax=lmax,
-                                include_psi=psi, include_chi=chi)
+                               include_psi=psi, include_chi=chi)
     logger.info(f"Computing and saving Helmholtz decomposition to {ofile}")
     out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")
@@ -370,7 +408,9 @@ def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
               help='Comma-separated tidal modes. E.g., DW1, SW2, DE3, SE2. '
                    'If provided, automatically configures periods and m-filters.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
-def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax):
+@click.option('--time-dim', default='time', show_default=True,
+              help='Dimension name for time-like axis (e.g., "time" or "lst").')
+def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim):
     """
     Perform a full tidal analysis (temporal fit and spatial symmetry decomposition).
     
@@ -383,21 +423,22 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax):
     if modes_str:
         if periods_str or m_str:
             raise click.UsageError("Cannot specify --periods or -m when --modes is used.")
-            
+
         periods_hours, m_filters = [], []
         period_map = {'D': 24.0, 'S': 12.0, 'T': 8.0, 'Q': 6.0}
-        
+
         for mode in [m.strip().upper() for m in modes_str.split(',')]:
             if not mode: continue
-            
+
             p_char = mode[0]
             if p_char not in period_map:
-                raise click.UsageError(f"Unknown period identifier '{p_char}' in mode '{mode}'. Use D (24h), S (12h), T (8h), Q (6h).")
+                raise click.UsageError(
+                    f"Unknown period identifier '{p_char}' in mode '{mode}'. Use D (24h), S (12h), T (8h), Q (6h).")
             periods_hours.append(period_map[p_char])
-            
+
             if len(mode) < 2:
                 raise click.UsageError(f"Invalid mode format '{mode}'.")
-                
+
             if mode[1] == 'W':
                 m_filters.append(-int(mode[2:]))
             elif mode[1] in ('E', 'S'):
@@ -406,8 +447,9 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax):
                 try:
                     m_filters.append(int(mode[1:]))
                 except ValueError:
-                    raise click.UsageError(f"Unknown direction/wavenumber in mode '{mode}'. Use W, E, or numbers.")
-                    
+                    raise click.UsageError(
+                        f"Unknown direction/wavenumber in mode '{mode}'. Use W, E, or numbers.")
+
         periods_hours = sorted(list(set(periods_hours)), reverse=True)
         m_filters = sorted(list(set(m_filters)))
         logger.info(f"Parsed modes into periods: {periods_hours} and wavenumbers: {m_filters}")
@@ -420,8 +462,8 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax):
     ds = _load_and_ensure_healpix(ifile)
     if var_name is None:
         var_name = _guess_variable(ds, "temperature")
-    out_ds = compute_tidal_analysis(ds, var_name=var_name, periods_hours=periods_hours, 
-                                    m_filters=m_filters, lmax=lmax)
+    out_ds = compute_tidal_analysis(ds, var_name=var_name, periods_hours=periods_hours,
+                                    m_filters=m_filters, lmax=lmax, time_dim=time_dim)
     logger.info(f"Computing and saving tidal analysis to {ofile}")
     out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")

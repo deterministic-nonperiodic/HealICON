@@ -81,7 +81,8 @@ def extract_along_latitude(ds: xr.Dataset, lat: float, num_lons: int | None = No
     out_ds.attrs = ds.attrs
     history = ds.attrs.get('history', '')
     sep = "\n" if history else ""
-    out_ds.attrs['history'] = f"{history}{sep}Extracted along latitude {lat} with {num_lons} longitude points."
+    out_ds.attrs[
+        'history'] = f"{history}{sep}Extracted along latitude {lat} with {num_lons} longitude points."
 
     return out_ds
 
@@ -136,7 +137,8 @@ def extract_along_longitude(ds: xr.Dataset, lon: float, num_lats: int | None = N
     out_ds.attrs = ds.attrs
     history = ds.attrs.get('history', '')
     sep = "\n" if history else ""
-    out_ds.attrs['history'] = f"{history}{sep}Extracted along longitude {lon} with {num_lats} latitude points."
+    out_ds.attrs[
+        'history'] = f"{history}{sep}Extracted along longitude {lon} with {num_lats} latitude points."
 
     return out_ds
 
@@ -228,6 +230,7 @@ def extract_point(ds: xr.Dataset, lat: float, lon: float) -> xr.Dataset:
 
     history = ds.attrs.get('history', '')
     sep = "\n" if history else ""
-    out_ds.attrs['history'] = f"{history}{sep}Extracted point data for lat={lat}, lon={lon} (pixel {pix})."
+    out_ds.attrs[
+        'history'] = f"{history}{sep}Extracted point data for lat={lat}, lon={lon} (pixel {pix})."
 
     return out_ds

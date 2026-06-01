@@ -29,7 +29,7 @@ fig, axes = plt.subplots(3, 2, figsize=(14, 15), sharex=True, sharey=True)
 axes = axes.flatten()
 
 lat_ticks = [-60, -30, 0, 30, 60]
-lat_labels = ['$60^{\circ}$S', '$30^{\circ}$S', '$0^{\circ}$', '$30^{\circ}$N', '$60^{\circ}$N']
+lat_labels = ['60°S', '30°S', '0°', '30°N', '60°N']
 vmax = 6.0
 levels = np.linspace(0, vmax, 13)
 

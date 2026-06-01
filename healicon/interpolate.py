@@ -72,12 +72,12 @@ class HealpixInterpolator:
         self._spatial_dim = None
         self._target_lon = None
         self._target_lat = None
-        
+
         # For unstructured
         self._indices = None
         self._weights = None
         self._valid_mask = None
-        
+
         # For regular
         self._source_lon = None
         self._source_lat = None
@@ -127,7 +127,8 @@ class HealpixInterpolator:
         self._lat_name = _find_cf_coordinate(ds, "latitude", ["lat", "latitude", "clat"])
 
         if not self._lon_name or not self._lat_name:
-            raise ValueError("Could not automatically determine longitude/latitude coordinate names.")
+            raise ValueError(
+                "Could not automatically determine longitude/latitude coordinate names.")
 
         self._target_lon, self._target_lat = get_healpix_coords(self.nside)
 
@@ -150,12 +151,13 @@ class HealpixInterpolator:
                 self._grid_type = 'curvilinear'
                 self._spatial_dim = f"{lon_dims[0]}_{lon_dims[1]}"
             else:
-                raise ValueError(f"Unsupported grid structure. lon dims: {lon_dims}, lat dims: {lat_dims}")
+                raise ValueError(
+                    f"Unsupported grid structure. lon dims: {lon_dims}, lat dims: {lat_dims}")
 
             # For unstructured, build KDTree
             source_lon = ds[self._lon_name].values
             source_lat = ds[self._lat_name].values
-            
+
             # Unstack if curvilinear for coords
             if self._grid_type == 'curvilinear':
                 source_lon = source_lon.flatten()
@@ -200,17 +202,20 @@ class HealpixInterpolator:
 
         if self._grid_type == 'healpix':
             if self.nside == self._current_nside:
-                logger.info("Dataset is already on the target HEALPix grid. Returning original dataset.")
+                logger.info(
+                    "Dataset is already on the target HEALPix grid. Returning original dataset.")
                 return ds
             else:
-                logger.info(f"Dataset is HEALPix (nside={self._current_nside}), but target is nside={self.nside}. Regrading resolution...")
+                logger.info(
+                    f"Dataset is HEALPix (nside={self._current_nside}), but target is nside={self.nside}. Regrading resolution...")
                 from .analysis import regrade_resolution
                 return regrade_resolution(ds, new_nside=self.nside)
 
         # Handle rad/deg conversion on the fly if needed
         lon_units = str(ds[self._lon_name].attrs.get('units', '')).lower()
         if 'rad' in lon_units:
-            ds = ds.assign({self._lon_name: np.rad2deg(ds[self._lon_name]), self._lat_name: np.rad2deg(ds[self._lat_name])})
+            ds = ds.assign({self._lon_name: np.rad2deg(ds[self._lon_name]),
+                            self._lat_name: np.rad2deg(ds[self._lat_name])})
 
         if self._grid_type == 'curvilinear':
             ds = ds.stack({self._spatial_dim: ds[self._lon_name].dims})
@@ -218,7 +223,7 @@ class HealpixInterpolator:
         out_ds = xr.Dataset(coords={"cells": np.arange(len(self._target_lon))})
         out_ds["lon"] = ("cells", self._target_lon)
         out_ds["lat"] = ("cells", self._target_lat)
-        
+
         out_ds["lon"].attrs = {"standard_name": "longitude", "units": "degrees_east"}
         out_ds["lat"].attrs = {"standard_name": "latitude", "units": "degrees_north"}
 
@@ -230,15 +235,17 @@ class HealpixInterpolator:
                 interpolated_da = xr.apply_ufunc(
                     _interp_unstructured_block,
                     da,
-                    kwargs={'indices': self._indices, 'weights': self._weights, 'valid_mask': self._valid_mask},
+                    kwargs={'indices': self._indices, 'weights': self._weights,
+                            'valid_mask': self._valid_mask},
                     input_core_dims=[[self._spatial_dim]],
                     output_core_dims=[["cells"]],
                     exclude_dims=set((self._spatial_dim, "cells")),
                     dask="parallelized",
                     output_dtypes=[da.dtype],
-                    dask_gufunc_kwargs={'output_sizes': {'cells': len(self._target_lon)}, 'allow_rechunk': True}
+                    dask_gufunc_kwargs={'output_sizes': {'cells': len(self._target_lon)},
+                                        'allow_rechunk': True}
                 )
-            else: # regular
+            else:  # regular
                 if self._lat_name not in da.dims or self._lon_name not in da.dims:
                     out_ds[var_name] = da
                     continue
@@ -256,7 +263,8 @@ class HealpixInterpolator:
                     exclude_dims=set((self._lat_name, self._lon_name)),
                     dask="parallelized",
                     output_dtypes=[da.dtype],
-                    dask_gufunc_kwargs={'output_sizes': {'cells': len(self._target_lon)}, 'allow_rechunk': True}
+                    dask_gufunc_kwargs={'output_sizes': {'cells': len(self._target_lon)},
+                                        'allow_rechunk': True}
                 )
 
             interpolated_da = interpolated_da.assign_coords(cells=out_ds.cells)
@@ -287,7 +295,8 @@ class HealpixInterpolator:
         )
 
         history_msg = f"Interpolated to HEALPix grid (nside={self.nside}, scheme=RING) using HealICON."
-        out_ds.attrs['history'] = out_ds.attrs.get('history', '') + '\n' + history_msg if 'history' in out_ds.attrs else history_msg
+        out_ds.attrs['history'] = out_ds.attrs.get('history',
+                                                   '') + '\n' + history_msg if 'history' in out_ds.attrs else history_msg
 
         return out_ds
 

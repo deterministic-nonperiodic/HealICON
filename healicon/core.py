@@ -13,27 +13,34 @@ from .interpolate import HealpixInterpolator
 logger = logging.getLogger(__name__)
 
 
-def process_file(
-        input_file: str,
+def process_dataset(
+        ds: xr.Dataset,
+        dataset_name: str,
         output_file: str,
         nside: Optional[int] = None,
         config_path: Optional[str] = None,
         grid_file: Optional[str] = None,
         use_gpu: bool = False,
-        interpolator: Optional[HealpixInterpolator] = None
+        interpolator: Optional[HealpixInterpolator] = None,
+        lst_bins: Optional[int] = None
 ):
     """
-    Process a single input file, interpolate to HEALPix, and save to output file.
+    Process a dataset, interpolate to HEALPix, and save to output file.
     """
-    logger.info(f"Processing {input_file} -> {output_file}")
+    logger.info(f"Processing {dataset_name} -> {output_file}")
 
     # Load mapping
     user_mapping = load_variable_mapping(config_path)
 
-    # Open dataset with chunking for Dask
-    ds = xr.open_dataset(input_file, chunks='auto')
+    # Detect SABER data
+    is_saber = False
+    if ds.attrs.get('Mission') == 'TIMED' and 'SABER' in str(ds.attrs.get('Title', '')):
+        logger.info("Detected SABER dataset. Using native parser.")
+        from .parsers import parse_saber
+        ds = parse_saber(ds, nside=nside, lst_bins=lst_bins)
+        is_saber = True
 
-    if grid_file:
+    if grid_file and not is_saber:
         logger.info(f"Loading external grid file: {grid_file}")
         grid_ds = xr.open_dataset(grid_file)
         grid_coords = {}
@@ -53,7 +60,7 @@ def process_file(
                     ds = ds.rename({in_var: out_var})
                 vars_to_keep.append(out_var)
             else:
-                logger.warning(f"Variable '{in_var}' not found in {input_file}")
+                logger.warning(f"Variable '{in_var}' not found in {dataset_name}")
     else:
         # Fallback to CF conventions
         cf_map = apply_cf_conventions(ds)
@@ -88,16 +95,16 @@ def process_file(
 
     if spatial_dims:
         chunk_dict = {dim: -1 for dim in spatial_dims}
-        for dim in ds.dims:
-            if dim not in spatial_dims:
-                chunk_dict[dim] = 1
         ds = ds.chunk(chunk_dict)
 
-    if interpolator is None:
-        interpolator = HealpixInterpolator(nside=nside, use_gpu=use_gpu)
+    if not is_saber:
+        if interpolator is None:
+            interpolator = HealpixInterpolator(nside=nside, use_gpu=use_gpu)
 
-    # Perform interpolation
-    out_ds = interpolator(ds)
+        # Perform interpolation
+        out_ds = interpolator(ds)
+    else:
+        out_ds = ds
 
     # Ensure chunking is reasonable for output writing
     try:
@@ -116,7 +123,25 @@ def process_file(
 
     ds.close()
     out_ds.close()
-    logger.info(f"Finished {input_file}")
+    logger.info(f"Finished {dataset_name}")
+
+def process_file(
+        input_file: str,
+        output_file: str,
+        nside: Optional[int] = None,
+        config_path: Optional[str] = None,
+        grid_file: Optional[str] = None,
+        use_gpu: bool = False,
+        interpolator: Optional[HealpixInterpolator] = None,
+        lst_bins: Optional[int] = None
+):
+    """
+    Process a single input file, interpolate to HEALPix, and save to output file.
+    """
+    ds = xr.open_dataset(input_file, chunks='auto')
+    process_dataset(ds, input_file, output_file, nside, config_path, grid_file, use_gpu, interpolator, lst_bins)
+
+
 
 
 def run_sequential(
@@ -125,10 +150,12 @@ def run_sequential(
         nside: Optional[int] = None,
         config_path: Optional[str] = None,
         grid_file: Optional[str] = None,
-        use_gpu: bool = False
+        use_gpu: bool = False,
+        lst_bins: Optional[int] = None,
+        cat: bool = False
 ):
     """
-    Process multiple files sequentially.
+    Process multiple files. If cat=True, combine them into a single dataset before processing.
     """
     input_files = sorted(glob.glob(input_pattern))
 
@@ -152,18 +179,49 @@ def run_sequential(
 
     interpolator = HealpixInterpolator(nside=nside, use_gpu=use_gpu)
 
-    for input_file in input_files:
-        basename = os.path.basename(input_file)
-        # Remove extension for templating
-        name_no_ext, _ = os.path.splitext(basename)
+    if cat:
+        # Use open_mfdataset to combine all input files
+        # Check first file to see if it's SABER
+        ds_first = xr.open_dataset(input_files[0])
+        is_saber = False
+        if ds_first.attrs.get('Mission') == 'TIMED' and 'SABER' in str(ds_first.attrs.get('Title', '')):
+            is_saber = True
+        ds_first.close()
 
-        # Format output file
-        output_file = output_template.format(basename=basename, name_no_ext=name_no_ext)
+        if is_saber:
+            max_alt = 0
+            for f in input_files:
+                with xr.open_dataset(f) as d:
+                    max_alt = max(max_alt, d.sizes.get('altitude', 0))
+            
+            def preprocess_saber(d):
+                import numpy as np
+                alt_size = d.sizes.get('altitude', 0)
+                if alt_size < max_alt:
+                    return d.pad(altitude=(0, max_alt - alt_size), constant_values=np.nan)
+                return d
+                
+            ds = xr.open_mfdataset(input_files, combine='nested', concat_dim='event', chunks='auto', preprocess=preprocess_saber)
+        else:
+            ds = xr.open_mfdataset(input_files, combine='by_coords', chunks='auto')
 
-        # Ensure output directory exists
-        os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+        # Format output file using the literal template
+        os.makedirs(os.path.dirname(os.path.abspath(output_template)) or '.', exist_ok=True)
+        
+        process_dataset(ds, "Combined_MFDataset", output_template, nside, config_path, grid_file, use_gpu, interpolator, lst_bins)
+    else:
+        for input_file in input_files:
+            basename = os.path.basename(input_file)
+            # Remove extension for templating
+            name_no_ext, _ = os.path.splitext(basename)
 
-        process_file(input_file, output_file, nside, config_path, grid_file, use_gpu, interpolator=interpolator)
+            # Format output file
+            output_file = output_template.format(basename=basename, name_no_ext=name_no_ext)
+
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(os.path.abspath(output_file)) or '.', exist_ok=True)
+
+            process_file(input_file, output_file, nside, config_path, grid_file, use_gpu, interpolator=interpolator, lst_bins=lst_bins)
 
     if client:
         client.close()

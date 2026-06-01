@@ -1,0 +1,194 @@
+import logging
+
+import healpy as hp
+import numpy as np
+import xarray as xr
+
+logger = logging.getLogger(__name__)
+
+
+def parse_saber(ds: xr.Dataset, nside: int = None, lst_bins: int = None) -> xr.Dataset:
+    """
+    Parse SABER satellite data and bin it to a HEALPix grid.
+    The input dataset is expected to have dimensions (event, altitude)
+    with tangent-point lat/lon coordinates.
+    """
+    if nside is None:
+        nside = 32
+        logger.info(f"No nside provided for SABER parsing. Defaulting to nside={nside}.")
+
+    npix = hp.nside2npix(nside)
+    cell_area = 4 * np.pi / npix
+
+    # Ensure required coordinates exist
+    if 'tplatitude' not in ds or 'tplongitude' not in ds:
+        raise ValueError("SABER parser requires 'tplatitude' and 'tplongitude' variables.")
+
+    # Convert coordinates to numpy arrays and handle missing values
+    lat = ds['tplatitude'].values
+    lon = ds['tplongitude'].values
+
+    # NetCDF definition uses -999.f for missing values. Also check for NaN.
+    # The attributes might give us the exact missing value, but we can hardcode for SABER.
+    missing_val = ds['tplatitude'].attrs.get('missing_value', -999.0)
+
+    # Valid mask for coordinates
+    valid_coords = (lat != missing_val) & (lon != missing_val) & (~np.isnan(lat)) & (~np.isnan(lon))
+
+    # Convert to radians
+    theta = np.deg2rad(90.0 - lat)
+    phi = np.deg2rad(lon)
+
+    # Map to pixels. Invalid coordinates will be mapped to pixel 0 temporarily, but we'll mask them out.
+    theta_safe = np.where(valid_coords, theta, 0.0)
+    phi_safe = np.where(valid_coords, phi, 0.0)
+    pix = hp.ang2pix(nside, theta_safe, phi_safe)
+
+    n_alt = ds.sizes['altitude']
+
+    # We will build a new dataset with dimensions (altitude, cells)
+    # Handle LST extraction and binning
+    lst_indices = None
+    if lst_bins is not None:
+        if 'tpSolarLT' not in ds:
+            raise ValueError("SABER parser requires 'tpSolarLT' to bin by LST.")
+        lst_msec = ds['tpSolarLT'].values
+        lst_missing = ds['tpSolarLT'].attrs.get('missing_value', missing_val)
+        valid_coords = valid_coords & (lst_msec != lst_missing) & (~np.isnan(lst_msec))
+
+        # Convert msec to hours
+        lst_hours = lst_msec / 3600000.0
+        lst_hours = lst_hours % 24.0
+
+        # Calculate indices [0, lst_bins - 1]
+        lst_indices_raw = np.floor(lst_hours / 24.0 * lst_bins).astype(int)
+        lst_indices = np.clip(np.where(valid_coords, lst_indices_raw, 0), 0, lst_bins - 1)
+
+        out_coords = {
+            'altitude': ds[
+                'altitude'].values if 'altitude' in ds.coords or 'altitude' in ds else np.arange(
+                n_alt),
+            'cells': np.arange(npix),
+            'lst': np.linspace(0, 24, lst_bins, endpoint=False) + (12.0 / lst_bins)  # Bin centers
+        }
+    else:
+        out_coords = {
+            'altitude': ds[
+                'altitude'].values if 'altitude' in ds.coords or 'altitude' in ds else np.arange(
+                n_alt),
+            'cells': np.arange(npix)
+        }
+
+    out_ds = xr.Dataset(coords=out_coords)
+    if lst_bins is not None:
+        out_ds['lst'].attrs = {"standard_name": "time", "long_name": "Local Solar Time",
+                               "units": "hours"}
+
+    # Helper to bin a single 2D array (event, altitude)
+    def bin_var(data, missing, is_valid):
+        # We process altitude by altitude to avoid huge memory spikes, though the dataset is relatively small.
+        if lst_bins is None:
+            out = np.full((n_alt, npix), np.nan, dtype=data.dtype)
+        else:
+            out = np.full((n_alt, npix, lst_bins), np.nan, dtype=data.dtype)
+
+        for i in range(n_alt):
+            d = data[:, i]
+            p = pix[:, i]
+            v = is_valid[:, i]
+
+            var_valid = v & (d != missing) & (~np.isnan(d))
+            if not np.any(var_valid):
+                continue
+
+            d_valid = d[var_valid]
+            p_valid = p[var_valid]
+
+            if lst_bins is None:
+                sums = np.bincount(p_valid, weights=d_valid, minlength=npix)
+                counts = np.bincount(p_valid, minlength=npix)
+                mask = counts > 0
+                out[i, mask] = sums[mask] / counts[mask]
+            else:
+                l_valid = lst_indices[:, i][var_valid]
+                # Flatten spatial and LST indices: 1D index = p * lst_bins + l
+                flat_idx = p_valid * lst_bins + l_valid
+                total_bins = npix * lst_bins
+
+                sums = np.bincount(flat_idx, weights=d_valid, minlength=total_bins)
+                counts = np.bincount(flat_idx, minlength=total_bins)
+                mask = counts > 0
+
+                sums_valid = sums[mask] / counts[mask]
+
+                # Assign back to 2D shape (npix, lst_bins)
+                flat_out = np.full(total_bins, np.nan, dtype=data.dtype)
+                flat_out[mask] = sums_valid
+                out[i] = flat_out.reshape(npix, lst_bins)
+
+        return out
+
+    # Iterate over data variables
+    for var in ds.data_vars:
+        if var in ['tplatitude', 'tplongitude', 'orbit', 'date', 'time', 'tpaltitude',
+                   'tpgpaltitude', 'tpSolarLT', 'tpSolarZen']:
+            # We skip coordinate-like variables and metadata for the binned product,
+            # unless we specifically want them. 
+            # Often, we might want the binned time or solar zenith angle.
+            # Let's bin pressure, density, temperature, and mixing ratios.
+            # We can also bin tpSolarZen if useful.
+            pass
+
+        if 'event' in ds[var].dims and 'altitude' in ds[var].dims:
+            logger.info(f"Binning SABER variable {var} to HEALPix...")
+            d_val = ds[var].values
+            m_val = ds[var].attrs.get('missing_value', missing_val)
+
+            binned_data = bin_var(d_val, m_val, valid_coords)
+
+            # Some variables might be integer (like time), convert out to float to support NaN
+            dims_out = ['altitude', 'cells'] if lst_bins is None else ['altitude', 'cells', 'lst']
+            out_ds[var] = xr.DataArray(
+                binned_data,
+                dims=dims_out,
+                attrs=ds[var].attrs
+            )
+            # Ensure _FillValue / missing_value is consistent, but xarray uses NaN.
+            if 'missing_value' in out_ds[var].attrs:
+                del out_ds[var].attrs['missing_value']
+
+    # Copy global attributes
+    out_ds.attrs = ds.attrs.copy()
+
+    # Add HEALPix metadata
+    out_ds.attrs['healpix_nside'] = nside
+    out_ds.attrs['healpix_npix'] = npix
+    out_ds.attrs['healpix_scheme'] = 'RING'
+    out_ds.attrs['healpix_cell_area_sr'] = f"{cell_area:.6e}"
+
+    out_ds["healpix"] = xr.DataArray(
+        np.int32(0),
+        attrs={
+            "grid_mapping_name": "healpix",
+            "healpix_nside": np.int32(nside),
+            "healpix_order": "ring"
+        }
+    )
+
+    for var in out_ds.data_vars:
+        if var != 'healpix':
+            out_ds[var].attrs['grid_mapping'] = 'healpix'
+
+    # Add lon/lat coordinates for cells (optional but standard for HealICON)
+    from .grid import get_healpix_coords
+    target_lon, target_lat = get_healpix_coords(nside)
+    out_ds.coords["lon"] = ("cells", target_lon)
+    out_ds.coords["lat"] = ("cells", target_lat)
+    out_ds.coords["lon"].attrs = {"standard_name": "longitude", "units": "degrees_east"}
+    out_ds.coords["lat"].attrs = {"standard_name": "latitude", "units": "degrees_north"}
+
+    history_msg = f"Parsed SABER Level2A dataset and binned to HEALPix grid (nside={nside}, RING) using HealICON."
+    out_ds.attrs['history'] = out_ds.attrs.get('history',
+                                               '') + '\n' + history_msg if 'history' in out_ds.attrs else history_msg
+
+    return out_ds

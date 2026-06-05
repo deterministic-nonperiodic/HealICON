@@ -7,7 +7,7 @@ import xarray as xr
 logger = logging.getLogger(__name__)
 
 
-def parse_saber(ds: xr.Dataset, nside: int = None, lst_bins: int = None) -> xr.Dataset:
+def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None) -> xr.Dataset:
     """
     Parse SABER satellite data and bin it to a HEALPix grid.
     The input dataset is expected to have dimensions (event, altitude)
@@ -47,29 +47,29 @@ def parse_saber(ds: xr.Dataset, nside: int = None, lst_bins: int = None) -> xr.D
     n_alt = ds.sizes['altitude']
 
     # We will build a new dataset with dimensions (altitude, cells)
-    # Handle LST extraction and binning
-    lst_indices = None
-    if lst_bins is not None:
-        if 'tpSolarLT' not in ds:
-            raise ValueError("SABER parser requires 'tpSolarLT' to bin by LST.")
-        lst_msec = ds['tpSolarLT'].values
-        lst_missing = ds['tpSolarLT'].attrs.get('missing_value', missing_val)
-        valid_coords = valid_coords & (lst_msec != lst_missing) & (~np.isnan(lst_msec))
+    # Handle UT extraction and binning
+    ut_indices = None
+    if ut_bins is not None:
+        if 'time' not in ds:
+            raise ValueError("SABER parser requires 'time' to bin by UT.")
+        ut_msec = ds['time'].values
+        ut_missing = ds['time'].attrs.get('missing_value', missing_val)
+        valid_coords = valid_coords & (ut_msec != ut_missing) & (~np.isnan(ut_msec))
 
         # Convert msec to hours
-        lst_hours = lst_msec / 3600000.0
-        lst_hours = lst_hours % 24.0
+        ut_hours = ut_msec / 3600000.0
+        ut_hours = ut_hours % 24.0
 
-        # Calculate indices [0, lst_bins - 1]
-        lst_indices_raw = np.floor(lst_hours / 24.0 * lst_bins).astype(int)
-        lst_indices = np.clip(np.where(valid_coords, lst_indices_raw, 0), 0, lst_bins - 1)
+        # Calculate indices [0, ut_bins - 1]
+        ut_indices_raw = np.floor(ut_hours / 24.0 * ut_bins).astype(int)
+        ut_indices = np.clip(np.where(valid_coords, ut_indices_raw, 0), 0, ut_bins - 1)
 
         out_coords = {
             'altitude': ds[
                 'altitude'].values if 'altitude' in ds.coords or 'altitude' in ds else np.arange(
                 n_alt),
             'cells': np.arange(npix),
-            'lst': np.linspace(0, 24, lst_bins, endpoint=False) + (12.0 / lst_bins)  # Bin centers
+            'ut': np.linspace(0, 24, ut_bins, endpoint=False) + (12.0 / ut_bins)  # Bin centers
         }
     else:
         out_coords = {
@@ -80,17 +80,17 @@ def parse_saber(ds: xr.Dataset, nside: int = None, lst_bins: int = None) -> xr.D
         }
 
     out_ds = xr.Dataset(coords=out_coords)
-    if lst_bins is not None:
-        out_ds['lst'].attrs = {"standard_name": "time", "long_name": "Local Solar Time",
+    if ut_bins is not None:
+        out_ds['ut'].attrs = {"standard_name": "time", "long_name": "Universal Time",
                                "units": "hours"}
 
     # Helper to bin a single 2D array (event, altitude)
     def bin_var(data, missing, is_valid):
         # We process altitude by altitude to avoid huge memory spikes, though the dataset is relatively small.
-        if lst_bins is None:
+        if ut_bins is None:
             out = np.full((n_alt, npix), np.nan, dtype=data.dtype)
         else:
-            out = np.full((n_alt, npix, lst_bins), np.nan, dtype=data.dtype)
+            out = np.full((n_alt, npix, ut_bins), np.nan, dtype=data.dtype)
 
         for i in range(n_alt):
             d = data[:, i]
@@ -104,16 +104,16 @@ def parse_saber(ds: xr.Dataset, nside: int = None, lst_bins: int = None) -> xr.D
             d_valid = d[var_valid]
             p_valid = p[var_valid]
 
-            if lst_bins is None:
+            if ut_bins is None:
                 sums = np.bincount(p_valid, weights=d_valid, minlength=npix)
                 counts = np.bincount(p_valid, minlength=npix)
                 mask = counts > 0
                 out[i, mask] = sums[mask] / counts[mask]
             else:
-                l_valid = lst_indices[:, i][var_valid]
-                # Flatten spatial and LST indices: 1D index = p * lst_bins + l
-                flat_idx = p_valid * lst_bins + l_valid
-                total_bins = npix * lst_bins
+                l_valid = ut_indices[:, i][var_valid]
+                # Flatten spatial and UT indices: 1D index = p * ut_bins + l
+                flat_idx = p_valid * ut_bins + l_valid
+                total_bins = npix * ut_bins
 
                 sums = np.bincount(flat_idx, weights=d_valid, minlength=total_bins)
                 counts = np.bincount(flat_idx, minlength=total_bins)
@@ -121,10 +121,10 @@ def parse_saber(ds: xr.Dataset, nside: int = None, lst_bins: int = None) -> xr.D
 
                 sums_valid = sums[mask] / counts[mask]
 
-                # Assign back to 2D shape (npix, lst_bins)
+                # Assign back to 2D shape (npix, ut_bins)
                 flat_out = np.full(total_bins, np.nan, dtype=data.dtype)
                 flat_out[mask] = sums_valid
-                out[i] = flat_out.reshape(npix, lst_bins)
+                out[i] = flat_out.reshape(npix, ut_bins)
 
         return out
 
@@ -147,7 +147,7 @@ def parse_saber(ds: xr.Dataset, nside: int = None, lst_bins: int = None) -> xr.D
             binned_data = bin_var(d_val, m_val, valid_coords)
 
             # Some variables might be integer (like time), convert out to float to support NaN
-            dims_out = ['altitude', 'cells'] if lst_bins is None else ['altitude', 'cells', 'lst']
+            dims_out = ['altitude', 'cells'] if ut_bins is None else ['altitude', 'cells', 'ut']
             out_ds[var] = xr.DataArray(
                 binned_data,
                 dims=dims_out,

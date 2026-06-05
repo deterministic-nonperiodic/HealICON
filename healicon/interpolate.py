@@ -42,6 +42,16 @@ def _interp_regular_block(data_block, lon_coords, lat_coords, target_lon, target
     Apply bilinear interpolation to a single block of data on a regular grid.
     """
     from scipy.interpolate import interpn
+    
+    # Check if we need to pad longitude for periodic boundary
+    if len(lon_coords) > 1:
+        dx = lon_coords[1] - lon_coords[0]
+        # If the grid is near-global but missing the 360 wrap point
+        if (lon_coords[-1] + dx) >= 360.0 - 1e-5 and lon_coords[-1] < 360.0:
+            lon_coords = np.append(lon_coords, lon_coords[-1] + dx)
+            # Append the first longitude slice to the end
+            data_block = np.concatenate([data_block, data_block[..., :1]], axis=-1)
+            
     data_reshaped = np.moveaxis(data_block, [-2, -1], [0, 1])
     xi = np.column_stack((target_lat, target_lon))
     interpolated = interpn((lat_coords, lon_coords), data_reshaped, xi,
@@ -50,15 +60,7 @@ def _interp_regular_block(data_block, lon_coords, lat_coords, target_lon, target
     return interpolated
 
 
-def _find_cf_coordinate(ds: xr.Dataset, expected_standard: str, common_names: list) -> str:
-    """Robustly find a coordinate using CF conventions or common name fallbacks."""
-    for name, coord in ds.coords.items():
-        if str(coord.attrs.get("standard_name", "")).lower() == expected_standard:
-            return name
-    for name in common_names:
-        if name in ds.coords or name in ds.data_vars:
-            return name
-    return None
+
 
 
 class HealpixInterpolator:
@@ -123,8 +125,11 @@ class HealpixInterpolator:
             self.nside = self._determine_nside(ds)
             logger.info(f"Auto-calculated nside={self.nside}")
 
-        self._lon_name = _find_cf_coordinate(ds, "longitude", ["lon", "longitude", "clon"])
-        self._lat_name = _find_cf_coordinate(ds, "latitude", ["lat", "latitude", "clat"])
+        from .cf_coords import _find_coordinate
+        lon_coord = _find_coordinate(ds, "lon", raise_notfound=False)
+        lat_coord = _find_coordinate(ds, "lat", raise_notfound=False)
+        self._lon_name = getattr(lon_coord, "name", None)
+        self._lat_name = getattr(lat_coord, "name", None)
 
         if not self._lon_name or not self._lat_name:
             raise ValueError(
@@ -157,6 +162,12 @@ class HealpixInterpolator:
             # For unstructured, build KDTree
             source_lon = ds[self._lon_name].values
             source_lat = ds[self._lat_name].values
+            
+            # Convert to degrees if in radians
+            lon_units = str(ds[self._lon_name].attrs.get('units', '')).lower()
+            if 'rad' in lon_units:
+                source_lon = np.rad2deg(source_lon)
+                source_lat = np.rad2deg(source_lat)
 
             # Unstack if curvilinear for coords
             if self._grid_type == 'curvilinear':
@@ -181,12 +192,12 @@ class HealpixInterpolator:
                     logger.warning(f"GPU KDTree failed ({e}). Falling back to CPU.")
                     from scipy.spatial import cKDTree
                     tree = cKDTree(source_xyz)
-                    distances, indices = tree.query(target_xyz, k=k)
+                    distances, indices = tree.query(target_xyz, k=k, workers=-1)
             else:
                 logger.info("Using SciPy cKDTree for interpolation.")
                 from scipy.spatial import cKDTree
                 tree = cKDTree(source_xyz)
-                distances, indices = tree.query(target_xyz, k=k)
+                distances, indices = tree.query(target_xyz, k=k, workers=-1)
 
             self._valid_mask = distances[:, 0] < 0.05
             distances = np.maximum(distances, 1e-12)

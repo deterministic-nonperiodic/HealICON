@@ -109,7 +109,10 @@ healicon convert -n 128 --gpu "data/icon_*.nc" "output/hp_{basename}"
 healicon zonal-mean "data.nc" "zonal.nc"
 
 # 2. Spectral Analysis: Compute angular power spectrum (C_l)
+# Options include standard power spectrum, cross-spectra, and kinetic energy spectra (from u/v or div/vor).
 healicon spectrum -v u --lmax 256 "data.nc" "spectrum.nc"
+healicon spectrum -v temp -v q --type cross "data.nc" "cross_spectrum.nc"
+healicon spectrum --type kinetic "data.nc" "kinetic_energy.nc"
 
 # 3. Spatial Filtering: Apply a Gaussian beam (FWHM) or hard spectral cutoff (lmax)
 healicon filter --fwhm 5.0 "data.nc" "filtered.nc"

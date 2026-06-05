@@ -5,6 +5,7 @@ HealICON: Interpolate atmospheric model outputs to HEALPix grid.
 __version__ = "0.1.0"
 
 from .interpolate import interpolate_to_healpix
+from . import core, grid, interpolate, analysis, extract, visualize
 from .analysis import (
     compute_spectrum,
     filter_spatial,
@@ -36,4 +37,5 @@ __all__ = [
     "extract_along_longitude",
     "extract_point",
     "zonal_mean",
+    "visualize",
 ]

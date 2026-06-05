@@ -103,7 +103,7 @@ def main():
     secax.get_xaxis().set_major_formatter(plt.ScalarFormatter())
     
     plt.tight_layout()
-    save_path = "spectral_filtering_effect.png"
+    save_path = "spectral_filtering_effect_v2.png"
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"Saved plot to {save_path}")
 

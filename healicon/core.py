@@ -22,7 +22,7 @@ def process_dataset(
         grid_file: Optional[str] = None,
         use_gpu: bool = False,
         interpolator: Optional[HealpixInterpolator] = None,
-        lst_bins: Optional[int] = None
+        ut_bins: Optional[int] = None
 ):
     """
     Process a dataset, interpolate to HEALPix, and save to output file.
@@ -37,7 +37,7 @@ def process_dataset(
     if ds.attrs.get('Mission') == 'TIMED' and 'SABER' in str(ds.attrs.get('Title', '')):
         logger.info("Detected SABER dataset. Using native parser.")
         from .parsers import parse_saber
-        ds = parse_saber(ds, nside=nside, lst_bins=lst_bins)
+        ds = parse_saber(ds, nside=nside, ut_bins=ut_bins)
         is_saber = True
 
     if grid_file and not is_saber:
@@ -85,17 +85,25 @@ def process_dataset(
         drop_vars = [v for v in ds.variables if v not in all_vars and v not in ds.dims]
         ds = ds.drop_vars(drop_vars, errors='ignore')
 
-    # Rechunk: spatial dims fully contiguous, all others chunked by 1 (time, height, etc.)
+    # Rechunk: spatial dims fully contiguous, all others automatically chunked (time, height, etc.)
     spatial_dims = []
     for name in ["lon", "longitude", "clon", "lat", "latitude", "clat"]:
         if name in ds.coords or name in ds.data_vars:
             for dim in ds[name].dims:
                 if dim not in spatial_dims:
                     spatial_dims.append(dim)
+                    
+    try:
+        from .grid import get_cells_dim
+        cell_dim = get_cells_dim(ds)
+        if cell_dim not in spatial_dims:
+            spatial_dims.append(cell_dim)
+    except ValueError:
+        pass
 
     if spatial_dims:
         chunk_dict = {dim: -1 for dim in spatial_dims}
-        ds = ds.chunk(chunk_dict)
+        ds = ds.chunk(chunk_dict).unify_chunks()
 
     if not is_saber:
         if interpolator is None:
@@ -151,7 +159,7 @@ def run_sequential(
         config_path: Optional[str] = None,
         grid_file: Optional[str] = None,
         use_gpu: bool = False,
-        lst_bins: Optional[int] = None,
+        ut_bins: Optional[int] = None,
         cat: bool = False
 ):
     """
@@ -206,9 +214,15 @@ def run_sequential(
             ds = xr.open_mfdataset(input_files, combine='by_coords', chunks='auto')
 
         # Format output file using the literal template
-        os.makedirs(os.path.dirname(os.path.abspath(output_template)) or '.', exist_ok=True)
+        output_path = os.path.abspath(output_template)
+        for f in input_files:
+            if os.path.abspath(f) == output_path:
+                logger.error(f"Input file {f} is the same as output file. Aborting to prevent data corruption.")
+                return
+
+        os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
         
-        process_dataset(ds, "Combined_MFDataset", output_template, nside, config_path, grid_file, use_gpu, interpolator, lst_bins)
+        process_dataset(ds, "Combined_MFDataset", output_template, nside, config_path, grid_file, use_gpu, interpolator, ut_bins)
     else:
         for input_file in input_files:
             basename = os.path.basename(input_file)
@@ -218,10 +232,14 @@ def run_sequential(
             # Format output file
             output_file = output_template.format(basename=basename, name_no_ext=name_no_ext)
 
+            if os.path.abspath(input_file) == os.path.abspath(output_file):
+                logger.error(f"Input file {input_file} is the same as output file. Skipping to prevent data corruption.")
+                continue
+
             # Ensure output directory exists
             os.makedirs(os.path.dirname(os.path.abspath(output_file)) or '.', exist_ok=True)
 
-            process_file(input_file, output_file, nside, config_path, grid_file, use_gpu, interpolator=interpolator, lst_bins=lst_bins)
+            process_file(input_file, output_file, nside, config_path, grid_file, use_gpu, interpolator=interpolator, ut_bins=ut_bins)
 
     if client:
         client.close()

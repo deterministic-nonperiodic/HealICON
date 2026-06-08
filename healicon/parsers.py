@@ -82,7 +82,7 @@ def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None) -> xr.Da
     out_ds = xr.Dataset(coords=out_coords)
     if ut_bins is not None:
         out_ds['ut'].attrs = {"standard_name": "time", "long_name": "Universal Time",
-                               "units": "hours"}
+                              "units": "hours"}
 
     # Helper to bin a single 2D array (event, altitude)
     def bin_var(data, missing, is_valid):

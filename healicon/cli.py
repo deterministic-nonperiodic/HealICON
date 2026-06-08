@@ -82,7 +82,7 @@ def _load_and_ensure_healpix(ifile, target_nside=None):
             for dim in ds[name].dims:
                 if dim not in spatial_dims:
                     spatial_dims.append(dim)
-                    
+
     try:
         from .grid import get_cells_dim
         cell_dim = get_cells_dim(ds)
@@ -90,7 +90,7 @@ def _load_and_ensure_healpix(ifile, target_nside=None):
             spatial_dims.append(cell_dim)
     except ValueError:
         pass
-        
+
     if spatial_dims:
         ds = ds.chunk({dim: -1 for dim in spatial_dims}).unify_chunks()
 
@@ -158,7 +158,8 @@ def convert(ifile, ofile, nside, ut_bins, config_path, grid_file, gpu, cat):
     """
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     run_sequential(
         input_pattern=ifile,
@@ -185,7 +186,8 @@ def extract_lat(ifile, ofile, lat, num_lons):
     """
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     from .extract import extract_along_latitude
 
@@ -209,7 +211,8 @@ def extract_lon(ifile, ofile, lon, num_lats):
     """Extract data along all latitudes for a specific longitude."""
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     from .extract import extract_along_longitude
 
@@ -229,7 +232,8 @@ def extract_point(ifile, ofile, lat, lon):
     """Extract full time/height profile for a specific lat/lon point."""
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     from .extract import extract_point as ep
 
@@ -253,7 +257,8 @@ def fill(ifile, ofile, spatial_dim, time_dim):
     """
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     from .curation import fill_healpix_gaps
     import xarray as xr
@@ -275,7 +280,8 @@ def zonal_mean(ifile, ofile):
     """Compute the zonal mean (longitude average) across HEALPix rings."""
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     from .extract import zonal_mean as zm
 
@@ -293,21 +299,23 @@ def zonal_mean(ifile, ofile):
               help='Variable(s) to compute spectrum for. Can be specified multiple times.')
 @click.option('--lmax', type=int, default=None,
               help='Maximum spherical harmonic degree l.')
-@click.option('--type', 'spectrum_type', type=click.Choice(['power', 'cross', 'kinetic']), default='power',
+@click.option('--type', 'spectrum_type', type=click.Choice(['power', 'cross', 'kinetic']),
+              default='power',
               help='Type of spectrum to compute: power (default), cross, or kinetic.')
 def spectrum(ifile, ofile, var_name, lmax, spectrum_type):
     """Compute the angular spectrum (Cl) of a variable or pair of variables."""
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     from .analysis import compute_spectrum, degree_to_wavelength
 
     ds = _load_and_ensure_healpix(ifile)
-    
+
     # Pass empty list if no variables provided (triggers auto-detection)
     var_list = list(var_name) if var_name else None
-    
+
     out_ds = compute_spectrum(ds, var_name=var_list, lmax=lmax, spectrum_type=spectrum_type)
     logger.info(f"Computing and saving {spectrum_type} spectrum to {ofile}")
     out_ds = out_ds.compute()
@@ -332,7 +340,8 @@ def filter(ifile, ofile, fwhm, lmax, wavelength_km):
     """Filter spatial maps using spherical harmonic transforms."""
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     from .analysis import filter_spatial
 
@@ -354,7 +363,8 @@ def regrade(ifile, ofile, nside, zoom):
     """Upgrade or downgrade the HEALPix resolution."""
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     from .analysis import regrade_resolution
 
@@ -391,7 +401,8 @@ def uv2dv(ifile, ofile, u_var, v_var, lmax):
     """Compute horizontal divergence and vorticity from U and V wind components."""
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     from .analysis import compute_vorticity_divergence
 
@@ -416,7 +427,8 @@ def dv2uv(ifile, ofile, div_var, vor_var, lmax):
     """Compute U and V wind components from horizontal divergence and vorticity."""
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     from .analysis import compute_uv_from_vorticity_divergence
 
@@ -450,7 +462,8 @@ def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
     """
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     from .analysis import compute_helmholtz
 
@@ -491,7 +504,8 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim)
     """
     import os
     if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError("Input and output files cannot be the same. This would corrupt the input file.")
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
     from .analysis import compute_tidal_analysis
 
@@ -546,42 +560,47 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim)
 
 @cli.command()
 @click.argument('ifile')
-@click.option('--type', 'plot_type', type=click.Choice(['tides', 'section', 'map', 'spectrum']), required=True,
+@click.option('--type', 'plot_type', type=click.Choice(['tides', 'section', 'map', 'spectrum']),
+              required=True,
               help='Type of plot to generate.')
 @click.option('--var', 'var_name', default=None,
               help='Variable to plot (for section, map, or spectrum).')
 @click.option('--x-dim', default='lat', help='X dimension for section plots (default: lat)')
 @click.option('--y-dim', default='z_mc', help='Y dimension for section plots (default: z_mc)')
-@click.option('--height', 'target_height', type=float, default=None, help='Select level closest to this height (km) for map and spectrum plots. Avoids vertical averages.')
-@click.option('--out-dir', default='.', help='Output directory for plots (default: current directory)')
+@click.option('--height', 'target_height', type=float, default=None,
+              help='Select level closest to this height (km) for map and spectrum plots. Avoids vertical averages.')
+@click.option('--out-dir', default='.',
+              help='Output directory for plots (default: current directory)')
 @click.option('--prefix', default=None, help='Prefix for output filenames.')
 def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, out_dir, prefix):
-    """Generate publication-ready visualizations for healicon products."""
+    """Generate simple visualizations for healicon products."""
     import xarray as xr
     import os
     from .visualize import plot_tides, plot_section, plot_map, plot_spectrum
 
     logger.info(f"Opening file: {ifile}")
     ds = xr.open_dataset(ifile, chunks='auto')
-    
+
     if prefix is None:
         prefix = os.path.splitext(os.path.basename(ifile))[0]
 
     logger.info(f"Generating '{plot_type}' plot...")
-    
+
     if plot_type == 'tides':
         plot_tides(ds, out_dir=out_dir, prefix=prefix)
     elif plot_type == 'section':
         if var_name is None:
             raise click.UsageError("Must specify --var for section plots.")
-        plot_section(ds, var_name=var_name, x_dim=x_dim, y_dim=y_dim, out_dir=out_dir, prefix=prefix)
+        plot_section(ds, var_name=var_name, x_dim=x_dim, y_dim=y_dim, out_dir=out_dir,
+                     prefix=prefix)
     elif plot_type == 'map':
         if var_name is None:
             raise click.UsageError("Must specify --var for map plots.")
         plot_map(ds, var_name=var_name, target_height=target_height, out_dir=out_dir, prefix=prefix)
     elif plot_type == 'spectrum':
-        plot_spectrum(ds, var_name=var_name, target_height=target_height, out_dir=out_dir, prefix=prefix)
-        
+        plot_spectrum(ds, var_name=var_name, target_height=target_height, out_dir=out_dir,
+                      prefix=prefix)
+
     logger.info("Plotting complete.")
 
 

@@ -1,6 +1,5 @@
 import glob
 import logging
-import math
 import os
 from typing import Optional
 
@@ -92,7 +91,7 @@ def process_dataset(
             for dim in ds[name].dims:
                 if dim not in spatial_dims:
                     spatial_dims.append(dim)
-                    
+
     try:
         from .grid import get_cells_dim
         cell_dim = get_cells_dim(ds)
@@ -118,7 +117,8 @@ def process_dataset(
     try:
         from .grid import get_cells_dim
         out_cell_dim = get_cells_dim(out_ds)
-        out_ds = out_ds.chunk({out_cell_dim: -1})  # Output spatial dimension contiguous for HEALPix maps
+        out_ds = out_ds.chunk(
+            {out_cell_dim: -1})  # Output spatial dimension contiguous for HEALPix maps
     except ValueError:
         pass
 
@@ -132,6 +132,7 @@ def process_dataset(
     ds.close()
     out_ds.close()
     logger.info(f"Finished {dataset_name}")
+
 
 def process_file(
         input_file: str,
@@ -147,9 +148,8 @@ def process_file(
     Process a single input file, interpolate to HEALPix, and save to output file.
     """
     ds = xr.open_dataset(input_file, chunks='auto')
-    process_dataset(ds, input_file, output_file, nside, config_path, grid_file, use_gpu, interpolator, lst_bins)
-
-
+    process_dataset(ds, input_file, output_file, nside, config_path, grid_file, use_gpu,
+                    interpolator, lst_bins)
 
 
 def run_sequential(
@@ -192,7 +192,8 @@ def run_sequential(
         # Check first file to see if it's SABER
         ds_first = xr.open_dataset(input_files[0])
         is_saber = False
-        if ds_first.attrs.get('Mission') == 'TIMED' and 'SABER' in str(ds_first.attrs.get('Title', '')):
+        if ds_first.attrs.get('Mission') == 'TIMED' and 'SABER' in str(
+                ds_first.attrs.get('Title', '')):
             is_saber = True
         ds_first.close()
 
@@ -201,15 +202,16 @@ def run_sequential(
             for f in input_files:
                 with xr.open_dataset(f) as d:
                     max_alt = max(max_alt, d.sizes.get('altitude', 0))
-            
+
             def preprocess_saber(d):
                 import numpy as np
                 alt_size = d.sizes.get('altitude', 0)
                 if alt_size < max_alt:
                     return d.pad(altitude=(0, max_alt - alt_size), constant_values=np.nan)
                 return d
-                
-            ds = xr.open_mfdataset(input_files, combine='nested', concat_dim='event', chunks='auto', preprocess=preprocess_saber)
+
+            ds = xr.open_mfdataset(input_files, combine='nested', concat_dim='event', chunks='auto',
+                                   preprocess=preprocess_saber)
         else:
             ds = xr.open_mfdataset(input_files, combine='by_coords', chunks='auto')
 
@@ -217,12 +219,14 @@ def run_sequential(
         output_path = os.path.abspath(output_template)
         for f in input_files:
             if os.path.abspath(f) == output_path:
-                logger.error(f"Input file {f} is the same as output file. Aborting to prevent data corruption.")
+                logger.error(
+                    f"Input file {f} is the same as output file. Aborting to prevent data corruption.")
                 return
 
         os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
-        
-        process_dataset(ds, "Combined_MFDataset", output_template, nside, config_path, grid_file, use_gpu, interpolator, ut_bins)
+
+        process_dataset(ds, "Combined_MFDataset", output_template, nside, config_path, grid_file,
+                        use_gpu, interpolator, ut_bins)
     else:
         for input_file in input_files:
             basename = os.path.basename(input_file)
@@ -233,13 +237,15 @@ def run_sequential(
             output_file = output_template.format(basename=basename, name_no_ext=name_no_ext)
 
             if os.path.abspath(input_file) == os.path.abspath(output_file):
-                logger.error(f"Input file {input_file} is the same as output file. Skipping to prevent data corruption.")
+                logger.error(
+                    f"Input file {input_file} is the same as output file. Skipping to prevent data corruption.")
                 continue
 
             # Ensure output directory exists
             os.makedirs(os.path.dirname(os.path.abspath(output_file)) or '.', exist_ok=True)
 
-            process_file(input_file, output_file, nside, config_path, grid_file, use_gpu, interpolator=interpolator, ut_bins=ut_bins)
+            process_file(input_file, output_file, nside, config_path, grid_file, use_gpu,
+                         interpolator=interpolator, ut_bins=ut_bins)
 
     if client:
         client.close()

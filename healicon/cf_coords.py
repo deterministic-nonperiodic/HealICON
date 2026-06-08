@@ -1,4 +1,3 @@
-import re
 from typing import Tuple, Union, Dict, Any, List
 
 import numpy as np
@@ -143,7 +142,7 @@ def _find_coordinate(ds: xr.Dataset, name: str,
     def matches_criteria(c: xr.DataArray) -> bool:
         if name in ('lat', 'lon'):
             return _is_geographic(c, name)
-            
+
         # Check name
         if 'names' in criteria and c.name in criteria['names']:
             return True
@@ -209,9 +208,6 @@ def _get_units_str(c: xr.DataArray) -> str:
     return units
 
 
-
-
-
 # ----------------------
 # Compact CF-aware utils
 # ----------------------
@@ -253,6 +249,7 @@ def _coord_is_degrees(
                 return True
 
     return False
+
 
 def _coord_is_meter(c: xr.DataArray) -> bool:
     """Checks if the coordinate units are meter-like."""
@@ -381,7 +378,7 @@ def _is_geographic(coord: xr.DataArray, coord_type: str) -> bool:
     # Check units with direction-specific validation
     units_hints = lookup.get("units_hints", ())
     units_ok = any(hint in units for hint in units_hints)
-    
+
     # Generic units ('degree', 'rad') aren't enough to distinguish lat from lon on their own
     is_generic_unit = units in ('degree', 'degrees', 'deg', 'rad', 'radian')
     if is_generic_unit and not name_ok and not standard_name:
@@ -553,5 +550,3 @@ def get_spatial_dims(obj: Union[xr.Dataset, xr.DataArray]) -> Tuple[str, str]:
         "Expected CF-compliant lat/lon or projected y/x coordinates. "
         f"Available dims: {tuple(ds.dims)}, coords: {tuple(ds.coords)}"
     )
-
-

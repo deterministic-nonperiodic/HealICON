@@ -49,7 +49,7 @@ def _anafast_block(*args, lmax=None, is_nested=False, op_type='power'):
 
     orig_shape = data_blocks[0].shape
     npix = orig_shape[-1]
-    
+
     # Reshape all inputs to 2D
     data_2ds = [block.reshape(-1, npix) for block in data_blocks]
 
@@ -67,7 +67,7 @@ def _anafast_block(*args, lmax=None, is_nested=False, op_type='power'):
                 all_valid = False
                 break
             d_filled_list.append(np.where(valid_mask, d, np.nanmean(d)))
-            
+
         if not all_valid:
             out_data[i] = np.nan
             continue
@@ -87,15 +87,15 @@ def _anafast_block(*args, lmax=None, is_nested=False, op_type='power'):
             # Scalar power spectra for divergence and vorticity
             cl_D = hp.anafast(d_filled_list[0], lmax=lmax)
             cl_Z = hp.anafast(d_filled_list[1], lmax=lmax)
-            
+
             l = np.arange(lmax + 1)
             # Avoid division by zero at l=0
             l_fac = np.zeros_like(l, dtype=float)
             l_fac[1:] = 1.0 / (l[1:] * (l[1:] + 1))
-            
+
             # Earth radius squared (in meters)
             R_sq = (EARTH_RADIUS_KM * 1000) ** 2
-            
+
             out_data[i] = 0.5 * R_sq * l_fac * (cl_D + cl_Z)
         else:
             raise ValueError(f"Unknown operation type: {op_type}")
@@ -104,7 +104,8 @@ def _anafast_block(*args, lmax=None, is_nested=False, op_type='power'):
     return out_data.reshape(out_shape)
 
 
-def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None, lmax: int | None = None, spectrum_type: str = 'power') -> xr.Dataset:
+def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
+                     lmax: int | None = None, spectrum_type: str = 'power') -> xr.Dataset:
     """
     Computes the angular power spectrum (Cl) of one or more variables using spherical harmonics.
     If var_name is None, computes the spectrum for all data variables in the dataset that are defined on the HEALPix grid.
@@ -124,7 +125,7 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None, lm
             var_names = [var_name]
         else:
             var_names = list(var_name)
-    
+
     # Auto-detect variables for kinetic energy if not explicitly provided
     if spectrum_type == 'kinetic' and not var_names:
         if 'u' in ds and 'v' in ds:
@@ -137,20 +138,24 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None, lm
             var_names = ['div', 'vor']
             logger.info("Auto-detected 'div' and 'vor' for kinetic energy spectrum.")
         else:
-            raise ValueError("Could not auto-detect variables for kinetic energy spectrum. Please specify using --var.")
+            raise ValueError(
+                "Could not auto-detect variables for kinetic energy spectrum. Please specify using --var.")
 
     if not var_names and spectrum_type == 'power':
         exclude = {'lon', 'lat', 'clon', 'clat'}
         for v in ds.data_vars:
             if cell_dim in ds[v].dims:
                 v_str = str(v)
-                if v_str not in exclude and not v_str.endswith('_bnds') and not v_str.endswith('_bounds'):
+                if v_str not in exclude and not v_str.endswith('_bnds') and not v_str.endswith(
+                        '_bounds'):
                     var_names.append(v_str)
         if not var_names:
-            raise ValueError(f"No variables found with spatial dimension '{cell_dim}' to compute spectrum.")
+            raise ValueError(
+                f"No variables found with spatial dimension '{cell_dim}' to compute spectrum.")
 
     if spectrum_type in ('cross', 'kinetic') and len(var_names) != 2:
-        raise ValueError(f"Spectrum type '{spectrum_type}' requires exactly 2 variables, but got {len(var_names)}: {var_names}")
+        raise ValueError(
+            f"Spectrum type '{spectrum_type}' requires exactly 2 variables, but got {len(var_names)}: {var_names}")
 
     l_coords = np.arange(lmax + 1)
     out_ds = xr.Dataset(coords={'l': l_coords})
@@ -175,8 +180,9 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None, lm
             logger.info(f"Computing cross-spectrum for '{v1}' and '{v2}' up to lmax={lmax}.")
             op_type = 'cross'
             out_name = f"{v1}_{v2}_cl"
-        else: # kinetic
-            logger.info(f"Computing kinetic energy spectrum using '{v1}' and '{v2}' up to lmax={lmax}.")
+        else:  # kinetic
+            logger.info(
+                f"Computing kinetic energy spectrum using '{v1}' and '{v2}' up to lmax={lmax}.")
             # Check units to decide between wind components (spin-1) and div/vor (scalar)
             units1 = str(ds[v1].attrs.get('units', '')).strip().lower()
             if units1 in ('s-1', 's^-1', '1/s') or v1 in ('divergence', 'div', 'vorticity', 'vor'):
@@ -217,14 +223,14 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None, lm
     out_ds.attrs = ds.attrs
     history = ds.attrs.get('history', '')
     sep = "\n" if history else ""
-    
+
     if spectrum_type == 'power':
         desc = f"power spectrum for {', '.join(var_names)}"
     elif spectrum_type == 'cross':
         desc = f"cross-spectrum for {var_names[0]} and {var_names[1]}"
     else:
         desc = f"kinetic energy spectrum from {var_names[0]} and {var_names[1]}"
-        
+
     out_ds.attrs['history'] = f"{history}{sep}Computed {desc} up to lmax={lmax}."
     return out_ds
 
@@ -245,13 +251,13 @@ def _filter_block(data_block, fwhm_rad, lmax, is_nested):
             out_data[i] = np.nan
             continue
         d_filled = np.where(valid_mask, d, np.nanmean(d))
-        
+
         if fwhm_rad is not None:
             filtered = hp.smoothing(d_filled, fwhm=fwhm_rad)
         elif lmax is not None:
             alm = hp.map2alm(d_filled, lmax=lmax, iter=3)
             filtered = hp.alm2map(alm, nside=nside)
-            
+
         filtered = np.where(valid_mask, filtered, np.nan)
         out_data[i] = ensure_original_order(filtered, 'nested' if is_nested else 'ring')
 
@@ -483,12 +489,14 @@ def _helmholtz_block(u_block, v_block, lmax, nside, is_nested):
 
         # Streamfunction ψ: ζ = ∇²ψ  →  ψ_lm = -almB_lm / fl  (× a for m²/s)
         psi_alm = np.where(l_arr > 0, -almB / fl_safe, 0.0 + 0.0j)
-        psi_map = np.where(valid_mask, hp.alm2map(psi_alm, nside, lmax=lmax) * _EARTH_RADIUS_M, np.nan)
+        psi_map = np.where(valid_mask, hp.alm2map(psi_alm, nside, lmax=lmax) * _EARTH_RADIUS_M,
+                           np.nan)
         psi[i] = ensure_original_order(psi_map, 'nested' if is_nested else 'ring')
 
         # Velocity potential χ: D = ∇²χ  →  χ_lm = almE_lm / fl  (× a for m²/s)
         chi_alm = np.where(l_arr > 0, almE / fl_safe, 0.0 + 0.0j)
-        chi_map = np.where(valid_mask, hp.alm2map(chi_alm, nside, lmax=lmax) * _EARTH_RADIUS_M, np.nan)
+        chi_map = np.where(valid_mask, hp.alm2map(chi_alm, nside, lmax=lmax) * _EARTH_RADIUS_M,
+                           np.nan)
         chi[i] = ensure_original_order(chi_map, 'nested' if is_nested else 'ring')
 
     s = orig_shape
@@ -618,7 +626,7 @@ def _vorticity_divergence_block(u_block, v_block, lmax, nside, is_nested):
     for i in range(u_2d.shape[0]):
         u_ring = ensure_ring(u_2d[i], 'nested' if is_nested else 'ring')
         v_ring = ensure_ring(v_2d[i], 'nested' if is_nested else 'ring')
-        
+
         valid_mask = ~(np.isnan(u_ring) | np.isnan(v_ring))
         if not np.any(valid_mask):
             div_out[i] = np.nan
@@ -641,7 +649,7 @@ def _vorticity_divergence_block(u_block, v_block, lmax, nside, is_nested):
         # Transform back to map space
         div_map = np.where(valid_mask, hp.alm2map(div_alm, nside, lmax=lmax), np.nan)
         vor_map = np.where(valid_mask, hp.alm2map(vor_alm, nside, lmax=lmax), np.nan)
-        
+
         div_out[i] = ensure_original_order(div_map, 'nested' if is_nested else 'ring')
         vor_out[i] = ensure_original_order(vor_map, 'nested' if is_nested else 'ring')
 
@@ -720,7 +728,7 @@ def _uv_from_vorticity_divergence_block(div_block, vor_block, lmax, nside, is_ne
             u_out[i] = np.nan
             v_out[i] = np.nan
             continue
-            
+
         div_filled = np.where(valid_mask, div_ring, 0.0)
         vor_filled = np.where(valid_mask, vor_ring, 0.0)
 
@@ -869,7 +877,7 @@ def _directional_filter_block(a_block, b_block, target_m, lmax, is_nested):
             out_a[i] = np.nan
             out_b[i] = np.nan
             continue
-            
+
         a_filled = np.where(valid_mask, a_ring, 0.0)
         b_filled = np.where(valid_mask, b_ring, 0.0)
 

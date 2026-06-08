@@ -44,33 +44,56 @@ def wavelength_to_degree(wavelength, radius=EARTH_RADIUS_KM):
 
 
 def _anafast_block(*args, lmax=None, is_nested=False, op_type='power'):
-    # Extract data arrays from args (kwargs are passed separately)
+    """
+    Internal helper function to compute the angular power spectrum (Cl) of one or more variables
+    using spherical harmonics.
+    
+    Args:
+        *args: One or more arrays of data (should be )
+        lmax: Maximum spherical harmonic degree (optional)
+        is_nested: Whether the input data is in nested order
+        op_type: Type of spectrum to compute ('power', 'cross', 'kinetic')
+
+    Returns:
+        Dataset containing the power spectrum
+    """
     data_blocks = args
 
     orig_shape = data_blocks[0].shape
     npix = orig_shape[-1]
+    
+    import warnings
 
-    # Reshape all inputs to 2D
-    data_2ds = [block.reshape(-1, npix) for block in data_blocks]
+    # Vectorize pre-processing (ordering, NaN checks, and mean filling) across all slices
+    prepared_2ds = []
+    valid_masks = []
+    for block in data_blocks:
+        d_2d = block.reshape(-1, npix)
+        d_2d_ring = ensure_ring(d_2d, 'nested' if is_nested else 'ring')
+        
+        valid_mask = ~np.isnan(d_2d_ring)
+        
+        # Calculate mean for each map, ignoring all-NaN slice warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            means = np.nanmean(d_2d_ring, axis=-1, keepdims=True)
+            
+        d_filled = np.where(valid_mask, d_2d_ring, means)
+        prepared_2ds.append(d_filled)
+        valid_masks.append(valid_mask)
+
+    # A slice is valid only if it has at least one valid pixel in every variable
+    is_slice_valid = np.all([np.any(mask, axis=-1) for mask in valid_masks], axis=0)
 
     n_l = lmax + 1
-    out_data = np.zeros((data_2ds[0].shape[0], n_l), dtype=data_2ds[0].dtype)
+    out_data = np.zeros((prepared_2ds[0].shape[0], n_l), dtype=prepared_2ds[0].dtype)
 
-    for i in range(data_2ds[0].shape[0]):
-        # Fill missing values and ensure ring ordering for all maps
-        d_filled_list = []
-        all_valid = True
-        for data_2d in data_2ds:
-            d = ensure_ring(data_2d[i], 'nested' if is_nested else 'ring')
-            valid_mask = ~np.isnan(d)
-            if not np.any(valid_mask):
-                all_valid = False
-                break
-            d_filled_list.append(np.where(valid_mask, d, np.nanmean(d)))
-
-        if not all_valid:
+    for i in range(prepared_2ds[0].shape[0]):
+        if not is_slice_valid[i]:
             out_data[i] = np.nan
             continue
+            
+        d_filled_list = [d[i] for d in prepared_2ds]
 
         if op_type == 'power':
             out_data[i] = hp.anafast(d_filled_list[0], lmax=lmax)
@@ -108,8 +131,17 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
                      lmax: int | None = None, spectrum_type: str = 'power') -> xr.Dataset:
     """
     Computes the angular power spectrum (Cl) of one or more variables using spherical harmonics.
-    If var_name is None, computes the spectrum for all data variables in the dataset that are defined on the HEALPix grid.
-    Supported spectrum types: 'power' (default), 'cross', 'kinetic'
+    If var_name is None, computes the spectrum for all data variables in the dataset that are defined
+    on the HEALPix grid. Supported spectrum types: 'power' (default), 'cross', 'kinetic'
+
+    Args:
+        ds: Input dataset
+        var_name: Name of the variable to compute the spectrum for (optional)
+        lmax: Maximum spherical harmonic degree (optional)
+        spectrum_type: Type of spectrum to compute ('power', 'cross', 'kinetic')
+
+    Returns:
+        Dataset containing the power spectrum
     """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'
@@ -186,8 +218,10 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
             # Check units to decide between wind components (spin-1) and div/vor (scalar)
             units1 = str(ds[v1].attrs.get('units', '')).strip().lower()
             if units1 in ('s-1', 's^-1', '1/s') or v1 in ('divergence', 'div', 'vorticity', 'vor'):
+                # Assume divergence and vorticity in s^-1
                 op_type = 'kinetic-scalar'
             else:
+                # Assume vector wind components (u, v) in m/s
                 op_type = 'kinetic-spin1'
             out_name = "kinetic_energy_cl"
 
@@ -269,11 +303,15 @@ def filter_spatial(ds: xr.Dataset, fwhm_deg: float = None, lmax: int = None,
     """
     Filters spatial data using spherical harmonics.
 
-    Specify exactly one of:
-        fwhm_deg     : Full-width at half-maximum (degrees) for a Gaussian beam.
-        lmax         : Hard low-pass cutoff — retain only spherical harmonic degrees <= lmax.
+    Args:
+        ds: Input dataset
+        fwhm_deg: Full-width at half-maximum (degrees) for a Gaussian beam
+        lmax: Hard low-pass cutoff — retain only spherical harmonic degrees <= lmax
         wavelength_km: Hard low-pass cutoff expressed as a physical scale. Equivalent to
-                       passing lmax=int(wavelength_to_degree(wavelength_km)).
+                       passing lmax=int(wavelength_to_degree(wavelength_km))
+
+    Returns:
+        Filtered dataset
     """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'
@@ -355,6 +393,13 @@ def _regrade_block(data_block, nside_out, is_nested):
 def regrade_resolution(ds: xr.Dataset, new_nside: int) -> xr.Dataset:
     """
     Upgrades or downgrades the HEALPix resolution of the dataset.
+
+    Args:
+        ds: Input dataset
+        new_nside: New HEALPix nside
+
+    Returns:
+        Regrraded dataset
     """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'
@@ -456,12 +501,7 @@ def _helmholtz_block(u_block, v_block, lmax, nside, is_nested):
 
         valid_mask = ~(np.isnan(u_ring) | np.isnan(v_ring))
         if not np.any(valid_mask):
-            u_rot[i] = np.nan
-            v_rot[i] = np.nan
-            u_div[i] = np.nan
-            v_div[i] = np.nan
-            psi[i] = np.nan
-            chi[i] = np.nan
+            u_rot[i] = v_rot[i] = u_div[i] = v_div[i] = psi[i] = chi[i] = np.nan
             continue
 
         u_filled = np.where(valid_mask, u_ring, 0.0)
@@ -607,6 +647,19 @@ def compute_helmholtz(ds: xr.Dataset, u_var: str, v_var: str,
 
 
 def _vorticity_divergence_block(u_block, v_block, lmax, nside, is_nested):
+    """
+    Computes horizontal vorticity and divergence from U and V wind components.
+    
+    Args:
+        u_block: U wind component data
+        v_block: V wind component data
+        lmax: Maximum spherical harmonic degree
+        nside: HEALPix nside
+        is_nested: Whether data is in nested order
+
+    Returns:
+        Tuple of (divergence, vorticity)
+    """
     # u_block, v_block shape (..., npix)
     orig_shape = u_block.shape
     npix = orig_shape[-1]
@@ -661,6 +714,15 @@ def compute_vorticity_divergence(ds: xr.Dataset, u_var: str, v_var: str,
                                  lmax: int | None = None) -> xr.Dataset:
     """
     Computes horizontal vorticity and divergence from U and V wind components.
+    
+    Args:
+        ds: Dataset containing U and V wind components
+        u_var: Name of the U wind variable
+        v_var: Name of the V wind variable
+        lmax: Maximum spherical harmonic degree (optional)
+        
+    Returns:
+        Dataset containing vorticity and divergence
     """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'
@@ -706,6 +768,19 @@ def compute_vorticity_divergence(ds: xr.Dataset, u_var: str, v_var: str,
 
 
 def _uv_from_vorticity_divergence_block(div_block, vor_block, lmax, nside, is_nested):
+    """
+    Reconstructs U and V wind components from vorticity and divergence.
+    
+    Args:
+        div_block: Divergence data (potentially chunked)
+        vor_block: Vorticity data (potentially chunked)
+        lmax: Maximum spherical harmonic degree
+        nside: HEALPix nside
+        is_nested: Whether data is in nested order
+
+    Returns:
+        Tuple of (u_reconstructed, v_reconstructed)
+    """
     orig_shape = div_block.shape
     npix = orig_shape[-1]
 
@@ -764,6 +839,15 @@ def compute_uv_from_vorticity_divergence(ds: xr.Dataset, div_var: str, vor_var: 
                                          lmax: int | None = None) -> xr.Dataset:
     """
     Computes U and V wind components from horizontal divergence and vorticity.
+    
+    Args:
+        ds: Dataset containing divergence and vorticity
+        div_var: Name of the divergence variable
+        vor_var: Name of the vorticity variable
+        lmax: Maximum spherical harmonic degree (optional)
+        
+    Returns:
+        Dataset containing U and V wind components
     """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'
@@ -815,7 +899,6 @@ def _directional_filter_block(a_block, b_block, target_m, lmax, is_nested):
     Apply a directional spatial filter to isolate specific zonal wavenumbers (m) 
     and propagation directions (eastward/westward) using Spherical Harmonics.
 
-    Mathematical Formulation:
     Given a temporal Fourier decomposition of a field at frequency omega:
         T(t, x) = A(x) * cos(omega * t) + B(x) * sin(omega * t)
     
@@ -907,6 +990,13 @@ def _get_symmetric_pixels(nside, is_nested=False):
     """
     Returns an array of pixel indices that correspond to the exact reflection
     across the equator for each pixel in a HEALPix grid.
+
+    Args:
+        nside: HEALPix resolution parameter
+        is_nested: Whether the HEALPix grid is in nested order
+
+    Returns:
+        Array of symmetric pixel indices
     """
     npix = hp.nside2npix(nside)
     theta, phi = hp.pix2ang(nside, np.arange(npix), nest=is_nested)
@@ -921,6 +1011,18 @@ def _extract_spatial_tide_components(da_cos: xr.DataArray, da_sin: xr.DataArray,
     """
     Decomposes the cosine and sine tidal coefficients into symmetric/antisymmetric 
     amplitudes and phases, optionally filtering by specific wavenumbers.
+
+    Args:
+        da_cos: Cosine tidal coefficients
+        da_sin: Sine tidal coefficients
+        m_filters: List of spherical harmonic degrees to filter by
+        cell_dim: Name of the cell dimension
+        sym_idx_da: Array of symmetric pixel indices
+        phi_da: Array of longitudinal angles
+        apply_filter_fn: Function to apply filters to the data
+
+    Returns:
+        Dictionary containing symmetric and antisymmetric amplitudes and phases
     """
     ms = m_filters if m_filters is not None else [None]
     results = {'amp_sym': [], 'pha_sym': [], 'amp_asy': [], 'pha_asy': []}

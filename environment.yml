@@ -12,6 +12,7 @@ dependencies:
   - scipy
   - pyyaml
   - click
+  - pint
   - pip
   
   # Visualization and testing (optional but recommended)

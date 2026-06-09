@@ -3,6 +3,19 @@ import logging
 import healpy as hp
 import numpy as np
 import xarray as xr
+import re
+import pint
+
+# Setup Pint UnitRegistry for CF-compliant unit parsing
+UNITS_REG = pint.UnitRegistry()
+# regex pattern to allow spacing and implicit exponents (from Metpy)
+_unit_cmd = re.compile(r"(?<=[A-Za-z)])(?![A-Za-z)])(?<![0-9\-][eE])(?<![0-9\-])(?=[0-9\-])")
+
+def _parse_units(unit_str):
+    if isinstance(unit_str, (pint.Quantity, pint.Unit)):
+        return unit_str
+    else:
+        return UNITS_REG(_unit_cmd.sub('**', unit_str))
 
 from .grid import get_healpix_order, get_cells_dim, ensure_ring, ensure_original_order
 
@@ -206,6 +219,18 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
                 dask_gufunc_kwargs={'output_sizes': {'l': len(l_coords)}, 'allow_rechunk': True}
             )
             out_ds[f"{v}_cl"] = da
+            out_ds[f"{v}_cl"].attrs = ds[v].attrs.copy()
+            orig_units = ds[v].attrs.get('units', '').strip()
+            if orig_units:
+                try:
+                    new_units = str((_parse_units(orig_units) ** 2).units)
+                except Exception:
+                    # Fallback if pint fails to parse
+                    new_units = f"({orig_units})2" if any(c in orig_units for c in [' ', '/', '^', '-']) else f"{orig_units}2"
+                out_ds[f"{v}_cl"].attrs['units'] = new_units
+            
+            orig_name = ds[v].attrs.get('long_name', ds[v].attrs.get('standard_name', v))
+            out_ds[f"{v}_cl"].attrs['long_name'] = f"Power spectrum of {orig_name}"
     else:
         v1, v2 = var_names
         if spectrum_type == 'cross':

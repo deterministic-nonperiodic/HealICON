@@ -43,3 +43,9 @@ share/python-wheels/
 *.png
 *.sh
 *.txt
+/dev/
+docs/*.aux
+docs/*.log
+docs/*.out
+docs/*.pdf
+docs/*.tex

@@ -5,7 +5,7 @@ HealICON: Interpolate atmospheric model outputs to HEALPix grid.
 __version__ = "0.1.0"
 
 from .interpolate import interpolate_to_healpix
-from . import core, grid, interpolate, analysis, extract, visualize
+from . import core, grid, interpolate, analysis, extract, visualize, wavelet
 from .analysis import (
     compute_spectrum,
     filter_spatial,
@@ -22,6 +22,7 @@ from .extract import (
     extract_point,
     zonal_mean,
 )
+from .wavelet import fourier_wavelet_spectrum, spherical_harmonic_wavelet_spectrum
 
 __all__ = [
     "interpolate_to_healpix",
@@ -37,5 +38,8 @@ __all__ = [
     "extract_along_longitude",
     "extract_point",
     "zonal_mean",
+    "fourier_wavelet_spectrum",
+    "spherical_harmonic_wavelet_spectrum",
     "visualize",
+    "wavelet",
 ]

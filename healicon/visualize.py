@@ -45,12 +45,16 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides"):
     """
     set_publication_style()
 
-    level_name = 'z_mc' if 'z_mc' in ds.coords else 'plev'
+    vert_dims = [d for d in ['height', 'z_mc', 'altitude', 'plev'] if d in ds.coords or d in ds.dims]
+    if not vert_dims:
+        logger.error("Dataset missing height coordinate for tidal cross-section.")
+        return
+    level_name = vert_dims[0]
 
-    if 'lat' in ds.coords and level_name in ds.coords:
+    if 'lat' in ds.coords:
         ds = ds.sortby(['lat', level_name])
     else:
-        logger.warning("Dataset missing 'lat' or height coordinate for tidal cross-section.")
+        logger.warning("Dataset missing 'lat' coordinate for tidal cross-section.")
 
     p_12 = np.timedelta64(12, 'h')
     p_24 = np.timedelta64(24, 'h')
@@ -112,6 +116,10 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides"):
         var_name = 'temp_amp_sym' if meta['type'] == 'Symmetric' else 'temp_amp_asy'
         data = ds[var_name].sel(period=meta['period'], m=meta['m'], method='nearest')
 
+        # Ensure correct dimension order: (height, lat)
+        if data.dims != (level_name, 'lat'):
+            data = data.transpose(level_name, 'lat')
+
         y = data[level_name] / 1000.0 if level_name == 'z_mc' else data[level_name]
         x = data.lat
 
@@ -162,6 +170,10 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides"):
         ax = axes_pha[i]
         var_name = 'temp_pha_sym' if meta['type'] == 'Symmetric' else 'temp_pha_asy'
         data = ds[var_name].sel(period=meta['period'], m=meta['m'], method='nearest')
+
+        # Ensure correct dimension order: (height, lat)
+        if data.dims != (level_name, 'lat'):
+            data = data.transpose(level_name, 'lat')
 
         y = data[level_name] / 1000.0 if level_name == 'z_mc' else data[level_name]
         x = data.lat

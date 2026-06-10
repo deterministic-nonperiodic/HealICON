@@ -142,14 +142,14 @@ def process_file(
         grid_file: Optional[str] = None,
         use_gpu: bool = False,
         interpolator: Optional[HealpixInterpolator] = None,
-        lst_bins: Optional[int] = None
+        ut_bins: Optional[int] = None
 ):
     """
     Process a single input file, interpolate to HEALPix, and save to output file.
     """
     ds = xr.open_dataset(input_file, chunks='auto')
     process_dataset(ds, input_file, output_file, nside, config_path, grid_file, use_gpu,
-                    interpolator, lst_bins)
+                    interpolator, ut_bins)
 
 
 def run_sequential(

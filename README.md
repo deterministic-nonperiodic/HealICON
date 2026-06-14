@@ -1,10 +1,19 @@
 # HealICON
 
-HealICON is a command-line Python tool that efficiently interpolates atmospheric model outputs to the HEALPix grid using `xarray`, `healpy`, and `dask`. It supports both regular latitude-longitude grids and unstructured grids like the ICON icosahedral grid.
+HealICON is a command-line analysis tool for global atmospheric model outputs, utilizing HEALPix as the base grid to interpolate model data. It supports both regular (lon/lat) and unstructured grids (e.g. ICON), providing a seamless, equal-area environment optimized for analyzing atmospheric waves across the globe. Analysis include:
+
+- Spectral analysis: angular power spectrum $C_l$, cross-spectra, kinetic energy spectra
+- Spatial filtering: Gaussian beam, hard spectral cutoff, or wavenumber-specific
+- Zonal averaging
+- Vector calculus: vorticity/divergence, U/V winds to divergence/vorticity
+- Tidal analysis: amplitude and phase, with optional wavenumber filtering and symmetric/antisymmetric decomposition
+- Helmholtz decomposition: rotational/divergent components
+- Extraction: vertical slices or 1D points
+- Regridding: arbitrary nside or zoom-factor
 
 ## Features
 
-- **Multi-Grid Support**: Automatically detects and interpolates from regular lon-lat grids or unstructured grids (e.g. ICON).
+- **Multi-Grid Support**: Interpolates from regular lon-lat grids or unstructured grids (e.g. ICON).
 - **Sequential Processing**: Process large collections of model output files sequentially, avoiding memory overload, utilizing Dask for node-level parallelization.
 - **Variable Mapping**: Flexibly select and rename variables via CF conventions automatically, or via a simple YAML namelist configuration.
 - **CPU & GPU Acceleration**: Accelerated unstructured interpolation via SciPy `cKDTree` (CPU) or `cuml.NearestNeighbors` (GPU).

@@ -2,7 +2,7 @@
 HealICON: Interpolate atmospheric model outputs to HEALPix grid.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .interpolate import interpolate_to_healpix
 from . import core, grid, interpolate, analysis, extract, visualize, wavelet
@@ -22,7 +22,9 @@ from .extract import (
     extract_point,
     zonal_mean,
 )
-from .wavelet import fourier_wavelet_spectrum, spherical_harmonic_wavelet_spectrum
+from .wavelet import (fourier_wavelet_spectrum,
+                      spherical_harmonic_wavelet_spectrum,
+                      compute_wavelet_tidal_analysis)
 
 __all__ = [
     "interpolate_to_healpix",
@@ -40,6 +42,7 @@ __all__ = [
     "zonal_mean",
     "fourier_wavelet_spectrum",
     "spherical_harmonic_wavelet_spectrum",
+    "compute_wavelet_tidal_analysis",
     "visualize",
     "wavelet",
 ]

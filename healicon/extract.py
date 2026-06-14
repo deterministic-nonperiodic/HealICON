@@ -4,7 +4,7 @@ import healpy as hp
 import numpy as np
 import xarray as xr
 
-from .grid import get_healpix_order, get_cells_dim
+from .grid import get_healpix_order, get_cells_dim, append_history
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,14 @@ def _interp_healpix(data, theta, phi, is_nested=False):
 
 
 def extract_along_latitude(ds: xr.Dataset, lat: float, num_lons: int | None = None) -> xr.Dataset:
+    """
+    Extracts data along a specific latitude from a HEALPix dataset.
+
+    Args:
+        ds: Input xarray.Dataset on a HEALPix grid over time.
+        lat: Latitude to extract (degrees).
+        num_lons: Number of longitude points to interpolate.
+    """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'
 
@@ -79,15 +87,21 @@ def extract_along_latitude(ds: xr.Dataset, lat: float, num_lons: int | None = No
             out_ds[var].attrs = ds[var].attrs
 
     out_ds.attrs = ds.attrs
-    history = ds.attrs.get('history', '')
-    sep = "\n" if history else ""
-    out_ds.attrs[
-        'history'] = f"{history}{sep}Extracted along latitude {lat} with {num_lons} longitude points."
+    out_ds.attrs = append_history(out_ds.attrs,
+        f"Extracted along latitude {lat} with {num_lons} longitude points.")
 
     return out_ds
 
 
 def extract_along_longitude(ds: xr.Dataset, lon: float, num_lats: int | None = None) -> xr.Dataset:
+    """
+    Extracts data along a specific longitude from a HEALPix dataset.
+
+    Args:
+        ds: Input xarray.DataArray on a HEALPix grid over time.
+        lon: Longitude to extract (degrees).
+        num_lats: Number of latitude points to interpolate.
+    """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'
 
@@ -135,15 +149,21 @@ def extract_along_longitude(ds: xr.Dataset, lon: float, num_lats: int | None = N
             out_ds[var].attrs = ds[var].attrs
 
     out_ds.attrs = ds.attrs
-    history = ds.attrs.get('history', '')
-    sep = "\n" if history else ""
-    out_ds.attrs[
-        'history'] = f"{history}{sep}Extracted along longitude {lon} with {num_lats} latitude points."
+    out_ds.attrs = append_history(out_ds.attrs,
+        f"Extracted along longitude {lon} with {num_lats} latitude points.")
 
     return out_ds
 
 
 def _zonal_mean_block(data_block, ring_indices, n_rings):
+    """
+    Helper function to compute zonal mean over a block of data.
+    
+    Args:
+        data_block: Input xarray.DataArray on a HEALPix grid over time.
+        ring_indices: Ring indices for each pixel.
+        n_rings: Number of rings.
+    """
     orig_shape = data_block.shape
     npix = orig_shape[-1]
     data_2d = data_block.reshape(-1, npix)
@@ -160,6 +180,12 @@ def _zonal_mean_block(data_block, ring_indices, n_rings):
 
 
 def zonal_mean(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Computes the zonal mean of a HEALPix dataset over latitude rings.
+    
+    Args:
+        ds: Input xarray.DataArray on a HEALPix grid over time.
+    """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'
 
@@ -202,13 +228,19 @@ def zonal_mean(ds: xr.Dataset) -> xr.Dataset:
             out_ds[var].attrs = ds[var].attrs
 
     out_ds.attrs = ds.attrs
-    history = ds.attrs.get('history', '')
-    sep = "\n" if history else ""
-    out_ds.attrs['history'] = f"{history}{sep}Computed zonal mean over HEALPix rings."
+    out_ds.attrs = append_history(out_ds.attrs, "Computed zonal mean over HEALPix rings.")
     return out_ds
 
 
 def extract_point(ds: xr.Dataset, lat: float, lon: float) -> xr.Dataset:
+    """
+    Extracts data at a specific point from a HEALPix dataset.
+
+    Args:
+        ds: Input xarray.DataArray on a HEALPix grid over time.
+        lat: Latitude of the point to extract (degrees).
+        lon: Longitude of the point to extract (degrees).
+    """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'
 
@@ -228,9 +260,7 @@ def extract_point(ds: xr.Dataset, lat: float, lon: float) -> xr.Dataset:
     out_ds.lon.attrs = {"standard_name": "longitude", "units": "degrees_east"}
     out_ds.lat.attrs = {"standard_name": "latitude", "units": "degrees_north"}
 
-    history = ds.attrs.get('history', '')
-    sep = "\n" if history else ""
-    out_ds.attrs[
-        'history'] = f"{history}{sep}Extracted point data for lat={lat}, lon={lon} (pixel {pix})."
+    out_ds.attrs = append_history(out_ds.attrs,
+        f"Extracted point data for lat={lat}, lon={lon} (pixel {pix}).")
 
     return out_ds

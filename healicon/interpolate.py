@@ -5,7 +5,7 @@ import healpy as hp
 import numpy as np
 import xarray as xr
 
-from .grid import get_healpix_coords
+from .grid import get_healpix_coords, LONLAT_COORD_NAMES, append_history, add_healpix_grid_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,6 @@ def _interp_unstructured_block(data_block, indices, weights, valid_mask):
     """
     n_source = data_block.shape[-1]
     safe_indices = np.clip(indices, 0, n_source - 1)
-    weights = weights / np.sum(weights, axis=-1, keepdims=True)
     gathered = np.take(data_block, safe_indices, axis=-1)
     interpolated = np.sum(gathered * weights, axis=-1)
     interpolated = np.where(valid_mask, interpolated, np.nan)
@@ -83,7 +82,7 @@ class HealpixInterpolator:
 
     def _determine_nside(self, ds: xr.Dataset):
         spatial_dims = []
-        for name in ["lon", "longitude", "clon", "lat", "latitude", "clat"]:
+        for name in LONLAT_COORD_NAMES:
             if name in ds.coords or name in ds.data_vars:
                 for dim in ds[name].dims:
                     if dim not in spatial_dims:
@@ -97,6 +96,12 @@ class HealpixInterpolator:
         return 2 ** round(math.log2(max(1, target_nside)))
 
     def setup(self, ds: xr.Dataset):
+        """
+        Initialize the interpolation grid. Precompute KDTree for unstructured grids.
+        
+        Args:
+            ds: Input xarray dataset with spatial coordinates.
+        """
         if self._is_setup:
             return
 
@@ -198,7 +203,9 @@ class HealpixInterpolator:
 
             self._valid_mask = distances[:, 0] < 0.05
             distances = np.maximum(distances, 1e-12)
-            self._weights = 1.0 / (distances ** 2)
+            weights = 1.0 / (distances ** 2)
+            # Pre-normalize: avoids redundant division on every Dask chunk
+            self._weights = weights / np.sum(weights, axis=-1, keepdims=True)
             self._indices = indices
             logger.info("Setup complete for unstructured grid.")
 
@@ -211,8 +218,10 @@ class HealpixInterpolator:
         if self._grid_type == 'healpix':
             if self.nside == self._current_nside:
                 logger.info(
-                    "Dataset is already on the target HEALPix grid. Returning original dataset.")
-                return ds
+                    "Dataset is already on the target HEALPix grid. Ensuring grid mapping metadata.")
+                from .grid import get_healpix_order
+                order = get_healpix_order(ds)
+                return add_healpix_grid_mapping(ds, self.nside, order=order)
             else:
                 logger.info(
                     f"Dataset is HEALPix (nside={self._current_nside}), but target is nside={self.nside}. Regrading resolution...")
@@ -280,35 +289,25 @@ class HealpixInterpolator:
             out_ds[var_name].attrs = da.attrs
 
         out_ds.attrs.update(ds.attrs)
-        npix = hp.nside2npix(self.nside)
-        cell_area = 4 * np.pi / npix
-        out_ds.attrs['healpix_nside'] = self.nside
-        out_ds.attrs['healpix_npix'] = npix
-        out_ds.attrs['healpix_scheme'] = 'RING'
-        out_ds.attrs['healpix_cell_area_sr'] = f"{cell_area:.6e}"
-
-        for var in out_ds.data_vars:
-            if var not in ['lon', 'lat']:
-                out_ds[var].attrs['grid_mapping'] = 'healpix'
-                out_ds[var].attrs.pop('CDI_grid_type', None)
-                out_ds[var].attrs.pop('number_of_grid_in_reference', None)
-
-        out_ds["healpix"] = xr.DataArray(
-            np.int32(0),
-            attrs={
-                "grid_mapping_name": "healpix",
-                "healpix_nside": np.int32(self.nside),
-                "healpix_order": "ring"
-            }
-        )
+        out_ds = add_healpix_grid_mapping(out_ds, self.nside, order='ring')
 
         history_msg = f"Interpolated to HEALPix grid (nside={self.nside}, scheme=RING) using HealICON."
-        out_ds.attrs['history'] = out_ds.attrs.get('history',
-                                                   '') + '\n' + history_msg if 'history' in out_ds.attrs else history_msg
+        out_ds.attrs = append_history(out_ds.attrs, history_msg)
 
         return out_ds
 
 
 def interpolate_to_healpix(ds: xr.Dataset, nside: int = None, use_gpu: bool = False) -> xr.Dataset:
+    """
+    Interpolate a dataset to a HEALPix grid.
+    
+    Args:
+        ds: Input xarray dataset.
+        nside: Target NSIDE for the HEALPix grid.
+        use_gpu: Whether to use GPU acceleration for interpolation.
+    
+    Returns:
+        xarray.Dataset on the target HEALPix grid.
+    """
     interpolator = HealpixInterpolator(nside=nside, use_gpu=use_gpu)
     return interpolator(ds)

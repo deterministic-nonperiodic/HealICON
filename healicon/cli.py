@@ -1,9 +1,12 @@
 import logging
+import os
 from typing import Dict, Any
 
 import click
 
 from .core import run_sequential
+from .cf_coords import _cf_guess
+from .grid import LONLAT_COORD_NAMES, get_spatial_dims
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,36 +17,12 @@ logger = logging.getLogger(__name__)
 # Suppress overly verbose healpy INFO logs
 logging.getLogger('healpy').setLevel(logging.WARNING)
 
-_CF_VARS_LOOKUP: Dict[str, Dict[str, Any]] = {
-    "u": {"standard_names": {"eastward_wind"}, "units": {"m s-1", "m/s"}},
-    "v": {"standard_names": {"northward_wind"}, "units": {"m s-1", "m/s"}},
-    "w": {"standard_names": {"upward_air_velocity", "vertical_velocity_in_air"},
-          "units": {"m s-1", "Pa s-1"}},
-    "pressure": {"standard_names": {"air_pressure"}, "units": {"Pa", "pascal"}},
-    "temperature": {"standard_names": {"air_temperature"}, "units": {"K", "kelvin"}},
-    "density": {"standard_names": {"air_density"}, "units": {"kg / m**3", "kg m-3"}},
-    "theta": {"standard_names": {"air_potential_temperature"}, "units": {"K", "kelvin"}},
-    "divergence": {"standard_names": {"divergence_of_wind"}, "units": {"s-1"}},
-    "vorticity": {"standard_names": {"relative_vorticity"}, "units": {"s-1"}},
-}
 
-
-def _cf_guess(ds, target: str) -> str | None:
-    """
-    Very light CF-based guess for a logical variable name.
-
-    Looks at ``standard_name`` and common units to suggest a candidate
-    when a configured variable is missing. Advisory only.
-    """
-    rule = _CF_VARS_LOOKUP.get(target)
-    if rule is None:
-        return None
-    for name, da in ds.data_vars.items():
-        std = str(da.attrs.get("standard_name", "")).strip()
-        units = str(da.attrs.get("units", "")).strip()
-        if std in rule["standard_names"] or any(u in units for u in rule["units"]):
-            return name
-    return None
+def _check_io_safety(ifile, ofile):
+    """Raise if input and output resolve to the same file."""
+    if os.path.abspath(ifile) == os.path.abspath(ofile):
+        raise click.UsageError(
+            "Input and output files cannot be the same. This would corrupt the input file.")
 
 
 def _guess_variable(ds, target_type: str) -> str:
@@ -68,6 +47,13 @@ def cli():
 
 
 def _load_and_ensure_healpix(ifile, target_nside=None):
+    """
+    Load a dataset and ensure it is on a HEALPix grid.
+    
+    Args:
+        ifile: Input file path.
+        target_nside: Target NSIDE for the HEALPix grid.
+    """
     import xarray as xr
     import healpy as hp
     from .interpolate import interpolate_to_healpix
@@ -76,47 +62,14 @@ def _load_and_ensure_healpix(ifile, target_nside=None):
     ds = xr.open_dataset(ifile, chunks='auto')
 
     # Optimize Dask chunking: Spatial dimensions must be fully contiguous for spectral analysis
-    spatial_dims = []
-    for name in ["lon", "longitude", "clon", "lat", "latitude", "clat"]:
-        if name in ds.coords or name in ds.data_vars:
-            for dim in ds[name].dims:
-                if dim not in spatial_dims:
-                    spatial_dims.append(dim)
-
-    try:
-        from .grid import get_cells_dim
-        cell_dim = get_cells_dim(ds)
-        if cell_dim not in spatial_dims:
-            spatial_dims.append(cell_dim)
-    except ValueError:
-        pass
+    spatial_dims = get_spatial_dims(ds)
 
     if spatial_dims:
         ds = ds.chunk({dim: -1 for dim in spatial_dims}).unify_chunks()
 
-    is_healpix = False
-    try:
-        from .grid import get_cells_dim
-        cell_dim = get_cells_dim(ds)
-        npix = ds.sizes[cell_dim]
-        try:
-            detected_nside = hp.npix2nside(npix)
-            if hp.isnsideok(detected_nside):
-                is_healpix = True
-        except Exception:
-            pass
-    except ValueError:
-        pass
+    from .grid import is_healpix as _is_healpix
 
-    if ds.attrs.get('healpix_scheme') == 'RING':
-        is_healpix = True
-
-    for var in ds.data_vars:
-        if ds[var].attrs.get('grid_mapping') == 'healpix':
-            is_healpix = True
-            break
-
-    if not is_healpix:
+    if not _is_healpix(ds):
         # Detect SABER data
         if ds.attrs.get('Mission') == 'TIMED' and 'SABER' in str(ds.attrs.get('Title', '')):
             logger.info("Detected SABER dataset. Using native parser.")
@@ -156,10 +109,7 @@ def convert(ifile, ofile, nside, ut_bins, config_path, grid_file, gpu, cat):
     grid_file: Optional path to external grid file containing coordinates.
     gpu: Enable GPU acceleration for KDTree interpolation if available.
     """
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    _check_io_safety(ifile, ofile)
 
     run_sequential(
         input_pattern=ifile,
@@ -183,11 +133,13 @@ def convert(ifile, ofile, nside, ut_bins, config_path, grid_file, gpu, cat):
 def extract_lat(ifile, ofile, lat, num_lons):
     """
     Extract data along all longitudes for a specific latitude from a HEALPix dataset.
+
+    ifile: Path or wildcard pattern to input model output file(s) (NetCDF).
+    ofile: Path to output HEALPix file (NetCDF).
+    lat: Target latitude in degrees [-90, 90].
+    num_lons: Number of longitude points to extract (default: number of HEALPix grid points).
     """
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    _check_io_safety(ifile, ofile)
 
     from .extract import extract_along_latitude
 
@@ -208,11 +160,16 @@ def extract_lat(ifile, ofile, lat, num_lons):
 @click.option('--num-lats', type=int, default=None,
               help='Number of latitude points to extract.')
 def extract_lon(ifile, ofile, lon, num_lats):
-    """Extract data along all latitudes for a specific longitude."""
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    """
+    Extract data along all latitudes for a specific longitude from a HEALPix dataset.
+
+    Args:
+        ifile: Path or wildcard pattern to input model output file(s) (NetCDF).
+        ofile: Path to output HEALPix file (NetCDF).
+        lon: Target longitude in degrees [-180, 180] or [0, 360].
+        num_lats: Number of latitude points to extract (default: number of HEALPix grid points).
+    """
+    _check_io_safety(ifile, ofile)
 
     from .extract import extract_along_longitude
 
@@ -229,11 +186,16 @@ def extract_lon(ifile, ofile, lon, num_lats):
 @click.option('--lat', type=float, required=True, help='Target latitude.')
 @click.option('--lon', type=float, required=True, help='Target longitude.')
 def extract_point(ifile, ofile, lat, lon):
-    """Extract full time/height profile for a specific lat/lon point."""
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    """
+    Extract full time/height profile for a specific lat/lon point from a HEALPix dataset.
+
+    Args:
+        ifile: Path or wildcard pattern to input model output file(s) (NetCDF).
+        ofile: Path to output HEALPix file (NetCDF).
+        lat: Target latitude in degrees [-90, 90].
+        lon: Target longitude in degrees [-180, 180] or [0, 360].
+    """
+    _check_io_safety(ifile, ofile)
 
     from .extract import extract_point as ep
 
@@ -254,11 +216,14 @@ def extract_point(ifile, ofile, lat, lon):
 def fill(ifile, ofile, spatial_dim, time_dim):
     """
     Fill missing values (NaNs) natively using HEALPix KDTree spatial nearest-neighbor and temporal 1D linear interpolation.
+
+    Args:
+        ifile: Path to input data file.
+        ofile: Path to output data file.
+        spatial_dim: Name of the spatial dimension (default: cells).
+        time_dim: Optional name of the time/LST dimension to interpolate across temporally.
     """
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    _check_io_safety(ifile, ofile)
 
     from .curation import fill_healpix_gaps
     import xarray as xr
@@ -277,11 +242,14 @@ def fill(ifile, ofile, spatial_dim, time_dim):
 @click.argument('ifile', type=click.Path(exists=True))
 @click.argument('ofile')
 def zonal_mean(ifile, ofile):
-    """Compute the zonal mean (longitude average) across HEALPix rings."""
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    """
+    Compute the zonal mean (longitude average) across HEALPix rings.
+
+    Args:
+        ifile: Path to input data file.
+        ofile: Path to output data file.
+    """
+    _check_io_safety(ifile, ofile)
 
     from .extract import zonal_mean as zm
 
@@ -303,11 +271,17 @@ def zonal_mean(ifile, ofile):
               default='power',
               help='Type of spectrum to compute: power (default), cross, or kinetic.')
 def spectrum(ifile, ofile, var_name, lmax, spectrum_type):
-    """Compute the angular spectrum (Cl) of a variable or pair of variables."""
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    """
+    Compute the angular spectrum (Cl) of a variable or pair of variables.
+
+    Args:
+        ifile: Path to input data file.
+        ofile: Path to output data file.
+        var_name: Variable(s) to compute spectrum for. Can be specified multiple times.
+        lmax: Maximum spherical harmonic degree l.
+        spectrum_type: Type of spectrum to compute: power (default), cross, or kinetic.
+    """
+    _check_io_safety(ifile, ofile)
 
     from .analysis import compute_spectrum, degree_to_wavelength
 
@@ -337,11 +311,17 @@ def spectrum(ifile, ofile, var_name, lmax, spectrum_type):
 @click.option('--wavelength', 'wavelength_km', type=float, default=None,
               help='Hard low-pass spectral cutoff expressed as a physical wavelength in km.')
 def filter(ifile, ofile, fwhm, lmax, wavelength_km):
-    """Filter spatial maps using spherical harmonic transforms."""
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    """
+    Filter spatial maps using spherical harmonic transforms.
+
+    Args:
+        ifile: Path to input data file.
+        ofile: Path to output data file.
+        fwhm: Full-width half-max in degrees for Gaussian smoothing.
+        lmax: Hard low-pass spectral cutoff at spherical harmonic degree l.
+        wavelength_km: Hard low-pass spectral cutoff expressed as a physical wavelength in km.
+    """
+    _check_io_safety(ifile, ofile)
 
     from .analysis import filter_spatial
 
@@ -360,11 +340,16 @@ def filter(ifile, ofile, fwhm, lmax, wavelength_km):
 @click.option('-z', '--zoom', type=int, default=None,
               help='Target zoom level (refinement), where nside = 2**zoom.')
 def regrade(ifile, ofile, nside, zoom):
-    """Upgrade or downgrade the HEALPix resolution."""
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    """
+    Upgrade or downgrade the HEALPix resolution.
+
+    Args:
+        ifile: Path to input data file.
+        ofile: Path to output data file.
+        nside: Target nside for the resolution change.
+        zoom: Target zoom level (refinement), where nside = 2**zoom.
+    """
+    _check_io_safety(ifile, ofile)
 
     from .analysis import regrade_resolution
 
@@ -398,11 +383,17 @@ def regrade(ifile, ofile, nside, zoom):
 @click.option('--v', 'v_var', default=None, help='Name of northward wind variable.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
 def uv2dv(ifile, ofile, u_var, v_var, lmax):
-    """Compute horizontal divergence and vorticity from U and V wind components."""
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    """
+    Compute horizontal divergence and vorticity from U and V wind components.
+
+    Args:
+        ifile: Path to input data file.
+        ofile: Path to output data file.
+        u_var: Name of eastward wind variable (default: detected from file).
+        v_var: Name of northward wind variable (default: detected from file).
+        lmax: Maximum spherical harmonic degree l (default: all available).
+    """
+    _check_io_safety(ifile, ofile)
 
     from .analysis import compute_vorticity_divergence
 
@@ -424,11 +415,17 @@ def uv2dv(ifile, ofile, u_var, v_var, lmax):
 @click.option('--vor', 'vor_var', default=None, help='Name of vorticity variable.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
 def dv2uv(ifile, ofile, div_var, vor_var, lmax):
-    """Compute U and V wind components from horizontal divergence and vorticity."""
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    """
+    Compute U and V wind components from horizontal divergence and vorticity.
+
+    Args:
+        ifile: Path to input data file.
+        ofile: Path to output data file.
+        div_var: Name of divergence variable (default: detected from file).
+        vor_var: Name of vorticity variable (default: detected from file).
+        lmax: Maximum spherical harmonic degree l (default: all available).
+    """
+    _check_io_safety(ifile, ofile)
 
     from .analysis import compute_uv_from_vorticity_divergence
 
@@ -454,16 +451,23 @@ def dv2uv(ifile, ofile, div_var, vor_var, lmax):
 @click.option('--chi/--no-chi', default=True, show_default=True,
               help='Include velocity potential χ [m² s⁻¹] in output.')
 def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
-    """Helmholtz decomposition: split wind into rotational and divergent components.
+    """
+    Helmholtz decomposition: split wind into rotational and divergent components.
 
     Outputs u_rot, v_rot (rotational wind) and u_div, v_div (divergent wind).
     Optionally also computes the streamfunction (--psi) and velocity potential
     (--chi), both in units of m² s⁻¹.
+
+    Args:
+        ifile: Path to input data file.
+        ofile: Path to output data file.
+        u_var: Name of eastward wind variable (default: detected from file).
+        v_var: Name of northward wind variable (default: detected from file).
+        lmax: Maximum spherical harmonic degree l (default: all available).
+        psi: Include streamfunction ψ [m² s⁻¹] in output.
+        chi: Include velocity potential χ [m² s⁻¹] in output.
     """
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    _check_io_safety(ifile, ofile)
 
     from .analysis import compute_helmholtz
 
@@ -497,15 +501,22 @@ def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
 def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim):
     """
     Perform a full tidal analysis (temporal fit and spatial symmetry decomposition).
-    
+
     Extracts the amplitude and phase of given periods (in hours), optionally 
     filters to specific zonal wavenumbers (-m), and decomposes the resulting 
     spatial patterns into symmetric and antisymmetric components relative to the equator.
+
+    Args:
+        ifile: Path to input data file.
+        ofile: Path to output data file.
+        var_name: Variable to compute tidal analysis for.
+        periods_str: Comma-separated tidal periods in hours (e.g., "12.0,24.0").
+        m_str: Optional comma-separated zonal wavenumbers (e.g., "1,2,3").
+        modes_str: Comma-separated tidal modes (e.g., "DW1, SW2, DE3, SE2").
+        lmax: Maximum spherical harmonic degree l.
+        time_dim: Dimension name for time-like axis (e.g., "time" or "lst").
     """
-    import os
-    if os.path.abspath(ifile) == os.path.abspath(ofile):
-        raise click.UsageError(
-            "Input and output files cannot be the same. This would corrupt the input file.")
+    _check_io_safety(ifile, ofile)
 
     from .analysis import compute_tidal_analysis
 
@@ -529,9 +540,9 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim)
                 raise click.UsageError(f"Invalid mode format '{mode}'.")
 
             if mode[1] == 'W':
-                m_filters.append(-int(mode[2:]))
-            elif mode[1] in ('E', 'S'):
                 m_filters.append(int(mode[2:]))
+            elif mode[1] in ('E', 'S'):
+                m_filters.append(-int(mode[2:]))
             else:
                 try:
                     m_filters.append(int(mode[1:]))
@@ -573,7 +584,19 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim)
               help='Output directory for plots (default: current directory)')
 @click.option('--prefix', default=None, help='Prefix for output filenames.')
 def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, out_dir, prefix):
-    """Generate simple visualizations for healicon products."""
+    """
+    Generate simple visualizations for healicon products.
+
+    Args:
+        ifile: Path to input data file.
+        plot_type: Type of plot to generate (tides, section, map, or spectrum).
+        var_name: Variable to plot (for section, map, or spectrum).
+        x_dim: X dimension for section plots (default: lat).
+        y_dim: Y dimension for section plots (default: z_mc).
+        target_height: Select level closest to this height (km) for map and spectrum plots.
+        out_dir: Output directory for plots (default: current directory).
+        prefix: Prefix for output filenames.
+    """
     import xarray as xr
     import os
     from .visualize import plot_tides, plot_section, plot_map, plot_spectrum

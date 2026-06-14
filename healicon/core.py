@@ -7,6 +7,7 @@ import dask
 import xarray as xr
 
 from .config import load_variable_mapping, apply_cf_conventions
+from .grid import LONLAT_COORD_NAMES, get_spatial_dims, get_cells_dim
 from .interpolate import HealpixInterpolator
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ def process_dataset(
         logger.info(f"Loading external grid file: {grid_file}")
         grid_ds = xr.open_dataset(grid_file)
         grid_coords = {}
-        for name in ["lon", "longitude", "clon", "lat", "latitude", "clat"]:
+        for name in LONLAT_COORD_NAMES:
             if name in grid_ds.variables:
                 grid_coords[name] = grid_ds[name]
         ds = ds.assign_coords(grid_coords)
@@ -74,10 +75,8 @@ def process_dataset(
     # Subset dataset
     if vars_to_keep:
         # Also keep coordinates needed for interpolation
-        coords_to_keep = []
-        for name in ["lon", "longitude", "clon", "lat", "latitude", "clat"]:
-            if name in ds.coords or name in ds.data_vars:
-                coords_to_keep.append(name)
+        coords_to_keep = [name for name in LONLAT_COORD_NAMES
+                          if name in ds.coords or name in ds.data_vars]
 
         all_vars = vars_to_keep + coords_to_keep
         # Drop variables not in the list
@@ -85,20 +84,7 @@ def process_dataset(
         ds = ds.drop_vars(drop_vars, errors='ignore')
 
     # Rechunk: spatial dims fully contiguous, all others automatically chunked (time, height, etc.)
-    spatial_dims = []
-    for name in ["lon", "longitude", "clon", "lat", "latitude", "clat"]:
-        if name in ds.coords or name in ds.data_vars:
-            for dim in ds[name].dims:
-                if dim not in spatial_dims:
-                    spatial_dims.append(dim)
-
-    try:
-        from .grid import get_cells_dim
-        cell_dim = get_cells_dim(ds)
-        if cell_dim not in spatial_dims:
-            spatial_dims.append(cell_dim)
-    except ValueError:
-        pass
+    spatial_dims = get_spatial_dims(ds)
 
     if spatial_dims:
         chunk_dict = {dim: -1 for dim in spatial_dims}
@@ -115,7 +101,6 @@ def process_dataset(
 
     # Ensure chunking is reasonable for output writing
     try:
-        from .grid import get_cells_dim
         out_cell_dim = get_cells_dim(out_ds)
         out_ds = out_ds.chunk(
             {out_cell_dim: -1})  # Output spatial dimension contiguous for HEALPix maps

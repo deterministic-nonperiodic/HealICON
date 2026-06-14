@@ -38,7 +38,7 @@ def set_publication_style():
     plt.rcParams.update(params)
 
 
-def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides"):
+def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_amplitude=None):
     """
     Plot tidal amplitude and phase across latitudes and heights.
     Expects zonal mean dataset with 'lat' and 'z_mc' (or 'plev') coordinates.
@@ -60,12 +60,12 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides"):
     p_24 = np.timedelta64(24, 'h')
 
     modes = {
-        'DW1': {'period': p_24, 'm': -1, 'type': 'Symmetric'},
-        'SW2': {'period': p_12, 'm': -2, 'type': 'Symmetric'},
-        'DE3': {'period': p_24, 'm': 3, 'type': 'Symmetric'},
-        'SE2': {'period': p_12, 'm': 2, 'type': 'Symmetric'},
-        'DW1_asy': {'period': p_24, 'm': -1, 'type': 'Antisymmetric'},
-        'DE3_asy': {'period': p_24, 'm': 3, 'type': 'Antisymmetric'},
+        'DW1': {'period': p_24, 'm': 1, 'type': 'Symmetric'},
+        'SW2': {'period': p_12, 'm': 2, 'type': 'Symmetric'},
+        'DE3': {'period': p_24, 'm': -3, 'type': 'Symmetric'},
+        'SE2': {'period': p_12, 'm': -2, 'type': 'Symmetric'},
+        'DW1_asy': {'period': p_24, 'm': 1, 'type': 'Antisymmetric'},
+        'DE3_asy': {'period': p_24, 'm': -3, 'type': 'Antisymmetric'},
     }
 
     # Identify available modes in the dataset
@@ -104,7 +104,7 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides"):
     try:
         max_amp = float(ds[['temp_amp_sym', 'temp_amp_asy']].to_array().max())
         if np.isfinite(max_amp) and max_amp > 0:
-            vmax = min(max_amp, 20.0)  # Cap at 20 for visibility
+            vmax = min(max_amp, max_amplitude if max_amplitude is not None else 20.0)  # Cap at 20 for visibility
     except:
         pass
 
@@ -120,7 +120,7 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides"):
         if data.dims != (level_name, 'lat'):
             data = data.transpose(level_name, 'lat')
 
-        y = data[level_name] / 1000.0 if level_name == 'z_mc' else data[level_name]
+        y = data[level_name] / 1000.0 if level_name in ['z_mc', 'height', 'altitude'] else data[level_name]
         x = data.lat
 
         cf = ax.contourf(x, y, data, levels=levels, cmap='inferno', extend='max')
@@ -133,7 +133,7 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides"):
             ax.remove()
         else:
             if i % n_cols == 0:
-                ylabel = "Height / km" if level_name == 'z_mc' else "Pressure / hPa"
+                ylabel = "Height / km" if level_name in ['z_mc', 'height', 'altitude'] else "Pressure / hPa"
                 ax.set_ylabel(ylabel)
             if i >= n_modes - n_cols:
                 ax.set_xlabel("Latitude")
@@ -142,7 +142,7 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides"):
                 ax.set_xticklabels(lat_labels)
             ax.label_outer()
 
-    if level_name == 'z_mc':
+    if level_name in ['z_mc', 'height', 'altitude']:
         axes[0].set_ylim(60, 110)
     elif level_name == 'plev':
         axes[0].invert_yaxis()
@@ -175,7 +175,7 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides"):
         if data.dims != (level_name, 'lat'):
             data = data.transpose(level_name, 'lat')
 
-        y = data[level_name] / 1000.0 if level_name == 'z_mc' else data[level_name]
+        y = data[level_name] / 1000.0 if level_name in ['z_mc', 'height', 'altitude'] else data[level_name]
         x = data.lat
 
         cf_pha = ax.contourf(x, y, data, levels=levels_pha, cmap='twilight_shifted', extend='both')
@@ -187,7 +187,7 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides"):
             ax.remove()
         else:
             if i % n_cols == 0:
-                ylabel = "Height / km" if level_name == 'z_mc' else "Pressure / hPa"
+                ylabel = "Height / km" if level_name in ['z_mc', 'height', 'altitude'] else "Pressure / hPa"
                 ax.set_ylabel(ylabel)
             if i >= n_modes - n_cols:
                 ax.set_xlabel("Latitude")
@@ -196,7 +196,7 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides"):
                 ax.set_xticklabels(lat_labels)
             ax.label_outer()
 
-    if level_name == 'z_mc':
+    if level_name in ['z_mc', 'height', 'altitude']:
         axes_pha[0].set_ylim(60, 110)
     elif level_name == 'plev':
         axes_pha[0].invert_yaxis()
@@ -241,7 +241,7 @@ def plot_section(ds: xr.Dataset, var_name: str, x_dim: str = 'lat', y_dim: str =
         logger.info(f"Averaging over additional dimensions: {reduced_dims}")
         data = data.mean(dim=reduced_dims)
 
-    y_vals = data[y_dim] / 1000.0 if y_dim == 'z_mc' else data[y_dim]
+    y_vals = data[y_dim] / 1000.0 if y_dim in ['z_mc', 'height', 'altitude'] else data[y_dim]
     x_vals = data[x_dim]
 
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -257,7 +257,7 @@ def plot_section(ds: xr.Dataset, var_name: str, x_dim: str = 'lat', y_dim: str =
     cbar.set_label(f"{long_name} [{units}]" if units else long_name)
 
     # Axis labels
-    ax.set_ylabel("Height / km" if y_dim == 'z_mc' else y_dim)
+    ax.set_ylabel("Height / km" if y_dim in ['z_mc', 'height', 'altitude'] else y_dim)
     ax.set_xlabel(x_dim.capitalize())
 
     if x_dim == 'lat':
@@ -341,7 +341,8 @@ def plot_map(ds: xr.Dataset, var_name: str, target_height: float | None = None, 
         # HEALPix mollview
         # Healpy handles plotting differently, directly acting on current figure
         arr = data.values
-        is_nested = ds.attrs.get('healpix_order', 'ring').lower() == 'nested'
+        from .grid import get_healpix_order
+        is_nested = get_healpix_order(ds) == 'nested'
 
         hp.mollview(arr, fig=fig.number, nest=is_nested, cmap=cmap,
                     title=f"{long_name}{title_suffix}", unit=units)

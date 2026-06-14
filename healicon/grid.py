@@ -1,6 +1,23 @@
+import logging
+import math
+
 import healpy as hp
 import numpy as np
 import xarray as xr
+
+logger = logging.getLogger(__name__)
+
+# --- Canonical coordinate name constants (single source of truth) ---
+LONLAT_COORD_NAMES = ("lon", "longitude", "clon", "lat", "latitude", "clat")
+CELL_DIM_NAMES = ("cells", "cell", "ncells", "x")
+
+
+def _is_valid_npix(n: int) -> bool:
+    """Return True if *n* is a valid HEALPix pixel count (12 * nside²)."""
+    if n < 12:
+        return False
+    nside = math.isqrt(n // 12)
+    return 12 * nside * nside == n and hp.isnsideok(nside, nest=True)
 
 
 def get_healpix_coords(nside: int):
@@ -49,10 +66,88 @@ def get_healpix_order(ds: xr.Dataset) -> str:
     Get the HEALPix ordering from the dataset attributes.
     Returns 'nested' or 'ring'.
     """
+    # 1. Check for the CF grid mapping variable (most reliable)
     for name, var in ds.variables.items():
         if var.attrs.get('grid_mapping_name') == 'healpix':
             return var.attrs.get('healpix_order', 'ring').lower()
+    # 2. Check global attribute
     return ds.attrs.get('healpix_scheme', 'ring').lower()
+
+
+def is_healpix(ds: xr.Dataset) -> bool:
+    """Return True if *ds* appears to be on a HEALPix grid.
+
+    Checks three independent signals (any one is sufficient):
+    1. A grid mapping variable with ``grid_mapping_name == 'healpix'``.
+    2. A ``healpix_scheme`` global attribute.
+    3. A candidate spatial dimension whose size is a valid HEALPix pixel
+       count (``12 * nside²`` with ``nside`` a power of 2).
+    """
+    # Signal 1: grid mapping variable
+    for var in ds.variables.values():
+        if var.attrs.get('grid_mapping_name') == 'healpix':
+            return True
+    # Signal 2: global attribute
+    if 'healpix_scheme' in ds.attrs:
+        return True
+    # Signal 3: data variable with grid_mapping = 'healpix'
+    for var in ds.data_vars.values():
+        if var.attrs.get('grid_mapping') == 'healpix':
+            return True
+    # Signal 4: spatial dim with valid HEALPix pixel count
+    for dim in CELL_DIM_NAMES:
+        if dim in ds.dims and _is_valid_npix(ds.sizes[dim]):
+            return True
+    return False
+
+
+def add_healpix_grid_mapping(ds: xr.Dataset, nside: int,
+                             order: str = 'ring') -> xr.Dataset:
+    """Ensure *ds* carries the canonical HEALPix grid mapping metadata.
+
+    Adds / updates:
+    * The scalar ``healpix`` variable with CF grid mapping attributes.
+    * ``grid_mapping = 'healpix'`` on every data variable that has the
+      spatial cell dimension.
+    * Global convenience attributes (``healpix_nside``, ``healpix_npix``,
+      ``healpix_scheme``, ``healpix_cell_area_sr``).
+    """
+    order_lower = order.lower()
+    npix = hp.nside2npix(nside)
+    cell_area = 4.0 * np.pi / npix
+
+    # CF grid mapping variable
+    ds['healpix'] = xr.DataArray(
+        np.int32(0),
+        attrs={
+            'grid_mapping_name': 'healpix',
+            'healpix_nside': np.int32(nside),
+            'healpix_order': order_lower,
+        },
+    )
+
+    # Global convenience attributes
+    ds.attrs['healpix_nside'] = nside
+    ds.attrs['healpix_npix'] = npix
+    ds.attrs['healpix_scheme'] = order_lower.upper()  # 'RING' / 'NESTED'
+    ds.attrs['healpix_cell_area_sr'] = f'{cell_area:.6e}'
+
+    # Tag every spatial data variable
+    try:
+        cell_dim = get_cells_dim(ds)
+    except ValueError:
+        return ds
+
+    for var in ds.data_vars:
+        if var == 'healpix':
+            continue
+        if cell_dim in ds[var].dims:
+            ds[var].attrs['grid_mapping'] = 'healpix'
+            # Drop stale CDO attributes that confuse downstream tools
+            ds[var].attrs.pop('CDI_grid_type', None)
+            ds[var].attrs.pop('number_of_grid_in_reference', None)
+
+    return ds
 
 
 def ensure_ring(data: np.ndarray, order: str) -> np.ndarray:
@@ -72,17 +167,66 @@ def ensure_original_order(data: np.ndarray, original_order: str) -> np.ndarray:
     Assumes HEALPix dimension is the last axis.
     """
     if original_order == 'nested':
-        return hp.reorder(data, r2n=True)
+        if data.ndim == 1:
+            return hp.reorder(data, r2n=True)
+        orig_shape = data.shape
+        npix = orig_shape[-1]
+        flat_data = data.reshape(-1, npix)
+        reordered = np.array([hp.reorder(row, r2n=True) for row in flat_data])
+        return reordered.reshape(orig_shape)
     return data
 
 
-def get_cells_dim(ds: xr.Dataset) -> str:
+def get_cells_dim(ds: xr.Dataset | xr.DataArray) -> str:
+    """Return the HEALPix spatial dimension name.
+
+    Checks candidate names in priority order.  When a name exists AND its
+    size is a valid HEALPix pixel count it is returned immediately.
+    Falls back to the first candidate name that exists even if its size
+    is not a recognised HEALPix count.
     """
-    Return the spatial dimension name. Tries 'cells' then 'cell'.
-    Raises ValueError if neither found.
-    """
-    for dim in ['cells', 'cell', 'ncells', 'x']:
+    # Prefer a candidate whose size is a valid HEALPix pixel count
+    fallback = None
+    for dim in CELL_DIM_NAMES:
         if dim in ds.dims:
-            return dim
+            if fallback is None:
+                fallback = dim
+            if _is_valid_npix(ds.sizes[dim]):
+                return dim
+    if fallback is not None:
+        return fallback
     raise ValueError(
-        "Dataset must have a HEALPix spatial dimension (e.g. 'cell', 'cells', 'ncells', or 'x').")
+        f"Dataset must have a HEALPix spatial dimension (one of {CELL_DIM_NAMES}).")
+
+
+def get_cells_dim_da(da: xr.DataArray) -> str:
+    """Like :func:`get_cells_dim` but accepts a :class:`DataArray`."""
+    return get_cells_dim(da.to_dataset(name='__tmp__'))
+
+
+def get_spatial_dims(ds: xr.Dataset) -> list[str]:
+    """
+    Return the list of spatial dimension names present in the dataset,
+    by inspecting known lon/lat coordinate names and the cell dimension.
+    """
+    spatial_dims = []
+    for name in LONLAT_COORD_NAMES:
+        if name in ds.coords or name in ds.data_vars:
+            for dim in ds[name].dims:
+                if dim not in spatial_dims:
+                    spatial_dims.append(dim)
+    try:
+        cell_dim = get_cells_dim(ds)
+        if cell_dim not in spatial_dims:
+            spatial_dims.append(cell_dim)
+    except ValueError:
+        pass
+    return spatial_dims
+
+
+def append_history(ds_attrs: dict, msg: str) -> dict:
+    """Return a copy of ds_attrs with msg appended to 'history'."""
+    attrs = dict(ds_attrs)
+    prev = attrs.get('history', '')
+    attrs['history'] = f"{prev}\n{msg}" if prev else msg
+    return attrs

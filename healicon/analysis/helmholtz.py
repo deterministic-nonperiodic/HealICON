@@ -12,7 +12,6 @@ from ._common import (
     ThreadPoolExecutor,
 )
 
-
 # Earth radius in metres (used to scale streamfunction / velocity potential to m²/s)
 _EARTH_RADIUS_M = EARTH_RADIUS_KM * 1e3
 
@@ -207,7 +206,7 @@ def compute_helmholtz(ds: xr.Dataset, u_var: str, v_var: str,
 
     out_ds.attrs = ds.attrs
     out_ds.attrs = append_history(out_ds.attrs,
-        f"Helmholtz decomposition of ({u_var}, {v_var}), lmax={lmax}.")
+                                  f"Helmholtz decomposition of ({u_var}, {v_var}), lmax={lmax}.")
     return out_ds
 
 

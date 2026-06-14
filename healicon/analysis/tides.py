@@ -321,6 +321,6 @@ def compute_tidal_analysis(ds: xr.Dataset, var_name: str, periods_hours: list[fl
         out_ds['m'].attrs = {'long_name': 'Zonal Wavenumber'}
 
     out_ds.attrs = append_history(out_ds.attrs,
-        f"Full tidal analysis (periods: {periods_hours}h, m: {m_filters}).")
+                                  f"Full tidal analysis (periods: {periods_hours}h, m: {m_filters}).")
 
     return out_ds

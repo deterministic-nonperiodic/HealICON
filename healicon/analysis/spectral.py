@@ -2,7 +2,6 @@
 Spectral analysis: power spectra, cross-spectra, and kinetic energy spectra
 using spherical harmonic transforms.
 """
-import warnings
 
 import healpy as hp
 import numpy as np
@@ -10,8 +9,7 @@ import xarray as xr
 
 from ._common import (
     logger, EARTH_RADIUS_KM, _parse_units, _MAX_WORKERS,
-    degree_to_wavelength, wavelength_to_degree,
-    get_healpix_order, get_cells_dim, ensure_ring, append_history,
+    degree_to_wavelength, get_healpix_order, get_cells_dim, ensure_ring, append_history,
     ThreadPoolExecutor,
 )
 
@@ -34,7 +32,7 @@ def _anafast_block(*args, lmax=None, is_nested=False, op_type='power'):
 
     orig_shape = data_blocks[0].shape
     npix = orig_shape[-1]
-    
+
     import warnings
 
     # Vectorize pre-processing (ordering, NaN checks, and mean filling) across all slices
@@ -43,14 +41,14 @@ def _anafast_block(*args, lmax=None, is_nested=False, op_type='power'):
     for block in data_blocks:
         d_2d = block.reshape(-1, npix)
         d_2d_ring = ensure_ring(d_2d, 'nested' if is_nested else 'ring')
-        
+
         valid_mask = ~np.isnan(d_2d_ring)
-        
+
         # Calculate mean for each map, ignoring all-NaN slice warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             means = np.nanmean(d_2d_ring, axis=-1, keepdims=True)
-            
+
         d_filled = np.where(valid_mask, d_2d_ring, means)
         prepared_2ds.append(d_filled)
         valid_masks.append(valid_mask)
@@ -182,9 +180,10 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
                     new_units = str((_parse_units(orig_units) ** 2).units)
                 except Exception:
                     # Fallback if pint fails to parse
-                    new_units = f"({orig_units})2" if any(c in orig_units for c in [' ', '/', '^', '-']) else f"{orig_units}2"
+                    new_units = f"({orig_units})2" if any(
+                        c in orig_units for c in [' ', '/', '^', '-']) else f"{orig_units}2"
                 out_ds[f"{v}_cl"].attrs['units'] = new_units
-            
+
             orig_name = ds[v].attrs.get('long_name', ds[v].attrs.get('standard_name', v))
             out_ds[f"{v}_cl"].attrs['long_name'] = f"Power spectrum of {orig_name}"
     else:

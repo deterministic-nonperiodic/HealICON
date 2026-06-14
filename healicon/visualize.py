@@ -45,7 +45,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
     """
     set_publication_style()
 
-    vert_dims = [d for d in ['height', 'z_mc', 'altitude', 'plev'] if d in ds.coords or d in ds.dims]
+    vert_dims = [d for d in ['height', 'z_mc', 'altitude', 'plev'] if
+                 d in ds.coords or d in ds.dims]
     if not vert_dims:
         logger.error("Dataset missing height coordinate for tidal cross-section.")
         return
@@ -104,7 +105,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
     try:
         max_amp = float(ds[['temp_amp_sym', 'temp_amp_asy']].to_array().max())
         if np.isfinite(max_amp) and max_amp > 0:
-            vmax = min(max_amp, max_amplitude if max_amplitude is not None else 20.0)  # Cap at 20 for visibility
+            vmax = min(max_amp,
+                       max_amplitude if max_amplitude is not None else 20.0)  # Cap at 20 for visibility
     except:
         pass
 
@@ -120,7 +122,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
         if data.dims != (level_name, 'lat'):
             data = data.transpose(level_name, 'lat')
 
-        y = data[level_name] / 1000.0 if level_name in ['z_mc', 'height', 'altitude'] else data[level_name]
+        y = data[level_name] / 1000.0 if level_name in ['z_mc', 'height', 'altitude'] else data[
+            level_name]
         x = data.lat
 
         cf = ax.contourf(x, y, data, levels=levels, cmap='inferno', extend='max')
@@ -133,7 +136,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
             ax.remove()
         else:
             if i % n_cols == 0:
-                ylabel = "Height / km" if level_name in ['z_mc', 'height', 'altitude'] else "Pressure / hPa"
+                ylabel = "Height / km" if level_name in ['z_mc', 'height',
+                                                         'altitude'] else "Pressure / hPa"
                 ax.set_ylabel(ylabel)
             if i >= n_modes - n_cols:
                 ax.set_xlabel("Latitude")
@@ -175,7 +179,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
         if data.dims != (level_name, 'lat'):
             data = data.transpose(level_name, 'lat')
 
-        y = data[level_name] / 1000.0 if level_name in ['z_mc', 'height', 'altitude'] else data[level_name]
+        y = data[level_name] / 1000.0 if level_name in ['z_mc', 'height', 'altitude'] else data[
+            level_name]
         x = data.lat
 
         cf_pha = ax.contourf(x, y, data, levels=levels_pha, cmap='twilight_shifted', extend='both')
@@ -187,7 +192,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
             ax.remove()
         else:
             if i % n_cols == 0:
-                ylabel = "Height / km" if level_name in ['z_mc', 'height', 'altitude'] else "Pressure / hPa"
+                ylabel = "Height / km" if level_name in ['z_mc', 'height',
+                                                         'altitude'] else "Pressure / hPa"
                 ax.set_ylabel(ylabel)
             if i >= n_modes - n_cols:
                 ax.set_xlabel("Latitude")

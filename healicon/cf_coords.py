@@ -369,7 +369,7 @@ def _is_geographic(coord: xr.DataArray, coord_type: str) -> bool:
         if standard_name == expected_std:
             return True
         elif ("longitude" in standard_name and coord_type == "lat") or \
-             ("latitude" in standard_name and coord_type == "lon"):
+                ("latitude" in standard_name and coord_type == "lon"):
             # If it explicitly claims to be the other geographic coordinate, reject it immediately
             return False
 

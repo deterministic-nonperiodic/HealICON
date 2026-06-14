@@ -1,7 +1,6 @@
 import logging
 import math
 
-import healpy as hp
 import numpy as np
 import xarray as xr
 

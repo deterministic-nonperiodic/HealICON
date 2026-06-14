@@ -1,12 +1,11 @@
 import logging
 import os
-from typing import Dict, Any
 
 import click
 
-from .core import run_sequential
 from .cf_coords import _cf_guess
-from .grid import LONLAT_COORD_NAMES, get_spatial_dims
+from .core import run_sequential
+from .grid import get_spatial_dims
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,7 +54,6 @@ def _load_and_ensure_healpix(ifile, target_nside=None):
         target_nside: Target NSIDE for the HEALPix grid.
     """
     import xarray as xr
-    import healpy as hp
     from .interpolate import interpolate_to_healpix
 
     logger.info(f"Opening file: {ifile}")

@@ -25,10 +25,10 @@ def _directional_filter_block(a_block, b_block, target_m, lmax, is_nested):
     A pure traveling wave takes the form: cos(m * lambda +/- omega * t)
     
     Expanding this using trigonometric identities:
-    - Westward (m > 0):  cos(m*lambda - omega*t) =  cos(m*lambda)*cos(omega*t) + sin(m*lambda)*sin(omega*t)
-                         Here, A ~ cos(m*lambda) and B ~ sin(m*lambda)
-    - Eastward (m < 0): cos(|m|*lambda + omega*t) = cos(|m|*lambda)*cos(omega*t) - sin(|m|*lambda)*sin(omega*t)
-                         Here, A ~ cos(|m|*lambda) and B ~ -sin(|m|*lambda)
+    - Westward (m > 0): cos(m*lambda + omega*t) = cos(m*lambda)*cos(omega*t) - sin(m*lambda)*sin(omega*t)
+                         Here, A ~ cos(m*lambda) and B ~ -sin(m*lambda)
+    - Eastward (m < 0):  cos(|m|*lambda - omega*t) =  cos(|m|*lambda)*cos(omega*t) + sin(|m|*lambda)*sin(omega*t)
+                         Here, A ~ cos(|m|*lambda) and B ~ sin(|m|*lambda)
 
     In the Spherical Harmonic (ALM) domain, the basis functions are Y_l^m ~ exp(i * m * lambda).
     To extract the directional components from the full fields A and B:
@@ -36,11 +36,11 @@ def _directional_filter_block(a_block, b_block, target_m, lmax, is_nested):
     2. For a target wavenumber |m|, mask out all other wavenumbers.
     3. Apply the phase relationship between A and B to isolate the direction:
        - For m > 0 (Westward): 
-           alm_a_out = 0.5 * (alm_a + i * alm_b)
-           alm_b_out = -i * alm_a_out
-       - For m < 0 (Eastward): 
            alm_a_out = 0.5 * (alm_a - i * alm_b)
            alm_b_out = i * alm_a_out
+       - For m < 0 (Eastward): 
+           alm_a_out = 0.5 * (alm_a + i * alm_b)
+           alm_b_out = -i * alm_a_out
        - For m = 0 (Zonal Mean):
            alm_a_out = alm_a
            alm_b_out = alm_b
@@ -88,11 +88,13 @@ def _directional_filter_block(a_block, b_block, target_m, lmax, is_nested):
         alm_b = hp.map2alm(b_filled, lmax=lmax, iter=3)
 
         if target_m > 0:
-            alm_a_out = 0.5 * (alm_a + 1j * alm_b) * mask
-            alm_b_out = -1j * alm_a_out
-        elif target_m < 0:
+            # Positive m: Westward (cos(m*lambda + omega*t))
             alm_a_out = 0.5 * (alm_a - 1j * alm_b) * mask
             alm_b_out = 1j * alm_a_out
+        elif target_m < 0:
+            # Negative m: Eastward (cos(|m|*lambda - omega*t))
+            alm_a_out = 0.5 * (alm_a + 1j * alm_b) * mask
+            alm_b_out = -1j * alm_a_out
         else:
             alm_a_out = alm_a * mask
             alm_b_out = alm_b * mask
@@ -188,7 +190,7 @@ def _extract_spatial_tide_components(da_cos: xr.DataArray, da_sin: xr.DataArray,
     return {k: v[0] for k, v in results.items()}
 
 
-def compute_tidal_analysis(ds: xr.Dataset, var_name: str, periods_hours: list[float],
+def compute_leastsquares_tidal_analysis(ds: xr.Dataset, var_name: str, periods_hours: list[float],
                            m_filters: list[int] | None = None, lmax: int | None = None,
                            time_dim: str = 'time') -> xr.Dataset:
     """
@@ -210,7 +212,8 @@ def compute_tidal_analysis(ds: xr.Dataset, var_name: str, periods_hours: list[fl
         periods_hours (list[float]): List of target periods in hours for the temporal 
             Fourier extraction (e.g., [24, 12] for diurnal and semidiurnal tides).
         m_filters (list[int] | None, optional): List of zonal wavenumbers to filter. 
-            Positive values denote westward propagation, negative values eastward. 
+            Positive values denote westward propagation, negative values eastward 
+            (matching Yamazaki 2023 convention). 
             If None, only the temporal extraction is performed. Defaults to None.
         lmax (int | None, optional): Maximum spherical harmonic degree to use during 
             spatial filtering. If None, calculated automatically as 3 * nside - 1. 
@@ -324,3 +327,8 @@ def compute_tidal_analysis(ds: xr.Dataset, var_name: str, periods_hours: list[fl
                                   f"Full tidal analysis (periods: {periods_hours}h, m: {m_filters}).")
 
     return out_ds
+
+
+# Compatibility alias
+compute_tidal_analysis = compute_leastsquares_tidal_analysis
+

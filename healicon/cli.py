@@ -489,20 +489,33 @@ def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
 @click.option('-p', '--periods', 'periods_str', default=None,
               help='Comma-separated tidal periods in hours. E.g., 12.0,24.0 for semidiurnal and diurnal.')
 @click.option('-m', '--m-filters', 'm_str', default=None,
-              help='Optional comma-separated zonal wavenumbers. E.g., 1,2,3.')
+              help='Optional comma-separated zonal wavenumbers. E.g., 1,2,3. '
+                   'Positive values denote westward propagation, negative values eastward '
+                   '(matching Yamazaki 2023 convention, consistent across all methods).')
 @click.option('--modes', 'modes_str', default=None,
               help='Comma-separated tidal modes. E.g., DW1, SW2, DE3, SE2. '
                    'If provided, automatically configures periods and m-filters.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
 @click.option('--time-dim', default='time', show_default=True,
               help='Dimension name for time-like axis (e.g., "time" or "lst").')
-def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim):
+@click.option('--method', default='ls', type=click.Choice(['ls', 'fourier', 'wavelet']),
+              show_default=True, help='Tidal analysis method to use.')
+@click.option('--temporal-mean/--no-temporal-mean', default=True, show_default=True,
+              help='Average wavelet/fourier amplitudes over time (comparable to LS).')
+@click.option('--dj', type=float, default=0.1, show_default=True,
+              help='Spacing between discrete wavelet scales (for fourier and wavelet methods).')
+def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim, method, temporal_mean, dj):
     """
     Perform a full tidal analysis (temporal fit and spatial symmetry decomposition).
 
     Extracts the amplitude and phase of given periods (in hours), optionally 
     filters to specific zonal wavenumbers (-m), and decomposes the resulting 
     spatial patterns into symmetric and antisymmetric components relative to the equator.
+
+    Note on Sign Convention:
+      - All methods (ls, fourier, wavelet) share a consistent convention:
+        positive m = westward, negative m = eastward (complying with Yamazaki 2023).
+      - Using the --modes option (e.g. --modes DW1) automatically handles this.
 
     Args:
         ifile: Path to input data file.
@@ -513,10 +526,11 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim)
         modes_str: Comma-separated tidal modes (e.g., "DW1, SW2, DE3, SE2").
         lmax: Maximum spherical harmonic degree l.
         time_dim: Dimension name for time-like axis (e.g., "time" or "lst").
+        method: Tidal analysis method (ls, fourier, or wavelet).
+        temporal_mean: Whether to average wavelet/fourier amplitude over time.
+        dj: Discrete wavelet scale spacing.
     """
     _check_io_safety(ifile, ofile)
-
-    from .analysis import compute_tidal_analysis
 
     if modes_str:
         if periods_str or m_str:
@@ -560,8 +574,30 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim)
     ds = _load_and_ensure_healpix(ifile)
     if var_name is None:
         var_name = _guess_variable(ds, "temperature")
-    out_ds = compute_tidal_analysis(ds, var_name=var_name, periods_hours=periods_hours,
-                                    m_filters=m_filters, lmax=lmax, time_dim=time_dim)
+
+    if method == 'ls':
+        from .analysis import compute_leastsquares_tidal_analysis
+        out_ds = compute_leastsquares_tidal_analysis(
+            ds, var_name=var_name, periods_hours=periods_hours,
+            m_filters=m_filters, lmax=lmax, time_dim=time_dim
+        )
+    elif method == 'wavelet':
+        from .wavelet import compute_wavelet_tidal_analysis
+        out_ds = compute_wavelet_tidal_analysis(
+            ds, var_name=var_name, periods_hours=periods_hours,
+            m_filters=m_filters, lmax=lmax, time_dim=time_dim,
+            dj=dj, temporal_mean=temporal_mean
+        )
+    elif method == 'fourier':
+        from .wavelet import compute_fourier_tidal_analysis
+        out_ds = compute_fourier_tidal_analysis(
+            ds, var_name=var_name, periods_hours=periods_hours,
+            m_filters=m_filters, time_dim=time_dim,
+            dj=dj, temporal_mean=temporal_mean
+        )
+    else:
+        raise click.UsageError(f"Unsupported method '{method}'.")
+
     logger.info(f"Computing and saving tidal analysis to {ofile}")
     out_ds.compute().to_netcdf(ofile)
     logger.info("Done.")

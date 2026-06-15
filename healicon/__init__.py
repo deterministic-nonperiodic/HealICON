@@ -15,6 +15,8 @@ from .analysis import (
     degree_to_wavelength,
     wavelength_to_degree,
     EARTH_RADIUS_KM,
+    compute_tidal_analysis,
+    compute_leastsquares_tidal_analysis,
 )
 from .extract import (
     extract_along_latitude,
@@ -24,7 +26,8 @@ from .extract import (
 )
 from .wavelet import (fourier_wavelet_spectrum,
                       spherical_harmonic_wavelet_spectrum,
-                      compute_wavelet_tidal_analysis)
+                      compute_wavelet_tidal_analysis,
+                      compute_fourier_tidal_analysis)
 
 __all__ = [
     "interpolate_to_healpix",
@@ -43,6 +46,9 @@ __all__ = [
     "fourier_wavelet_spectrum",
     "spherical_harmonic_wavelet_spectrum",
     "compute_wavelet_tidal_analysis",
+    "compute_fourier_tidal_analysis",
+    "compute_tidal_analysis",
+    "compute_leastsquares_tidal_analysis",
     "visualize",
     "wavelet",
 ]

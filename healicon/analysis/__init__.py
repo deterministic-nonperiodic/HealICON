@@ -51,6 +51,7 @@ from .tides import (
     _get_symmetric_pixels,
     _extract_spatial_tide_components,
     compute_tidal_analysis,
+    compute_leastsquares_tidal_analysis,
 )
 
 # Re-export grid utilities that were historically importable from analysis
@@ -67,6 +68,7 @@ __all__ = [
     "compute_vorticity_divergence",
     "compute_uv_from_vorticity_divergence",
     "compute_tidal_analysis",
+    "compute_leastsquares_tidal_analysis",
     # Internal but used by wavelet module
     "ensure_ring",
     "ensure_original_order",

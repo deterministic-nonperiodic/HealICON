@@ -1,11 +1,67 @@
+import functools
+import glob
 import logging
 import os
+import resource
+import time
 
 import click
 
 from .cf_coords import _cf_guess
 from .core import run_sequential
 from .grid import get_spatial_dims
+
+
+def profile_command(func):
+    """Decorator to add CDO-style profiling output to CLI commands."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+
+        result = func(*args, **kwargs)
+
+        end_time = time.time()
+        elapsed = end_time - start_time
+
+        # Get peak memory
+        ru_maxrss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        mem_used_mb = ru_maxrss / 1024.0
+
+        # Extract metadata from ifile
+        ifile_path = kwargs.get('ifile')
+
+        n_vars, n_time, n_levels = 0, 0, 0
+        if ifile_path and isinstance(ifile_path, str):
+            files = glob.glob(ifile_path)
+            if files:
+                import xarray as xr
+                try:
+                    with xr.open_dataset(files[0]) as ds:
+                        vars_list = [v for v in ds.data_vars if ds[v].ndim > 0]
+                        n_vars = len(vars_list)
+
+                        time_dims = [d for d in ds.dims if d.lower() in ('time', 'lst')]
+                        n_time = ds.sizes[time_dims[0]] if time_dims else 1
+                        n_time *= len(files)
+
+                        level_dims = [d for d in ds.dims if
+                                      d.lower() in ('level', 'height', 'z_mc', 'lev')]
+                        n_levels = ds.sizes[level_dims[0]] if level_dims else 1
+                except Exception:
+                    pass
+
+        var_str = f"1 variable" if n_vars == 1 else f"{n_vars} variables"
+        time_str = f"1 timestep" if n_time == 1 else f"{n_time} timesteps"
+        lev_str = f"1 level" if n_levels == 1 else f"{n_levels} levels"
+
+        click.echo(
+            f"Processed {var_str} over {time_str} {lev_str} [{elapsed:.2f}s {mem_used_mb:.0f}MB]")
+
+        return result
+
+    return wrapper
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,6 +151,7 @@ def _load_and_ensure_healpix(ifile, target_nside=None):
               help='Enable GPU acceleration for KDTree interpolation if available.')
 @click.option('--cat', is_flag=True, default=False,
               help='Combine files matching the input pattern into a single dataset before processing (mimics CDO cat).')
+@profile_command
 def convert(ifile, ofile, nside, ut_bins, config_path, grid_file, gpu, cat):
     """
     Convert model output to HEALPix grid.
@@ -128,6 +185,7 @@ def convert(ifile, ofile, nside, ut_bins, config_path, grid_file, gpu, cat):
               help='Target latitude in degrees [-90, 90].')
 @click.option('--num-lons', type=int, default=None,
               help='Number of longitude points to extract (default: number of HEALPix grid points).')
+@profile_command
 def extract_lat(ifile, ofile, lat, num_lons):
     """
     Extract data along all longitudes for a specific latitude from a HEALPix dataset.
@@ -157,6 +215,7 @@ def extract_lat(ifile, ofile, lat, num_lons):
               help='Target longitude in degrees [-180, 180] or [0, 360].')
 @click.option('--num-lats', type=int, default=None,
               help='Number of latitude points to extract.')
+@profile_command
 def extract_lon(ifile, ofile, lon, num_lats):
     """
     Extract data along all latitudes for a specific longitude from a HEALPix dataset.
@@ -183,6 +242,7 @@ def extract_lon(ifile, ofile, lon, num_lats):
 @click.argument('ofile')
 @click.option('--lat', type=float, required=True, help='Target latitude.')
 @click.option('--lon', type=float, required=True, help='Target longitude.')
+@profile_command
 def extract_point(ifile, ofile, lat, lon):
     """
     Extract full time/height profile for a specific lat/lon point from a HEALPix dataset.
@@ -211,6 +271,7 @@ def extract_point(ifile, ofile, lat, lon):
               help='Name of the spatial dimension (default: cells).')
 @click.option('--time-dim', type=str, default=None,
               help='Optional name of the time/LST dimension to interpolate across temporally.')
+@profile_command
 def fill(ifile, ofile, spatial_dim, time_dim):
     """
     Fill missing values (NaNs) natively using HEALPix KDTree spatial nearest-neighbor and temporal 1D linear interpolation.
@@ -239,6 +300,7 @@ def fill(ifile, ofile, spatial_dim, time_dim):
 @cli.command()
 @click.argument('ifile', type=click.Path(exists=True))
 @click.argument('ofile')
+@profile_command
 def zonal_mean(ifile, ofile):
     """
     Compute the zonal mean (longitude average) across HEALPix rings.
@@ -268,6 +330,7 @@ def zonal_mean(ifile, ofile):
 @click.option('--type', 'spectrum_type', type=click.Choice(['power', 'cross', 'kinetic']),
               default='power',
               help='Type of spectrum to compute: power (default), cross, or kinetic.')
+@profile_command
 def spectrum(ifile, ofile, var_name, lmax, spectrum_type):
     """
     Compute the angular spectrum (Cl) of a variable or pair of variables.
@@ -308,6 +371,7 @@ def spectrum(ifile, ofile, var_name, lmax, spectrum_type):
               help='Hard low-pass spectral cutoff at spherical harmonic degree l.')
 @click.option('--wavelength', 'wavelength_km', type=float, default=None,
               help='Hard low-pass spectral cutoff expressed as a physical wavelength in km.')
+@profile_command
 def filter(ifile, ofile, fwhm, lmax, wavelength_km):
     """
     Filter spatial maps using spherical harmonic transforms.
@@ -337,6 +401,7 @@ def filter(ifile, ofile, fwhm, lmax, wavelength_km):
               help='Target nside for the resolution change.')
 @click.option('-z', '--zoom', type=int, default=None,
               help='Target zoom level (refinement), where nside = 2**zoom.')
+@profile_command
 def regrade(ifile, ofile, nside, zoom):
     """
     Upgrade or downgrade the HEALPix resolution.
@@ -380,6 +445,7 @@ def regrade(ifile, ofile, nside, zoom):
 @click.option('--u', 'u_var', default=None, help='Name of eastward wind variable.')
 @click.option('--v', 'v_var', default=None, help='Name of northward wind variable.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
+@profile_command
 def uv2dv(ifile, ofile, u_var, v_var, lmax):
     """
     Compute horizontal divergence and vorticity from U and V wind components.
@@ -412,6 +478,7 @@ def uv2dv(ifile, ofile, u_var, v_var, lmax):
 @click.option('--div', 'div_var', default=None, help='Name of divergence variable.')
 @click.option('--vor', 'vor_var', default=None, help='Name of vorticity variable.')
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
+@profile_command
 def dv2uv(ifile, ofile, div_var, vor_var, lmax):
     """
     Compute U and V wind components from horizontal divergence and vorticity.
@@ -448,6 +515,7 @@ def dv2uv(ifile, ofile, div_var, vor_var, lmax):
               help='Include streamfunction ψ [m² s⁻¹] in output.')
 @click.option('--chi/--no-chi', default=True, show_default=True,
               help='Include velocity potential χ [m² s⁻¹] in output.')
+@profile_command
 def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
     """
     Helmholtz decomposition: split wind into rotational and divergent components.
@@ -504,7 +572,9 @@ def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
               help='Average wavelet/fourier amplitudes over time (comparable to LS).')
 @click.option('--dj', type=float, default=0.1, show_default=True,
               help='Spacing between discrete wavelet scales (for fourier and wavelet methods).')
-def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim, method, temporal_mean, dj):
+@profile_command
+def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim, method,
+          temporal_mean, dj):
     """
     Perform a full tidal analysis (temporal fit and spatial symmetry decomposition).
 
@@ -582,14 +652,14 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim,
             m_filters=m_filters, lmax=lmax, time_dim=time_dim
         )
     elif method == 'wavelet':
-        from .wavelet import compute_wavelet_tidal_analysis
+        from .analysis import compute_wavelet_tidal_analysis
         out_ds = compute_wavelet_tidal_analysis(
             ds, var_name=var_name, periods_hours=periods_hours,
             m_filters=m_filters, lmax=lmax, time_dim=time_dim,
             dj=dj, temporal_mean=temporal_mean
         )
     elif method == 'fourier':
-        from .wavelet import compute_fourier_tidal_analysis
+        from .analysis import compute_fourier_tidal_analysis
         out_ds = compute_fourier_tidal_analysis(
             ds, var_name=var_name, periods_hours=periods_hours,
             m_filters=m_filters, time_dim=time_dim,
@@ -617,6 +687,7 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim,
 @click.option('--out-dir', default='.',
               help='Output directory for plots (default: current directory)')
 @click.option('--prefix', default=None, help='Prefix for output filenames.')
+@profile_command
 def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, out_dir, prefix):
     """
     Generate simple visualizations for healicon products.

@@ -54,6 +54,14 @@ from .tides import (
     compute_leastsquares_tidal_analysis,
 )
 
+# --- Wavelet analysis ---
+from .wavelet import (
+    fourier_wavelet_spectrum,
+    spherical_harmonic_wavelet_spectrum,
+    compute_wavelet_tidal_analysis,
+    compute_fourier_tidal_analysis,
+)
+
 # Re-export grid utilities that were historically importable from analysis
 from ..grid import ensure_ring, ensure_original_order
 
@@ -69,6 +77,10 @@ __all__ = [
     "compute_uv_from_vorticity_divergence",
     "compute_tidal_analysis",
     "compute_leastsquares_tidal_analysis",
+    "fourier_wavelet_spectrum",
+    "spherical_harmonic_wavelet_spectrum",
+    "compute_wavelet_tidal_analysis",
+    "compute_fourier_tidal_analysis",
     # Internal but used by wavelet module
     "ensure_ring",
     "ensure_original_order",

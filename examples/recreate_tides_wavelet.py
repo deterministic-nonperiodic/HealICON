@@ -10,8 +10,7 @@ import numpy as np
 import logging
 import os
 
-from healicon.wavelet import compute_wavelet_tidal_analysis
-from healicon.analysis import regrade_resolution
+from healicon.analysis import compute_wavelet_tidal_analysis, regrade_resolution
 
 logging.basicConfig(level=logging.INFO)
 
@@ -72,7 +71,7 @@ def run():
     print("\nGenerating Plots...")
     from healicon.visualize import plot_tides, plot_map
 
-    plot_tides(ds_zm, out_dir=".", prefix="wavelet_tides_plot_optimal_v3", max_amplitude=6.0)
+    plot_tides(ds_zm, out_dir=".", prefix="wavelet_tides_plot_optimal_v5", max_amplitude=6.0)
     print("Generated tides plot")
 
     # Generate tides maps at ~100 km
@@ -93,7 +92,7 @@ def run():
                     else 'temp_amp_asy')
         data_slice = ds_out.sel(period=meta['period'], m=meta['m'],
                                 height=target_height, method='nearest')
-        prefix = f"wavelet_tides_map_{name}_optimal_v3"
+        prefix = f"wavelet_tides_map_{name}_optimal_v5"
         plot_map(data_slice, var_name=var_name, out_dir=".", prefix=prefix)
     print("Generated tides maps")
 

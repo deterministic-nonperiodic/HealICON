@@ -21,17 +21,17 @@ def _helmholtz_block(u_block, v_block, lmax, nside, is_nested):
     Helmholtz decomposition of a single block of wind data.
 
     Returns 6 maps, always in this order:
-        u_rot, v_rot  – rotational (non-divergent) wind  [m/s]
-        u_div, v_div  – divergent  (irrotational)  wind  [m/s]
-        psi           – streamfunction                   [m²/s]
-        chi           – velocity potential               [m²/s]
+        u_rot, v_rot  - rotational (non-divergent) wind  [m/s]
+        u_div, v_div  - divergent  (irrotational)  wind  [m/s]
+        psi           - streamfunction                   [m²/s]
+        chi           - velocity potential               [m²/s]
 
     Method (healpy spin-1 SHT):
-      1. map2alm_spin([−v, u], spin=1) → almE (divergent mode), almB (rotational mode)
+      1. map2alm_spin([-v, u], spin=1) → almE (divergent mode), almB (rotational mode)
       2. Rotational wind  ← alm2map_spin([0,   almB], spin=1)
          Divergent  wind  ← alm2map_spin([almE, 0  ], spin=1)
-      3. ψ_lm = −almB_lm / √[l(l+1)]   → alm2map → × a
-         χ_lm =  almE_lm / √[l(l+1)]   → alm2map → × a
+      3. ψ_lm = -almB_lm / √[l(l+1)]   → alm2map x a
+         χ_lm =  almE_lm / √[l(l+1)]   → alm2map x a
     """
     orig_shape = u_block.shape
     npix = orig_shape[-1]

@@ -8,8 +8,9 @@ import xarray as xr
 
 from ._common import (
     logger, _MAX_WORKERS,
-    get_healpix_order, get_cells_dim, ensure_ring, ensure_original_order, append_history,
-    ThreadPoolExecutor,
+    get_healpix_order, get_cells_dim, ensure_ring,
+    ensure_original_order, append_history, add_healpix_grid_mapping,
+    ThreadPoolExecutor
 )
 
 
@@ -231,7 +232,9 @@ def compute_leastsquares_tidal_analysis(ds: xr.Dataset, var_name: str, periods_h
         raise ValueError(f"Dataset must have a '{time_dim}' dimension for temporal tidal analysis.")
 
     cell_dim = get_cells_dim(ds)
-    is_nested = get_healpix_order(ds) == 'nested'
+    hp_order = get_healpix_order(ds)
+    is_nested = hp_order == 'nested'
+
     npix = ds.sizes[cell_dim]
     nside = hp.npix2nside(npix)
 
@@ -271,8 +274,6 @@ def compute_leastsquares_tidal_analysis(ds: xr.Dataset, var_name: str, periods_h
 
     periods_arr = np.array(periods_hours)
     freq_cpd = 24.0 / periods_arr
-
-    logger.info(f"Extracting temporal periods {periods_hours} hours for '{var_name}'.")
 
     omega = 2 * np.pi * freq_cpd[:, None]
 
@@ -318,6 +319,9 @@ def compute_leastsquares_tidal_analysis(ds: xr.Dataset, var_name: str, periods_h
             'long_name': f'{comp_type} {metric}'
         }
         out_ds[f'{var_name}_{k}'] = combined
+
+    # Add metadata for the output dataset
+    out_ds = add_healpix_grid_mapping(out_ds, nside, order=hp_order)
 
     out_ds['period'].attrs = {'units': 'hours', 'long_name': 'Tidal Period'}
     if m_filters is not None:

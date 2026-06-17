@@ -43,6 +43,7 @@ share/python-wheels/
 *.png
 *.sh
 *.txt
+*.dat
 /dev/
 docs/*.aux
 docs/*.log

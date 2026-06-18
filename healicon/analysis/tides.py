@@ -1,7 +1,11 @@
 """
 Tidal analysis: directional spatial filtering, symmetric/antisymmetric decomposition,
-and temporal harmonic extraction.
+temporal harmonic extraction, and wavelet-based tidal decomposition.
+
+This module is the canonical entry point for all Dataset-level tidal
+analysis methods (least-squares, Fourier-wavelet, SH-wavelet).
 """
+
 import healpy as hp
 import numpy as np
 import xarray as xr
@@ -12,6 +16,7 @@ from ._common import (
     ensure_original_order, append_history, add_healpix_grid_mapping,
     ThreadPoolExecutor
 )
+from ..grid import get_healpix_coords
 
 
 def _directional_filter_block(a_block, b_block, target_m, lmax, is_nested):
@@ -192,8 +197,8 @@ def _extract_spatial_tide_components(da_cos: xr.DataArray, da_sin: xr.DataArray,
 
 
 def compute_leastsquares_tidal_analysis(ds: xr.Dataset, var_name: str, periods_hours: list[float],
-                           m_filters: list[int] | None = None, lmax: int | None = None,
-                           time_dim: str = 'time') -> xr.Dataset:
+                                        m_filters: list[int] | None = None, lmax: int | None = None,
+                                        time_dim: str = 'time') -> xr.Dataset:
     """
     Performs a full tidal analysis on a HEALPix dataset over time.
     
@@ -333,6 +338,513 @@ def compute_leastsquares_tidal_analysis(ds: xr.Dataset, var_name: str, periods_h
     return out_ds
 
 
-# Compatibility alias
-compute_tidal_analysis = compute_leastsquares_tidal_analysis
+# --------------------------------------------------------------------------
+# SHARED HELPERS FOR WAVELET-BASED TIDAL ANALYSIS
+# --------------------------------------------------------------------------
 
+def _infer_dt_hours(time_vals: np.ndarray, time_dim: str = 'time') -> float:
+    """Infer the median time step in hours from a coordinate array.
+
+    Handles datetime64, timedelta64 (LST-style), and plain numeric arrays.
+    """
+    if time_dim == 'lst':
+        if np.issubdtype(time_vals.dtype, np.timedelta64):
+            return float(np.median(np.diff(time_vals)) / np.timedelta64(1, 'h'))
+        return float(np.median(np.diff(time_vals)))
+    if np.issubdtype(time_vals.dtype, (np.datetime64, np.timedelta64)):
+        return float(np.median(np.diff(time_vals)) / np.timedelta64(1, 'h'))
+    return float(np.median(np.diff(time_vals)))
+
+
+def _infer_t_hours_vals(time_vals: np.ndarray, time_dim: str = 'time') -> np.ndarray:
+    """Build the elapsed-hours time axis used for temporal demodulation.
+
+    This is the array fed into ``omega * t_hours_vals`` in
+    :func:`_demodulate_mode`.  Shared by both
+    :func:`compute_fourier_tidal_analysis` and
+    :func:`compute_wavelet_tidal_analysis` so the two analyses demodulate
+    against an identical time axis for the same dataset.
+    """
+    if time_dim == 'lst':
+        if np.issubdtype(time_vals.dtype, np.timedelta64):
+            return time_vals / np.timedelta64(1, 'h')
+        return time_vals.astype(float)
+    if np.issubdtype(time_vals.dtype, (np.datetime64, np.timedelta64)):
+        return (time_vals - time_vals[0]) / np.timedelta64(1, 'h')
+    return (time_vals - time_vals[0]).astype(float)
+
+
+def _demodulate_mode(
+        amp_vals: np.ndarray,
+        pha_vals: np.ndarray,
+        t_hours_vals: np.ndarray,
+        period_h: float,
+        want_phase: bool,
+        lon_phase: np.ndarray | None = None,
+) -> np.ndarray:
+    """Demodulate a time-resolved amplitude/phase envelope to a single
+    time-mean amplitude or phase map.
+
+    This implements the harmonic-demodulation step shared by the
+    ``temporal_mean=True`` branch of both
+    :func:`compute_fourier_tidal_analysis` and
+    :func:`compute_wavelet_tidal_analysis`.
+
+    - Fourier path (``lon_phase=None``): ``pha_vals`` is already
+      longitude-independent, so only time demodulation is performed.
+    - Spherical-harmonic path (``lon_phase=target_m * phi``): the
+      reconstructed spatial map still carries the ``m·λ`` longitude
+      term, so it is folded in and removed after time-averaging.
+    """
+    omega = 2 * np.pi / float(period_h)
+    wt = omega * t_hours_vals[:, None]
+
+    pha_total = pha_vals + lon_phase if lon_phase is not None else pha_vals
+    mw = amp_vals * np.cos(pha_total)
+    mwH = -amp_vals * np.sin(pha_total)
+
+    C_t = mw * np.cos(wt) + mwH * np.sin(wt)
+    S_t = mw * np.sin(wt) - mwH * np.cos(wt)
+
+    C_mean = C_t.mean(axis=0)
+    S_mean = S_t.mean(axis=0)
+
+    if lon_phase is not None:
+        real_part = C_mean * np.cos(lon_phase) + S_mean * np.sin(lon_phase)
+        imag_part = S_mean * np.cos(lon_phase) - C_mean * np.sin(lon_phase)
+    else:
+        real_part, imag_part = C_mean, S_mean
+
+    if want_phase:
+        return np.arctan2(imag_part, real_part)
+    return np.sqrt(real_part ** 2 + imag_part ** 2)
+
+
+def _build_tidal_output_dataset(
+        assembled: dict,
+        modes: list[dict],
+        periods_hours: list[float],
+        var_name: str,
+        var_units: str,
+        target_lon: np.ndarray,
+        target_lat: np.ndarray,
+        cell_dim: str,
+) -> xr.Dataset:
+    """Assemble the (m, period, ...) output Dataset shared by both
+    wavelet-based tidal-analysis entry points.
+
+    Stacks the per-mode ``assembled`` DataArrays into ``{var_name}_{comp}``
+    variables along new ``m`` and ``period`` dimensions, then attaches the
+    ``lon``/``lat`` spatial coordinates and amplitude/phase attrs.
+    """
+    m_vals = sorted(set(mode['m'] for mode in modes))
+    period_td = xr.DataArray(
+        [np.timedelta64(int(p * 3600), 's') for p in periods_hours],
+        dims='period',
+        attrs={'long_name': 'Tidal Period'},
+    )
+    m_coord = xr.DataArray(
+        np.array(m_vals), dims='m',
+        attrs={'long_name': 'Zonal Wavenumber',
+               'description': 'positive=westward, negative=eastward'},
+    )
+
+    data_vars = {}
+    for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
+        stacked = xr.concat(
+            [xr.concat([assembled[(m, p, comp)] for p in periods_hours], dim=period_td)
+             for m in m_vals],
+            dim=m_coord,
+        )
+        data_vars[f'{var_name}_{comp}'] = stacked
+
+    out_ds = xr.Dataset(data_vars)
+
+    lon_da = xr.DataArray(target_lon, dims=cell_dim,
+                          attrs={'standard_name': 'longitude', 'units': 'degrees_east'})
+    lat_da = xr.DataArray(target_lat, dims=cell_dim,
+                          attrs={'standard_name': 'latitude', 'units': 'degrees_north'})
+    out_ds = out_ds.assign_coords(lon=lon_da, lat=lat_da)
+
+    label_map = {'sym': 'Symmetric', 'asy': 'Antisymmetric'}
+    for sa, label in label_map.items():
+        out_ds[f'{var_name}_amp_{sa}'].attrs = {
+            'units': var_units, 'long_name': f'{label} Amplitude',
+            'grid_mapping': 'healpix',
+        }
+        out_ds[f'{var_name}_pha_{sa}'].attrs = {
+            'units': 'rad', 'long_name': f'{label} Phase',
+            'grid_mapping': 'healpix',
+        }
+
+    return out_ds
+
+
+# --------------------------------------------------------------------------
+# DATASET-LEVEL FOURIER TIDAL ANALYSIS
+# --------------------------------------------------------------------------
+
+def compute_fourier_tidal_analysis(
+        ds: xr.Dataset,
+        var_name: str,
+        periods_hours: list[float],
+        m_filters: list[int] | None = None,
+        time_dim: str = 'time',
+        dj: float = 0.1,
+        temporal_mean: bool = False,
+) -> xr.Dataset:
+    """Fourier-wavelet-based tidal analysis on a HEALPix Dataset.
+
+    Extracts Fourier coefficients directly from the HEALPix isolatitude rings
+    without any interpolation, runs the Fourier-wavelet analysis, decomposes
+    the wavelet coefficients into symmetric/antisymmetric parts, and broadcasts
+    the results exactly back to the HEALPix cells.
+    """
+    from .wavelet import fourier_wavelet_spectrum
+
+    if time_dim not in ds.dims:
+        raise ValueError(f"Dataset must have a '{time_dim}' dimension for Fourier tidal analysis.")
+
+    cell_dim = get_cells_dim(ds)
+    hp_order = get_healpix_order(ds)
+
+    time_vals = ds[time_dim].values
+    dt_hours = _infer_dt_hours(time_vals, time_dim)
+    logger.info(f"Inferred dt = {dt_hours:.2f} hours from '{time_dim}' coordinate.")
+
+    if m_filters is None:
+        m_filters = [1]
+        logger.warning("No m_filters specified; defaulting to m=[1] (DW1).")
+
+    modes = []
+    for m in m_filters:
+        direction = 'westward' if m > 0 else 'eastward'
+        zwn = abs(m)
+        for p in periods_hours:
+            modes.append({'m': m, 'zwn': zwn, 'period_h': p, 'dir': direction})
+
+    zwn_mode_groups = {}
+    for mode in modes:
+        zwn_mode_groups.setdefault(mode['zwn'], []).append(mode)
+
+    def _make_ufunc(zwn, zwn_modes):
+        t_hours_vals = _infer_t_hours_vals(ds[time_dim].values, time_dim)
+        periods_for_wavelet = list(set(m['period_h'] for m in zwn_modes))
+
+        def _func(data_np):
+            da_tmp = xr.DataArray(
+                data_np, dims=[time_dim, cell_dim],
+                coords={time_dim: ds[time_dim]},
+            )
+            ds_w = fourier_wavelet_spectrum(
+                da_tmp, zwn=zwn, time_dim=time_dim, dt=dt_hours, dj=dj,
+                periods_to_reconstruct=periods_for_wavelet,
+                order=hp_order,
+            )
+
+            period_lookup = {}
+            for v in ds_w.data_vars:
+                parts = v.split('_')
+                if len(parts) != 4:
+                    continue
+                _, _, direction, p_str = parts
+                if direction not in ('westward', 'eastward'):
+                    continue
+                try:
+                    actual_p = float(p_str)
+                except ValueError:
+                    continue
+                period_lookup[(direction, p_str)] = actual_p
+
+            outputs = []
+            for mode in zwn_modes:
+                direction = mode['dir']
+                target_p_h = mode['period_h']
+
+                best_p_str = min(
+                    (p_str for (d, p_str) in period_lookup if d == direction),
+                    key=lambda s: abs(period_lookup[(direction, s)] - target_p_h),
+                )
+
+                for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
+                    arr = ds_w[f"{comp}_{direction}_{best_p_str}"].values
+                    if temporal_mean:
+                        sa = comp.split('_')[1]
+                        amp_vals = ds_w[f"amp_{sa}_{direction}_{best_p_str}"].values
+                        pha_vals = ds_w[f"pha_{sa}_{direction}_{best_p_str}"].values
+
+                        final_val = _demodulate_mode(
+                            amp_vals, pha_vals, t_hours_vals, target_p_h,
+                            want_phase=('pha' in comp), lon_phase=None
+                        )
+                        outputs.append(final_val)
+                    else:
+                        outputs.append(arr)
+
+            return tuple(outputs)
+
+        return _func
+
+    assembled = {}
+    for zwn, zwn_modes in zwn_mode_groups.items():
+        n_modes = len(zwn_modes)
+        out_dtypes = [ds[var_name].dtype] * (n_modes * 4)
+
+        if temporal_mean:
+            out_core_dims = [[cell_dim]] * (n_modes * 4)
+        else:
+            out_core_dims = [[time_dim, cell_dim]] * (n_modes * 4)
+
+        results = xr.apply_ufunc(
+            _make_ufunc(zwn, zwn_modes),
+            ds[var_name],
+            input_core_dims=[[time_dim, cell_dim]],
+            output_core_dims=out_core_dims,
+            vectorize=True,
+            dask='parallelized',
+            output_dtypes=out_dtypes,
+            dask_gufunc_kwargs={'allow_rechunk': True},
+        )
+
+        flat_modes = []
+        for mode in zwn_modes:
+            for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
+                flat_modes.append((mode['m'], mode['period_h'], comp))
+
+        if not isinstance(results, tuple):
+            results = (results,)
+
+        for i, key in enumerate(flat_modes):
+            assembled[key] = results[i]
+
+    target_lon, target_lat = get_healpix_coords(hp.npix2nside(ds.sizes[cell_dim]))
+    if hp_order == 'nested':
+        target_lon = ensure_original_order(target_lon, 'nested')
+        target_lat = ensure_original_order(target_lat, 'nested')
+
+    out_ds = _build_tidal_output_dataset(
+        assembled, modes, periods_hours, var_name, ds[var_name].attrs.get('units', ''),
+        target_lon, target_lat, cell_dim
+    )
+
+    out_ds.attrs['history'] = f"Fourier-Wavelet Tidal Analysis (dt={dt_hours}h)"
+    return out_ds
+
+
+# --------------------------------------------------------------------------
+# DATASET-LEVEL SH-WAVELET TIDAL ANALYSIS
+# --------------------------------------------------------------------------
+
+def compute_wavelet_tidal_analysis(
+        ds: xr.Dataset,
+        var_name: str,
+        periods_hours: list[float],
+        m_filters: list[int] | None = None,
+        lmax: int | None = None,
+        time_dim: str = 'time',
+        dj: float = 0.1,
+        temporal_mean: bool = False,
+        map2alm_iter: int = 3,
+) -> xr.Dataset:
+    """Wavelet-based tidal analysis on a HEALPix Dataset.
+
+    This is the wavelet analogue of
+    :func:`compute_leastsquares_tidal_analysis`.  It accepts a
+    full Dataset with arbitrary non-core dimensions (e.g. ``height``) and
+    automatically maps over them via :func:`xarray.apply_ufunc`, keeping
+    peak memory at O(1 slice) regardless of the number of non-core levels.
+
+    Pipeline (per non-core slice):
+        1. For each unique ``|m|`` in *m_filters*, run
+           :func:`~healicon.analysis.wavelet.spherical_harmonic_wavelet_spectrum`
+           to obtain time-resolved amplitude and phase maps.
+        2. Extract the requested ``periods_hours`` and propagation
+           direction (westward for ``m > 0``, eastward for ``m < 0``).
+        3. Optionally average over the time axis (``temporal_mean``).
+
+    Args:
+        ds:  Input Dataset on a HEALPix grid with a time dimension.
+        var_name:  Name of the data variable to analyze.
+        periods_hours:  Target periods in hours (e.g. ``[24, 12]``).
+        m_filters:  Signed zonal wavenumbers to extract.  Positive values
+            denote westward propagation, negative values eastward.
+            If *None*, defaults to ``[1]``.
+        lmax:  Maximum spherical harmonic degree.  If *None*, uses
+            ``3 * nside - 1``.
+        time_dim:  Name of the time dimension.
+        dj:  Spacing between discrete wavelet scales (default 0.1).
+        temporal_mean:  If *True*, average the wavelet amplitude over time
+            before returning (produces output comparable to LS tides).
+            Default is *False* (return the full time-resolved envelope).
+
+    Returns:
+        xr.Dataset with variables ``{var_name}_amp_sym``,
+        ``{var_name}_pha_sym``, ``{var_name}_amp_asy``,
+        ``{var_name}_pha_asy``.  Dimensions are
+        ``(m, period, [time], *non_core_dims, cells)``.
+    """
+    from .wavelet import spherical_harmonic_wavelet_spectrum
+
+    if time_dim not in ds.dims:
+        raise ValueError(
+            f"Dataset must have a '{time_dim}' dimension for wavelet "
+            f"tidal analysis."
+        )
+
+    cell_dim = get_cells_dim(ds)
+    hp_order = get_healpix_order(ds)
+    da = ds[var_name]
+
+    nside = hp.npix2nside(da.sizes[cell_dim])
+
+    # ── Infer dt from time coordinate ────────────────────────────────
+    time_vals = ds[time_dim].values
+    dt_hours = _infer_dt_hours(time_vals, time_dim)
+    logger.info(f"Inferred dt = {dt_hours:.2f} hours from '{time_dim}' coordinate.")
+
+    # ── Build mode table from m_filters ──────────────────────────────
+    if m_filters is None:
+        m_filters = [1]
+        logger.warning("No m_filters specified; defaulting to m=[1] (DW1).")
+
+    modes = []
+    for m in m_filters:
+        direction = 'westward' if m > 0 else 'eastward'
+        zwn = abs(m)
+        for p in periods_hours:
+            modes.append({'m': m, 'zwn': zwn, 'period_h': p, 'dir': direction})
+
+    # Group modes by |m| so each wavelet call is reused
+    zwn_mode_groups = {}
+    for mode in modes:
+        zwn_mode_groups.setdefault(mode['zwn'], []).append(mode)
+
+    unique_zwn = sorted(zwn_mode_groups.keys())
+    periods_for_wavelet = list(periods_hours)
+
+    # ── Core function applied per non-core slice ─────────────────────
+
+    def _make_ufunc(zwn, zwn_modes):
+        """Build a ufunc for a specific zonal wavenumber."""
+        n_modes = len(zwn_modes)
+
+        t_hours_vals = _infer_t_hours_vals(ds[time_dim].values, time_dim)
+
+        def _func(data_np):
+            da_tmp = xr.DataArray(
+                data_np, dims=[time_dim, cell_dim],
+                coords={time_dim: ds[time_dim]},
+            )
+            ds_w = spherical_harmonic_wavelet_spectrum(
+                da_tmp, zwn=zwn, time_dim=time_dim, dt=dt_hours, dj=dj,
+                lmax=lmax, map2alm_iter=map2alm_iter,
+                periods_to_reconstruct=periods_for_wavelet,
+                order=hp_order,
+            )
+
+            period_lookup = {}
+            for v in ds_w.data_vars:
+                parts = v.split('_')
+                if len(parts) != 4:
+                    continue
+                _, _, direction, p_str = parts
+                if direction not in ('westward', 'eastward'):
+                    continue
+                try:
+                    actual_p = float(p_str)
+                except ValueError:
+                    continue
+                period_lookup[(direction, p_str)] = actual_p
+
+            outputs = []
+            for mode in zwn_modes:
+                direction = mode['dir']
+                target_p_h = mode['period_h']
+
+                best_p_str = min(
+                    (p_str for (d, p_str) in period_lookup if d == direction),
+                    key=lambda s: abs(period_lookup[(direction, s)] - target_p_h),
+                )
+
+                for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
+                    arr = ds_w[f"{comp}_{direction}_{best_p_str}"].values
+                    if temporal_mean:
+                        sa = comp.split('_')[1]  # 'sym' or 'asy'
+                        amp_vals = ds_w[f"amp_{sa}_{direction}_{best_p_str}"].values
+                        pha_vals = ds_w[f"pha_{sa}_{direction}_{best_p_str}"].values
+
+                        nside_local = hp.npix2nside(amp_vals.shape[1])
+                        target_lon_deg, _ = get_healpix_coords(nside_local)
+                        if hp_order == 'nested':
+                            target_lon_deg = ensure_original_order(target_lon_deg, 'nested')
+                        phi_da = np.radians(target_lon_deg)
+                        target_m = mode['m']
+
+                        arr = _demodulate_mode(
+                            amp_vals, pha_vals, t_hours_vals, mode['period_h'],
+                            want_phase=('pha' in comp), lon_phase=target_m * phi_da,
+                        )
+
+                    outputs.append(arr)
+
+            return tuple(outputs)
+
+        return _func, n_modes
+
+    # ── apply_ufunc per unique |m| ───────────────────────────────────
+    logger.info(f"Applying wavelet analysis for |m| = {unique_zwn}...")
+
+    assembled = {}  # (m_val, period_h, comp) -> DataArray
+
+    for zwn in unique_zwn:
+        zwn_modes = zwn_mode_groups[zwn]
+        func, n_modes = _make_ufunc(zwn, zwn_modes)
+        n_outputs = n_modes * 4
+
+        if temporal_mean:
+            out_core = [[cell_dim]] * n_outputs
+        else:
+            out_core = [[time_dim, cell_dim]] * n_outputs
+
+        results = xr.apply_ufunc(
+            func,
+            da,
+            input_core_dims=[[time_dim, cell_dim]],
+            output_core_dims=out_core,
+            vectorize=True,
+            dask='parallelized',
+            output_dtypes=[np.float64] * n_outputs,
+            dask_gufunc_kwargs={'allow_rechunk': True},
+        )
+
+        # Unpack results into named DataArrays
+        if n_outputs == 1:
+            results = (results,)
+        comps = ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy')
+        for i, mode in enumerate(zwn_modes):
+            for j, comp in enumerate(comps):
+                da_out = results[i * 4 + j]
+                assembled[(mode['m'], mode['period_h'], comp)] = da_out
+
+    # ── Build output Dataset using xarray-native concat ─────────────────
+    target_lon, target_lat = get_healpix_coords(nside)
+    if hp_order == 'nested':
+        target_lon = ensure_original_order(target_lon, 'nested')
+        target_lat = ensure_original_order(target_lat, 'nested')
+
+    var_units = ds[var_name].attrs.get('units', '')
+    out_ds = _build_tidal_output_dataset(
+        assembled, modes, periods_hours, var_name, var_units,
+        target_lon, target_lat, cell_dim,
+    )
+
+    # Preserve dataset attributes and grid mapping
+    out_ds.attrs = ds.attrs.copy()
+    out_ds = add_healpix_grid_mapping(out_ds, nside, order=hp_order)
+    out_ds.attrs = append_history(
+        out_ds.attrs,
+        f"Wavelet tidal analysis (periods: {periods_hours}h, "
+        f"m: {m_filters}, temporal_mean={temporal_mean})."
+    )
+
+    return out_ds

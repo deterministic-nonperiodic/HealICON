@@ -50,16 +50,15 @@ from .tides import (
     _directional_filter_block,
     _get_symmetric_pixels,
     _extract_spatial_tide_components,
-    compute_tidal_analysis,
     compute_leastsquares_tidal_analysis,
+    compute_fourier_tidal_analysis,
+    compute_wavelet_tidal_analysis,
 )
 
 # --- Wavelet analysis ---
 from .wavelet import (
     fourier_wavelet_spectrum,
     spherical_harmonic_wavelet_spectrum,
-    compute_wavelet_tidal_analysis,
-    compute_fourier_tidal_analysis,
 )
 
 # Re-export grid utilities that were historically importable from analysis
@@ -75,7 +74,6 @@ __all__ = [
     "compute_helmholtz",
     "compute_vorticity_divergence",
     "compute_uv_from_vorticity_divergence",
-    "compute_tidal_analysis",
     "compute_leastsquares_tidal_analysis",
     "fourier_wavelet_spectrum",
     "spherical_harmonic_wavelet_spectrum",

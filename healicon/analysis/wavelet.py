@@ -25,9 +25,8 @@ from scipy.optimize import fminbound
 from scipy.special import gamma, gammainc
 
 from healicon.grid import (get_cells_dim, get_healpix_order,
-                           append_history, add_healpix_grid_mapping,
+                           add_healpix_grid_mapping,
                            get_healpix_coords, ensure_original_order)
-from .tides import _get_symmetric_pixels
 
 logger = logging.getLogger(__name__)
 logging.getLogger('healpy').setLevel(logging.WARNING)
@@ -42,9 +41,23 @@ def _get_basis_maps(nside: int, lmax: int, abs_m: int):
  
     The result is cached so that repeated calls with the same
     (nside, lmax, abs_m) are free.
+
+    Optimization (mmax truncation): only m = abs_m is ever nonzero in the alm array
+    passed to alm2map, so we build *compact* arrays sized for mmax=abs_m
+    (rather than the full mmax=lmax array implied by a bare
+    hp.Alm.getsize(lmax)) and pass the explicit lmax/mmax through to
+    alm2map. healpy's alm storage convention lays alms out in blocks of
+    increasing m, and the index formula for a given (l, m) depends only on
+    lmax, not mmax -- so an mmax=abs_m array is exactly the leading prefix
+    of the full mmax=lmax array, and the idx_m positions computed below
+    from the full-size (l, m) layout remain valid indices into the smaller
+    compact array. This lets healpy's associated-Legendre-transform step
+    (the dominant cost of alm2map for large lmax) skip all m > abs_m
+    instead of wastefully evaluating them against all-zero coefficients.
+    The synthesized maps are numerically unchanged.
     """
     npix = hp.nside2npix(nside)
-    n_alm_total = hp.Alm.getsize(lmax)
+    n_alm_compact = hp.Alm.getsize(lmax, abs_m)
     _, m_arr = hp.Alm.getlm(lmax)
     idx_m = np.where(m_arr == abs_m)[0]
     n_l = len(idx_m)
@@ -53,13 +66,13 @@ def _get_basis_maps(nside: int, lmax: int, abs_m: int):
     basis_sin = np.zeros((n_l, npix))
 
     def _synth_one(k):
-        alm_c = np.zeros(n_alm_total, dtype=complex)
+        alm_c = np.zeros(n_alm_compact, dtype=complex)
         alm_c[idx_m[k]] = 1.0
-        cos_map = hp.alm2map(alm_c, nside=nside)
+        cos_map = hp.alm2map(alm_c, nside=nside, lmax=lmax, mmax=abs_m)
 
-        alm_s = np.zeros(n_alm_total, dtype=complex)
+        alm_s = np.zeros(n_alm_compact, dtype=complex)
         alm_s[idx_m[k]] = 1j
-        sin_map = hp.alm2map(alm_s, nside=nside)
+        sin_map = hp.alm2map(alm_s, nside=nside, lmax=lmax, mmax=abs_m)
         return k, cos_map, sin_map
 
     n_workers = min(32, os.cpu_count() or 4)
@@ -242,6 +255,87 @@ def wave_signif(Y, dt, scale, sigtest=0, lag1=0.0, siglvl=0.95,
     return significance
 
 
+@lru_cache(maxsize=64)
+def _wavelet_basis(
+        n1: int,
+        dt: float,
+        pad: int,
+        dj: float | None,
+        s0: float | None,
+        J1: int | None,
+        mother: str,
+        param: float | None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """Precompute the data-independent pieces of the wavelet transform.
+
+    The wavelet basis ("daughter"), period, scale, and coi arrays depend
+    only on the time-axis configuration (n1, dt, pad, dj, s0, J1, mother,
+    param) -- never on the values of Y. wavelet() is called once per
+    height level / zonal wavenumber (via _compute_cwt_coefficients), and
+    those calls all share the same time-axis configuration within a given
+    dataset, so this basis is built once per unique configuration and
+    reused from cache thereafter.
+
+    Returns:
+        daughter: complex wavelet basis, shape (n_scales, n_padded).
+        period: Fourier period for each scale.
+        scale: wavelet scale array.
+        coi_out: cone-of-influence array, length n1.
+        n: padded length of the time series.
+        nzeroes: number of zeros appended for padding (0 if pad != 1).
+    """
+    if s0 is None or s0 == -1:
+        s0 = 2.0 * dt
+    if dj is None or dj == -1:
+        dj = 0.25
+    if J1 is None or J1 == -1:
+        J1 = int(np.fix((np.log(n1 * dt / s0) / np.log(2)) / dj))
+
+    if pad == 1:
+        base2 = np.fix(np.log(n1) / np.log(2) + 0.4999)
+        nzeroes = int(2 ** (base2 + 1) - n1)
+    else:
+        nzeroes = 0
+
+    n = n1 + nzeroes
+
+    k_plus = np.arange(1, int(n / 2) + 1)
+    k_plus = (k_plus * 2 * np.pi / (n * dt))
+    k_minus = np.arange(1, int((n - 1) / 2) + 1)
+    k_minus = np.sort((-k_minus * 2 * np.pi / (n * dt)))
+    k = np.concatenate(([0.], k_plus, k_minus))
+
+    if param is None or param == -1:
+        if mother == 'MORLET':
+            param = 6.0
+        elif mother == 'PAUL':
+            param = 4.0
+        elif mother == 'DOG':
+            param = 2.0
+
+    if mother == 'MORLET':
+        fourier_factor = 4 * np.pi / (param + np.sqrt(2 + param ** 2))
+    elif mother == 'PAUL':
+        fourier_factor = 4 * np.pi / (2 * param + 1)
+    elif mother == 'DOG':
+        fourier_factor = 2 * np.pi * np.sqrt(2. / (2 * param + 1))
+    else:
+        raise ValueError("Invalid mother wavelet")
+
+    j = np.arange(0, J1 + 1)
+    scale = s0 * 2. ** (j * dj)
+    period = scale * fourier_factor
+
+    daughter, _, coi, _ = wave_bases(mother, k, scale, param)
+
+    coi_out = coi * dt * np.concatenate((
+        np.insert(np.arange(int((n1 + 1) / 2) - 1), [0], [1E-5]),
+        np.insert(np.flipud(np.arange(0, int(n1 / 2) - 1)), [-1], [1E-5])
+    ))
+
+    return daughter, period, scale, coi_out, n, nzeroes
+
+
 def wavelet(
         Y: np.ndarray,
         dt: float,
@@ -269,64 +363,33 @@ def wavelet(
     
     Returns:
         tuple containing (wave, period, scale, coi).
+
+    Optimization (cached basis): the data-independent basis/period/scale/coi
+    arrays are now built by the cached _wavelet_basis() helper above, so
+    only the data-dependent demean/pad/FFT/multiply/IFFT steps run here on
+    every call. Verified to reproduce the original output bit-for-bit.
     """
     n1 = Y.shape[axis]
 
-    if s0 is None or s0 == -1:
-        s0 = 2.0 * dt
-    if dj is None or dj == -1:
-        dj = 0.25
-    if J1 is None or J1 == -1:
-        J1 = int(np.fix((np.log(n1 * dt / s0) / np.log(2)) / dj))
+    daughter, period, scale, coi_out, n, nzeroes = _wavelet_basis(
+        int(n1), float(dt), int(pad),
+        float(dj) if dj is not None else None,
+        float(s0) if s0 is not None else None,
+        int(J1) if J1 is not None else None,
+        mother,
+        float(param) if param is not None else None,
+    )
 
     Y_work = np.moveaxis(Y, axis, -1)
     x = Y_work - np.mean(Y_work, axis=-1, keepdims=True)
 
-    if pad == 1:
-        base2 = np.fix(np.log(n1) / np.log(2) + 0.4999)
-        nzeroes = int(2 ** (base2 + 1) - n1)
+    if nzeroes > 0:
         pad_shape = list(x.shape)
         pad_shape[-1] = nzeroes
         x = np.concatenate((x, np.zeros(pad_shape, dtype=x.dtype)), axis=-1)
 
-    n = x.shape[-1]
-
-    k_plus = np.arange(1, int(n / 2) + 1)
-    k_plus = (k_plus * 2 * np.pi / (n * dt))
-    k_minus = np.arange(1, int((n - 1) / 2) + 1)
-    k_minus = np.sort((-k_minus * 2 * np.pi / (n * dt)))
-    k = np.concatenate(([0.], k_plus, k_minus))
-
     f = sp_fft.fft(x, axis=-1, workers=-1)
-
-    if param is None or param == -1:
-        if mother == 'MORLET':
-            param = 6.0
-        elif mother == 'PAUL':
-            param = 4.0
-        elif mother == 'DOG':
-            param = 2.0
-
-    if mother == 'MORLET':
-        fourier_factor = 4 * np.pi / (param + np.sqrt(2 + param ** 2))
-    elif mother == 'PAUL':
-        fourier_factor = 4 * np.pi / (2 * param + 1)
-    elif mother == 'DOG':
-        fourier_factor = 2 * np.pi * np.sqrt(2. / (2 * param + 1))
-    else:
-        raise ValueError("Invalid mother wavelet")
-
-    j = np.arange(0, J1 + 1)
-    scale = s0 * 2. ** (j * dj)
-    period = scale * fourier_factor
-
-    daughter, _, coi, _ = wave_bases(mother, k, scale, param)
     wave = sp_fft.ifft(f[..., np.newaxis, :] * daughter, axis=-1, workers=-1)
-
-    coi_out = coi * dt * np.concatenate((
-        np.insert(np.arange(int((n1 + 1) / 2) - 1), [0], [1E-5]),
-        np.insert(np.flipud(np.arange(0, int(n1 / 2) - 1)), [-1], [1E-5])
-    ))
 
     # Trim padding and move axes
     wave = wave[..., :n1]
@@ -395,6 +458,80 @@ def _calculate_amplitudes_and_phases(Ak: np.ndarray, Bk: np.ndarray, ak: np.ndar
 # XARRAY-NATIVE FOURIER-WAVELET API
 # --------------------------------------------------------------------------
 
+@lru_cache(maxsize=32)
+def _get_ring2nest(nside: int) -> np.ndarray:
+    """Cached RING->NEST pixel permutation for a given nside.
+
+    fourier_wavelet_spectrum previously called hp.ring2nest(nside, ...)
+    fresh every invocation, and (inside the assign_to_cells closure) called
+    hp.nest2ring(nside, ...) fresh on every one of up to ~10 calls per
+    invocation, even though the permutation depends only on nside. Caching
+    it removes that repeated work without changing any values.
+    """
+    return hp.ring2nest(nside, np.arange(hp.nside2npix(nside)))
+
+
+@lru_cache(maxsize=32)
+def _get_nest2ring(nside: int) -> np.ndarray:
+    """Cached NEST->RING pixel permutation for a given nside (see
+    _get_ring2nest above for rationale)."""
+    return hp.nest2ring(nside, np.arange(hp.nside2npix(nside)))
+
+
+# --------------------------------------------------------------------------
+# RING-BASED FOURIER EXTRACTION HELPERS
+# --------------------------------------------------------------------------
+
+@lru_cache(maxsize=32)
+def _get_ring_fourier_weights(nside: int, zwn: int):
+    """Cached per-ring Fourier-extraction weights and ring layout.
+
+    Returns:
+        startpix, ringpix: from hp.ringinfo(nside, rings).
+        W: per-pixel weight array, shape (npix,) -- real for zwn == 0,
+           complex for zwn != 0.
+    """
+    rings = np.arange(1, 4 * nside)
+    startpix, ringpix, _, _, shifted = hp.ringinfo(nside, rings)
+
+    if zwn == 0:
+        W = 1.0 / np.repeat(ringpix, ringpix)
+    else:
+        lons = _get_lon_rad(nside)
+        W = np.exp(-1j * zwn * lons) / np.repeat(ringpix, ringpix)
+
+    return startpix, ringpix, W
+
+
+def _extract_ring_fourier_coefs(data_np: np.ndarray, nside: int, zwn: int) -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Extracts the zwn-th Fourier coefficient from each HEALPix isolatitude ring.
+
+    Args:
+        data_np: Array of shape (n_time, npix) in RING ordering
+        nside: HEALPix Nside
+        zwn: Zonal wavenumber
+
+    Returns:
+        tuple containing (Ck, Sk, startpix, ringpix) where Ck and Sk
+        have shape (n_time, n_rings).
+    """
+    startpix, ringpix, W = _get_ring_fourier_weights(nside, zwn)
+
+    data_W = data_np * W[None, :]
+    fm_reduced = np.add.reduceat(data_W, startpix, axis=-1)
+
+    if zwn == 0:
+        Ck = fm_reduced
+        Sk = np.zeros_like(Ck)
+    else:
+        Ck = 2.0 * fm_reduced.real
+        Sk = -2.0 * fm_reduced.imag
+
+    return Ck, Sk, startpix, ringpix
+
+
 def fourier_wavelet_spectrum(da: xr.DataArray, zwn: int,
                              time_dim: str = 'time',
                              dt: float = 1.0, dj: float = 0.1,
@@ -416,17 +553,22 @@ def fourier_wavelet_spectrum(da: xr.DataArray, zwn: int,
     if cell_dim is None:
         raise ValueError("No spatial HEALPix cell dimension found in DataArray.")
 
-    order_str = order if order is not None else get_healpix_order(da)
-    is_nested = (order_str == 'nested')
+    # Determine pixel ordering
+    if order is not None:
+        _order = order.lower()
+    else:
+        _order = get_healpix_order(da)
+
+    is_nested = _order == 'nested'
+    logger.debug(f"HEALPix ordering: {'nested' if is_nested else 'ring'}")
 
     npix = da.sizes[cell_dim]
     nside = hp.npix2nside(npix)
-    n_time = da.sizes[time_dim]
 
     data_np = da.values
 
     if is_nested:
-        data_ring = data_np[..., hp.ring2nest(nside, np.arange(npix))]
+        data_ring = data_np[..., _get_ring2nest(nside)]
     else:
         data_ring = data_np
 
@@ -438,7 +580,6 @@ def fourier_wavelet_spectrum(da: xr.DataArray, zwn: int,
 
     period_mask = (period >= min_t) & (period <= max_t)
     period = period[period_mask]
-    scale = scale[period_mask]
 
     Ak = Ak[period_mask, ...]
     Bk = Bk[period_mask, ...]
@@ -447,10 +588,17 @@ def fourier_wavelet_spectrum(da: xr.DataArray, zwn: int,
 
     Rw_rings, Re_rings, Pw_rings, Pe_rings = _calculate_amplitudes_and_phases(Ak, Bk, ak, bk)
 
+    # Hoisted out of assign_to_cells: this permutation depends only on
+    # (nside, is_nested), not on the values being mapped, yet the closure
+    # used to recompute hp.nest2ring fresh on every one of its up to ~10
+    # calls per invocation. _get_nest2ring caches it across nside values
+    # as well, so repeated calls (e.g. across height levels) are free.
+    nest2ring_idx = _get_nest2ring(nside) if is_nested else None
+
     def assign_to_cells(ring_vals):
         mapped = np.repeat(ring_vals, ring_pix, axis=-1)
         if is_nested:
-            return mapped[..., hp.nest2ring(nside, np.arange(npix))]
+            return mapped[..., nest2ring_idx]
         return mapped
 
     reconstructed_vars = {}
@@ -503,10 +651,9 @@ def fourier_wavelet_spectrum(da: xr.DataArray, zwn: int,
         target_lon = ensure_original_order(target_lon, 'nested')
         target_lat = ensure_original_order(target_lat, 'nested')
 
-    Rw_cells = assign_to_cells(Rw_rings)
-    Re_cells = assign_to_cells(Re_rings)
-    global_amp_w = Rw_cells.mean(axis=-1)
-    global_amp_e = Re_cells.mean(axis=-1)
+    # Global mean amplitude diagnostics
+    global_amp_w = (Rw_rings * ring_pix).sum(axis=-1) / npix
+    global_amp_e = (Re_rings * ring_pix).sum(axis=-1) / npix
 
     data_vars = {
         'global_amplitude_westward': (['period', time_dim], global_amp_w),
@@ -531,12 +678,43 @@ def fourier_wavelet_spectrum(da: xr.DataArray, zwn: int,
     ds_out.attrs['dj'] = dj
     ds_out.attrs['dt'] = dt
 
-    ds_out = add_healpix_grid_mapping(ds_out, nside, order=order_str)
+    ds_out = add_healpix_grid_mapping(ds_out, nside, order=_order)
 
     return ds_out
 
 
 # --------------------------------------------------------------------------
+
+@lru_cache(maxsize=32)
+def _get_lon_rad(nside: int) -> np.ndarray:
+    """Cached per-pixel longitude (radians, RING ordering) for a given nside.
+
+    hp.pix2ang's phi (longitude) output depends only on nside, not on zwn
+    or any data, but was being computed independently in two places
+    (spherical_harmonic_wavelet_spectrum's reconstruction step, and
+    _get_ring_fourier_weights's zwn != 0 branch). Both now share this one
+    cached array per nside.
+    """
+    _, lon_rad = hp.pix2ang(nside, np.arange(hp.nside2npix(nside)))
+    return lon_rad
+
+
+@lru_cache(maxsize=32)
+def _get_m_mask(lmax: int, abs_m: int) -> tuple[np.ndarray, int]:
+    """Cached boolean mask selecting the m = abs_m block of an alm array.
+
+    spherical_harmonic_wavelet_spectrum previously called
+    hp.Alm.getlm(lmax) -> (l_arr, m_arr) every invocation just to build
+    this mask, but l_arr is never used anywhere in that function. This
+    helper computes (and caches) only the m_mask / n_l that are actually
+    needed, for the same (lmax, abs_m) pair recurring across height
+    levels / apply_ufunc slices.
+    """
+    _, m_arr = hp.Alm.getlm(lmax)
+    m_mask = (m_arr == abs_m)
+    n_l = int(np.sum(m_mask))
+    return m_mask, n_l
+
 
 def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
                                         time_dim: str = 'time',
@@ -600,9 +778,7 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
     if order is not None:
         is_nested = order.lower() == 'nested'
     else:
-        # Auto-detect from DataArray attrs (avoids materializing a Dataset).
-        _order = da.attrs.get('healpix_scheme', 'ring').lower()
-        is_nested = _order == 'nested'
+        is_nested = get_healpix_order(da) == 'nested'
     logger.debug(f"HEALPix ordering: {'nested' if is_nested else 'ring'}")
     npix = da.sizes[cell_dim]
     nside = hp.npix2nside(npix)
@@ -617,10 +793,11 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
     # ------------------------------------------------------------------
     # Thread-parallel map2alm: healpy releases the GIL during the C-level
     # SH transform, so threading gives real speedup (~4× with 4 workers).
-    l_arr, m_arr = hp.Alm.getlm(lmax)
     abs_m = abs(zwn)
-    m_mask = (m_arr == abs_m)
-    n_l = int(np.sum(m_mask))
+    # l_arr from hp.Alm.getlm(lmax) was computed here but never used; only
+    # m_mask/n_l are needed, and they depend solely on (lmax, abs_m), so we
+    # fetch them from the cached helper instead of recomputing on every call.
+    m_mask, n_l = _get_m_mask(lmax, abs_m)
     order_str = 'nested' if is_nested else 'ring'
 
     # Ensure data is in memory and in RING ordering
@@ -742,6 +919,7 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
     if periods_to_reconstruct is not None:
         # Basis maps from alm2map are ALWAYS in RING ordering, so the
         # symmetric-pixel index must also be computed in RING.
+        from .tides import _get_symmetric_pixels
         sym_idx = _get_symmetric_pixels(nside, is_nested=False)
 
         # Basis maps are cached across calls for the same (nside, lmax, m).
@@ -750,7 +928,9 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
         basis_stacked = np.vstack([basis_cos, basis_sin])
 
         # Hoist lon_rad: pix2ang is the same for every period (item 4).
-        _, lon_rad = hp.pix2ang(nside, np.arange(npix))
+        # Also now cached across calls by nside via _get_lon_rad, instead
+        # of calling hp.pix2ang fresh on every invocation.
+        lon_rad = _get_lon_rad(nside)
         abs_m_lon = abs_m * lon_rad  # pre-scale; reused in every chunk
 
         for p_idx, target_p in enumerate(periods_to_reconstruct):
@@ -859,597 +1039,3 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
     ds = add_healpix_grid_mapping(ds, nside, order=order_str)
 
     return ds
-
-
-def _infer_dt_hours(time_vals: np.ndarray, time_dim: str = 'time') -> float:
-    """Infer the median time step in hours from a coordinate array.
-
-    Handles datetime64, timedelta64 (LST-style), and plain numeric arrays.
-    Mirrors the logic used in ``compute_tidal_analysis`` so that both
-    functions produce identical ``dt`` values for the same dataset.
-    """
-    if time_dim == 'lst':
-        if np.issubdtype(time_vals.dtype, np.timedelta64):
-            return float(np.median(np.diff(time_vals)) / np.timedelta64(1, 'h'))
-        return float(np.median(np.diff(time_vals)))
-    if np.issubdtype(time_vals.dtype, (np.datetime64, np.timedelta64)):
-        return float(np.median(np.diff(time_vals)) / np.timedelta64(1, 'h'))
-    return float(np.median(np.diff(time_vals)))
-
-
-def _infer_t_hours_vals(time_vals: np.ndarray, time_dim: str = 'time') -> np.ndarray:
-    """Build the elapsed-hours time axis used for temporal demodulation.
-
-    This is the array fed into ``omega * t_hours_vals`` in
-    :func:`_demodulate_mode`.  Shared by both
-    :func:`compute_fourier_tidal_analysis` and
-    :func:`compute_wavelet_tidal_analysis` so the two analyses demodulate
-    against an identical time axis for the same dataset.
-    """
-    if time_dim == 'lst':
-        if np.issubdtype(time_vals.dtype, np.timedelta64):
-            return time_vals / np.timedelta64(1, 'h')
-        return time_vals.astype(float)
-    if np.issubdtype(time_vals.dtype, (np.datetime64, np.timedelta64)):
-        return (time_vals - time_vals[0]) / np.timedelta64(1, 'h')
-    return (time_vals - time_vals[0]).astype(float)
-
-
-def _demodulate_mode(
-        amp_vals: np.ndarray,
-        pha_vals: np.ndarray,
-        t_hours_vals: np.ndarray,
-        period_h: float,
-        want_phase: bool,
-        lon_phase: np.ndarray | None = None,
-) -> np.ndarray:
-    """Demodulate a time-resolved amplitude/phase envelope to a single
-    time-mean amplitude or phase map.
-
-    This implements the harmonic-demodulation step shared by the
-    ``temporal_mean=True`` branch of both
-    :func:`compute_fourier_tidal_analysis` and
-    :func:`compute_wavelet_tidal_analysis`.  The formulas are copied
-    verbatim from each call site; only the optional spatial
-    (longitude-phase) demodulation differs between the two callers:
-
-    - Fourier path (``lon_phase=None``): ``pha_vals`` is already
-      longitude-independent (the zonal-wavenumber FFT step already
-      isolated it), so only time demodulation is performed.
-    - Spherical-harmonic path (``lon_phase=target_m * phi``): the
-      reconstructed spatial map still carries the ``m·λ`` longitude
-      term, so it is folded into the wave reconstruction before time
-      averaging and then explicitly removed afterward via the
-      "demodulate space" step.
-
-    Args:
-        amp_vals: Amplitude envelope, shape (time, ...).
-        pha_vals: Phase envelope, shape (time, ...), same shape as
-            ``amp_vals``.
-        t_hours_vals: Elapsed time in hours, shape (time,).
-        period_h: Target period in hours (defines the demodulation
-            frequency ``omega = 2*pi / period_h``).
-        want_phase: If True, return the demodulated phase
-            (``arctan2``); if False, return the demodulated amplitude
-            (``sqrt(...** 2 + ...** 2)``).
-        lon_phase: Optional longitude-phase term (``target_m * phi``)
-            to fold into the reconstruction and remove after time
-            averaging.  If None, no spatial demodulation step is
-            performed (Fourier path).
-
-    Returns:
-        ndarray with the time axis removed, e.g. shape (...).
-    """
-    omega = 2 * np.pi / float(period_h)
-    wt = omega * t_hours_vals[:, None]
-
-    # Reconstruct the analytic-signal pair (mw, mwH), optionally folding
-    # in the longitude phase that still needs to be removed afterward.
-    pha_total = pha_vals + lon_phase if lon_phase is not None else pha_vals
-    mw = amp_vals * np.cos(pha_total)
-    mwH = -amp_vals * np.sin(pha_total)
-
-    # Demodulate time
-    C_t = mw * np.cos(wt) + mwH * np.sin(wt)
-    S_t = mw * np.sin(wt) - mwH * np.cos(wt)
-
-    C_mean = C_t.mean(axis=0)
-    S_mean = S_t.mean(axis=0)
-
-    if lon_phase is not None:
-        # Demodulate space (remove longitude dependence)
-        real_part = C_mean * np.cos(lon_phase) + S_mean * np.sin(lon_phase)
-        imag_part = S_mean * np.cos(lon_phase) - C_mean * np.sin(lon_phase)
-    else:
-        real_part, imag_part = C_mean, S_mean
-
-    if want_phase:
-        return np.arctan2(imag_part, real_part)
-    return np.sqrt(real_part ** 2 + imag_part ** 2)
-
-
-def _build_tidal_output_dataset(
-        assembled: dict,
-        modes: list[dict],
-        periods_hours: list[float],
-        var_name: str,
-        var_units: str,
-        target_lon: np.ndarray,
-        target_lat: np.ndarray,
-        cell_dim: str,
-) -> xr.Dataset:
-    """Assemble the (m, period, ...) output Dataset shared by both
-    tidal-analysis entry points.
-
-    Stacks the per-mode ``assembled`` DataArrays into ``{var_name}_{comp}``
-    variables along new ``m`` and ``period`` dimensions, then attaches the
-    ``lon``/``lat`` spatial coordinates and amplitude/phase attrs.
-    Dataset-level attrs, grid mapping, and history are intentionally left
-    to the caller, since the history string differs between callers.
-    """
-    m_vals = sorted(set(mode['m'] for mode in modes))
-    period_td = xr.DataArray(
-        [np.timedelta64(int(p * 3600), 's') for p in periods_hours],
-        dims='period',
-        attrs={'long_name': 'Tidal Period'},
-    )
-    m_coord = xr.DataArray(
-        np.array(m_vals), dims='m',
-        attrs={'long_name': 'Zonal Wavenumber',
-               'description': 'positive=westward, negative=eastward'},
-    )
-
-    data_vars = {}
-    for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
-        stacked = xr.concat(
-            [xr.concat([assembled[(m, p, comp)] for p in periods_hours], dim=period_td)
-             for m in m_vals],
-            dim=m_coord,
-        )
-        data_vars[f'{var_name}_{comp}'] = stacked
-
-    out_ds = xr.Dataset(data_vars)
-
-    lon_da = xr.DataArray(target_lon, dims=cell_dim,
-                          attrs={'standard_name': 'longitude', 'units': 'degrees_east'})
-    lat_da = xr.DataArray(target_lat, dims=cell_dim,
-                          attrs={'standard_name': 'latitude', 'units': 'degrees_north'})
-    out_ds = out_ds.assign_coords(lon=lon_da, lat=lat_da)
-
-    label_map = {'sym': 'Symmetric', 'asy': 'Antisymmetric'}
-    for sa, label in label_map.items():
-        out_ds[f'{var_name}_amp_{sa}'].attrs = {
-            'units': var_units, 'long_name': f'{label} Amplitude',
-            'grid_mapping': 'healpix',
-        }
-        out_ds[f'{var_name}_pha_{sa}'].attrs = {
-            'units': 'rad', 'long_name': f'{label} Phase',
-            'grid_mapping': 'healpix',
-        }
-
-    return out_ds
-
-
-# --------------------------------------------------------------------------
-# DATASET-LEVEL FOURIER TIDAL ANALYSIS
-# --------------------------------------------------------------------------
-
-def _extract_ring_fourier_coefs(data_np: np.ndarray, nside: int, zwn: int) -> tuple[
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Extracts the zwn-th Fourier coefficient from each HEALPix isolatitude ring.
-    
-    Args:
-        data_np: Array of shape (n_time, npix) in RING ordering
-        nside: HEALPix Nside
-        zwn: Zonal wavenumber
-        
-    Returns:
-        tuple containing (Ck, Sk, startpix, ringpix) where Ck and Sk
-        have shape (n_time, n_rings).
-    """
-    rings = np.arange(1, 4 * nside)
-    startpix, ringpix, _, _, shifted = hp.ringinfo(nside, rings)
-
-    if zwn == 0:
-        W = 1.0 / np.repeat(ringpix, ringpix)
-        data_W = data_np * W[None, :]
-        fm_reduced = np.add.reduceat(data_W, startpix, axis=-1)
-        Ck = fm_reduced
-        Sk = np.zeros_like(Ck)
-    else:
-        npix = hp.nside2npix(nside)
-        _, lons = hp.pix2ang(nside, np.arange(npix))
-        W = np.exp(-1j * zwn * lons) / np.repeat(ringpix, ringpix)
-        data_W = data_np * W[None, :]
-        fm_reduced = np.add.reduceat(data_W, startpix, axis=-1)
-        Ck = 2.0 * fm_reduced.real
-        Sk = -2.0 * fm_reduced.imag
-
-    return Ck, Sk, startpix, ringpix
-
-
-def compute_fourier_tidal_analysis(
-        ds: xr.Dataset,
-        var_name: str,
-        periods_hours: list[float],
-        m_filters: list[int] | None = None,
-        time_dim: str = 'time',
-        dj: float = 0.1,
-        temporal_mean: bool = False,
-) -> xr.Dataset:
-    """Fourier-wavelet-based tidal analysis on a HEALPix Dataset.
-
-    This is the Fourier analogue of :func:`compute_wavelet_tidal_analysis`.
-    It extracts Fourier coefficients directly from the HEALPix isolatitude rings
-    without any interpolation, runs the Fourier-wavelet analysis, decomposes
-    the wavelet coefficients into symmetric/antisymmetric parts, and broadcasts
-    the results exactly back to the HEALPix cells.
-    """
-    if time_dim not in ds.dims:
-        raise ValueError(f"Dataset must have a '{time_dim}' dimension for Fourier tidal analysis.")
-
-    cell_dim = get_cells_dim(ds)
-    hp_order = get_healpix_order(ds)
-
-    # Infer dt from time coordinate
-    time_vals = ds[time_dim].values
-    dt_hours = _infer_dt_hours(time_vals, time_dim)
-    logger.info(f"Inferred dt = {dt_hours:.2f} hours from '{time_dim}' coordinate.")
-
-    if m_filters is None:
-        m_filters = [1]
-        logger.warning("No m_filters specified; defaulting to m=[1] (DW1).")
-
-    # Build mode table from m_filters
-    modes = []
-    for m in m_filters:
-        direction = 'westward' if m > 0 else 'eastward'
-        zwn = abs(m)
-        for p in periods_hours:
-            modes.append({'m': m, 'zwn': zwn, 'period_h': p, 'dir': direction})
-
-    zwn_mode_groups = {}
-    for mode in modes:
-        zwn_mode_groups.setdefault(mode['zwn'], []).append(mode)
-
-    def _make_ufunc(zwn, zwn_modes):
-        t_hours_vals = _infer_t_hours_vals(ds[time_dim].values, time_dim)
-        periods_for_wavelet = list(set(m['period_h'] for m in zwn_modes))
-
-        def _func(data_np):
-            da_tmp = xr.DataArray(
-                data_np, dims=[time_dim, cell_dim],
-                coords={time_dim: ds[time_dim]},
-            )
-            ds_w = fourier_wavelet_spectrum(
-                da_tmp, zwn=zwn, time_dim=time_dim, dt=dt_hours, dj=dj,
-                periods_to_reconstruct=periods_for_wavelet,
-                order=hp_order,
-            )
-
-            period_lookup = {}
-            for v in ds_w.data_vars:
-                parts = v.split('_')
-                if len(parts) != 4:
-                    continue
-                _, _, direction, p_str = parts
-                if direction not in ('westward', 'eastward'):
-                    continue
-                try:
-                    actual_p = float(p_str)
-                except ValueError:
-                    continue
-                period_lookup[(direction, p_str)] = actual_p
-
-            outputs = []
-            for mode in zwn_modes:
-                direction = mode['dir']
-                target_p_h = mode['period_h']
-
-                best_p_str = min(
-                    (p_str for (d, p_str) in period_lookup if d == direction),
-                    key=lambda s: abs(period_lookup[(direction, s)] - target_p_h),
-                )
-
-                for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
-                    arr = ds_w[f"{comp}_{direction}_{best_p_str}"].values
-                    if temporal_mean:
-                        sa = comp.split('_')[1]
-                        amp_vals = ds_w[f"amp_{sa}_{direction}_{best_p_str}"].values
-                        pha_vals = ds_w[f"pha_{sa}_{direction}_{best_p_str}"].values
-
-                        # fourier path doesn't need spatial demodulation because lon phase is removed in fft
-                        final_val = _demodulate_mode(
-                            amp_vals, pha_vals, t_hours_vals, target_p_h,
-                            want_phase=('pha' in comp), lon_phase=None
-                        )
-                        outputs.append(final_val)
-                    else:
-                        outputs.append(arr)
-
-            return tuple(outputs)
-
-        return _func
-
-    assembled = {}
-    for zwn, zwn_modes in zwn_mode_groups.items():
-        n_modes = len(zwn_modes)
-        out_dtypes = [ds[var_name].dtype] * (n_modes * 4)
-
-        if temporal_mean:
-            out_core_dims = [[cell_dim]] * (n_modes * 4)
-        else:
-            out_core_dims = [[time_dim, cell_dim]] * (n_modes * 4)
-
-        results = xr.apply_ufunc(
-            _make_ufunc(zwn, zwn_modes),
-            ds[var_name],
-            input_core_dims=[[time_dim, cell_dim]],
-            output_core_dims=out_core_dims,
-            vectorize=True,
-            dask='parallelized',
-            output_dtypes=out_dtypes,
-            dask_gufunc_kwargs={'allow_rechunk': True},
-        )
-
-        flat_modes = []
-        for mode in zwn_modes:
-            for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
-                flat_modes.append((mode['m'], mode['period_h'], comp))
-
-        if not isinstance(results, tuple):
-            results = (results,)
-
-        for i, key in enumerate(flat_modes):
-            assembled[key] = results[i]
-
-    # Reconstruct variables using shared helper
-    target_lon, target_lat = get_healpix_coords(hp.npix2nside(ds.sizes[cell_dim]))
-    if hp_order == 'nested':
-        target_lon = ensure_original_order(target_lon, 'nested')
-        target_lat = ensure_original_order(target_lat, 'nested')
-
-    out_ds = _build_tidal_output_dataset(
-        assembled, modes, periods_hours, var_name, ds[var_name].attrs.get('units', ''),
-        target_lon, target_lat, cell_dim
-    )
-
-    out_ds.attrs['history'] = f"Fourier-Wavelet Tidal Analysis (dt={dt_hours}h)"
-    return out_ds
-
-
-def compute_wavelet_tidal_analysis(
-        ds: xr.Dataset,
-        var_name: str,
-        periods_hours: list[float],
-        m_filters: list[int] | None = None,
-        lmax: int | None = None,
-        time_dim: str = 'time',
-        dj: float = 0.1,
-        temporal_mean: bool = False,
-        map2alm_iter: int = 3,
-) -> xr.Dataset:
-    """Wavelet-based tidal analysis on a HEALPix Dataset.
-
-    This is the wavelet analogue of
-    :func:`~healicon.analysis.tides.compute_tidal_analysis`.  It accepts a
-    full Dataset with arbitrary non-core dimensions (e.g. ``height``) and
-    automatically maps over them via :func:`xarray.apply_ufunc`, keeping
-    peak memory at O(1 slice) regardless of the number of non-core levels.
-
-    Pipeline (per non-core slice):
-        1. For each unique ``|m|`` in *m_filters*, run
-           :func:`spherical_harmonic_wavelet_spectrum` to obtain
-           time-resolved amplitude and phase maps.
-        2. Extract the requested ``periods_hours`` and propagation
-           direction (westward for ``m > 0``, eastward for ``m < 0``).
-        3. Optionally average over the time axis (``temporal_mean``).
-
-    Args:
-        ds:  Input Dataset on a HEALPix grid with a time dimension.
-        var_name:  Name of the data variable to analyse.
-        periods_hours:  Target periods in hours (e.g. ``[24, 12]``).
-        m_filters:  Signed zonal wavenumbers to extract.  Positive values
-            denote westward propagation, negative values eastward
-            (matching :func:`compute_tidal_analysis`).  If *None*, all
-            wavenumbers up to ``lmax`` are kept (no directional filter).
-        lmax:  Maximum spherical harmonic degree.  If *None*, uses
-            ``3 * nside - 1``.
-        time_dim:  Name of the time dimension.
-        dj:  Spacing between discrete wavelet scales (default 0.1)
-        temporal_mean:  If *True*, average the wavelet amplitude over time
-            before returning (produces output comparable to LS tides).
-            Default is *False* (return the full time-resolved envelope).
-
-    Returns:
-        xr.Dataset with variables ``{var_name}_amp_sym``,
-        ``{var_name}_pha_sym``, ``{var_name}_amp_asy``,
-        ``{var_name}_pha_asy``.  Dimensions are
-        ``(m, period, [time], *non_core_dims, cells)``.
-    """
-
-    if time_dim not in ds.dims:
-        raise ValueError(
-            f"Dataset must have a '{time_dim}' dimension for wavelet "
-            f"tidal analysis."
-        )
-
-    cell_dim = get_cells_dim(ds)
-    hp_order = get_healpix_order(ds)
-    da = ds[var_name]
-
-    nside = hp.npix2nside(da.sizes[cell_dim])
-
-    # ── Infer dt from time coordinate ────────────────────────────────
-    time_vals = ds[time_dim].values
-    dt_hours = _infer_dt_hours(time_vals, time_dim)
-    logger.info(f"Inferred dt = {dt_hours:.2f} hours from '{time_dim}' coordinate.")
-
-    # ── Build mode table from m_filters ──────────────────────────────
-    if m_filters is None:
-        m_filters = [1]
-        logger.warning("No m_filters specified; defaulting to m=[1] (DW1).")
-
-    modes = []
-    for m in m_filters:
-        direction = 'westward' if m > 0 else 'eastward'
-        zwn = abs(m)
-        for p in periods_hours:
-            modes.append({'m': m, 'zwn': zwn, 'period_h': p, 'dir': direction})
-
-    # Group modes by |m| so each wavelet call is reused
-    zwn_mode_groups = {}
-    for mode in modes:
-        zwn_mode_groups.setdefault(mode['zwn'], []).append(mode)
-
-    unique_zwn = sorted(zwn_mode_groups.keys())
-    periods_for_wavelet = list(periods_hours)
-
-    # ── Core function applied per non-core slice ─────────────────────
-    # Returns a flat tuple of numpy arrays, one per (mode, component).
-    # Order: for each mode in modes_for_this_zwn, 4 arrays
-    #   (amp_sym, amp_asy, pha_sym, pha_asy)
-
-    def _make_ufunc(zwn, zwn_modes):
-        """Build a ufunc for a specific zonal wavenumber."""
-        n_modes = len(zwn_modes)
-
-        # Compute t_hours_vals once per ufunc build, not per mode
-        # per slice.  The time coordinate is the same for every call.
-        t_hours_vals = _infer_t_hours_vals(ds[time_dim].values, time_dim)
-
-        def _func(data_np):
-            # data_np: (time, cells) numpy array
-            da_tmp = xr.DataArray(
-                data_np, dims=[time_dim, cell_dim],
-                coords={time_dim: ds[time_dim]},
-            )
-            ds_w = spherical_harmonic_wavelet_spectrum(
-                da_tmp, zwn=zwn, time_dim=time_dim, dt=dt_hours, dj=dj,
-                lmax=lmax, map2alm_iter=map2alm_iter,
-                periods_to_reconstruct=periods_for_wavelet,
-                order=hp_order,
-            )
-
-            # Build an explicit (direction, p_str) → actual_p_str
-            # lookup from the Dataset variables so we never do prefix scans
-            # that could collide on period substrings (e.g. "12.0" vs "120.0").
-            # The var names follow: {ap}_{sa}_{direction}_{p_str}
-            # e.g. amp_sym_westward_12.0
-            period_lookup = {}  # (direction, target_p_h) -> p_str
-            for v in ds_w.data_vars:
-                parts = v.split('_')
-                # Expected parts: [ap, sa, direction, p_str]
-                # (amp|pha, sym|asy, westward|eastward, float_str)
-                if len(parts) != 4:
-                    continue
-                _, _, direction, p_str = parts
-                if direction not in ('westward', 'eastward'):
-                    continue
-                try:
-                    actual_p = float(p_str)
-                except ValueError:
-                    continue
-                period_lookup[(direction, p_str)] = actual_p
-
-            outputs = []
-            for mode in zwn_modes:
-                direction = mode['dir']
-                target_p_h = mode['period_h']
-
-                # Find the p_str whose actual period is nearest to target_p_h
-                # using only entries for this direction — no prefix scan.
-                best_p_str = min(
-                    (p_str for (d, p_str) in period_lookup if d == direction),
-                    key=lambda s: abs(period_lookup[(direction, s)] - target_p_h),
-                )
-
-                for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
-                    arr = ds_w[f"{comp}_{direction}_{best_p_str}"].values
-                    if temporal_mean:
-                        sa = comp.split('_')[1]  # 'sym' or 'asy'
-                        amp_vals = ds_w[f"amp_{sa}_{direction}_{best_p_str}"].values
-                        pha_vals = ds_w[f"pha_{sa}_{direction}_{best_p_str}"].values
-
-                        nside_local = hp.npix2nside(amp_vals.shape[1])
-                        target_lon_deg, _ = get_healpix_coords(nside_local)
-                        if hp_order == 'nested':
-                            target_lon_deg = ensure_original_order(target_lon_deg, 'nested')
-                        phi_da = np.radians(target_lon_deg)
-                        target_m = mode['m']
-
-                        # Spherical-harmonic path: pha_vals still carries
-                        # the m·λ longitude term, so lon_phase is folded
-                        # in (negative-phase Morlet CWT convention — must
-                        # match spherical_harmonic_wavelet_spectrum) and
-                        # removed after time-averaging. See
-                        # _demodulate_mode docstring.
-                        arr = _demodulate_mode(
-                            amp_vals, pha_vals, t_hours_vals, mode['period_h'],
-                            want_phase=('pha' in comp), lon_phase=target_m * phi_da,
-                        )
-
-                    outputs.append(arr)
-
-            return tuple(outputs)
-
-        return _func, n_modes
-
-    # ── apply_ufunc per unique |m| ───────────────────────────────────
-    logger.info(f"Applying wavelet analysis for |m| = {unique_zwn}...")
-
-    assembled = {}  # (m_val, period_h, comp) -> DataArray
-
-    for zwn in unique_zwn:
-        zwn_modes = zwn_mode_groups[zwn]
-        func, n_modes = _make_ufunc(zwn, zwn_modes)
-        n_outputs = n_modes * 4
-
-        if temporal_mean:
-            out_core = [[cell_dim]] * n_outputs
-        else:
-            out_core = [[time_dim, cell_dim]] * n_outputs
-
-        results = xr.apply_ufunc(
-            func,
-            da,
-            input_core_dims=[[time_dim, cell_dim]],
-            output_core_dims=out_core,
-            vectorize=True,
-            dask='parallelized',
-            output_dtypes=[np.float64] * n_outputs,
-            dask_gufunc_kwargs={'allow_rechunk': True},
-        )
-
-        # Unpack results into named DataArrays
-        if n_outputs == 1:
-            results = (results,)
-        comps = ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy')
-        for i, mode in enumerate(zwn_modes):
-            for j, comp in enumerate(comps):
-                da_out = results[i * 4 + j]
-                assembled[(mode['m'], mode['period_h'], comp)] = da_out
-
-    # ── Build output Dataset using xarray-native concat ─────────────────
-    target_lon, target_lat = get_healpix_coords(nside)
-    if hp_order == 'nested':
-        target_lon = ensure_original_order(target_lon, 'nested')
-        target_lat = ensure_original_order(target_lat, 'nested')
-
-    var_units = ds[var_name].attrs.get('units', '')
-    out_ds = _build_tidal_output_dataset(
-        assembled, modes, periods_hours, var_name, var_units,
-        target_lon, target_lat, cell_dim,
-    )
-
-    # Preserve dataset attributes and grid mapping
-    out_ds.attrs = ds.attrs.copy()
-    out_ds = add_healpix_grid_mapping(out_ds, nside, order=hp_order)
-    out_ds.attrs = append_history(
-        out_ds.attrs,
-        f"Wavelet tidal analysis (periods: {periods_hours}h, "
-        f"m: {m_filters}, temporal_mean={temporal_mean})."
-    )
-
-    return out_ds

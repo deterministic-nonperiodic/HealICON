@@ -61,15 +61,16 @@ def create_healpix_dataset(nside: int) -> xr.Dataset:
     return ds
 
 
-def get_healpix_order(ds: xr.Dataset) -> str:
+def get_healpix_order(ds: xr.Dataset | xr.DataArray) -> str:
     """
     Get the HEALPix ordering from the dataset attributes.
     Returns 'nested' or 'ring'.
     """
-    # 1. Check for the CF grid mapping variable (most reliable)
-    for name, var in ds.variables.items():
-        if var.attrs.get('grid_mapping_name') == 'healpix':
-            return var.attrs.get('healpix_order', 'ring').lower()
+    if isinstance(ds, xr.Dataset):
+        # 1. Check for the CF grid mapping variable (most reliable)
+        for name, var in ds.variables.items():
+            if var.attrs.get('grid_mapping_name') == 'healpix':
+                return var.attrs.get('healpix_order', 'ring').lower()
     # 2. Check global attribute
     return ds.attrs.get('healpix_scheme', 'ring').lower()
 

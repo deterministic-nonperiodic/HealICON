@@ -8,7 +8,6 @@ from healicon import (
     compute_leastsquares_tidal_analysis,
     compute_wavelet_tidal_analysis,
     compute_fourier_tidal_analysis,
-    compute_tidal_analysis,
 )
 from healicon.cli import tides
 
@@ -55,11 +54,7 @@ def test_tides_methods(synthetic_healpix_ds):
     assert 'temp_pha_asy' in ds_ls
     
     assert ds_ls['temp_amp_sym'].shape == (1, 1, ds.sizes['cells'])
-    
-    # Compatibility alias
-    ds_alias = compute_tidal_analysis(ds, 'temp', periods, m_filters, time_dim='lst')
-    xr.testing.assert_identical(ds_ls, ds_alias)
-    
+
     # 2. Wavelet
     ds_wav = compute_wavelet_tidal_analysis(
         ds, 'temp', periods, m_filters, dj=0.1, temporal_mean=True, time_dim='lst'

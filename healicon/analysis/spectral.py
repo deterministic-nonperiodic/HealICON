@@ -10,7 +10,7 @@ import xarray as xr
 from ._common import (
     logger, EARTH_RADIUS_KM, _parse_units, _MAX_WORKERS,
     degree_to_wavelength, get_healpix_order, get_cells_dim, ensure_ring, append_history,
-    ThreadPoolExecutor,
+    ThreadPoolExecutor, get_progress_bar,
 )
 
 
@@ -85,8 +85,11 @@ def _anafast_block(*args, lmax=None, is_nested=False, op_type='power'):
 
     n = prepared_2ds[0].shape[0]
     if n > 1:
+        from concurrent.futures import as_completed
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            list(pool.map(_process_slice, range(n)))
+            futures = [pool.submit(_process_slice, i) for i in range(n)]
+            for f in get_progress_bar(as_completed(futures), desc="Spectral analysis", total=n):
+                f.result()
     else:
         _process_slice(0)
 

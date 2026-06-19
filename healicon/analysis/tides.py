@@ -14,7 +14,7 @@ from ._common import (
     logger, _MAX_WORKERS,
     get_healpix_order, get_cells_dim, ensure_ring,
     ensure_original_order, append_history, add_healpix_grid_mapping,
-    ThreadPoolExecutor
+    ThreadPoolExecutor, get_progress_bar,
 )
 from ..grid import get_healpix_coords
 
@@ -23,34 +23,11 @@ def _directional_filter_block(a_block, b_block, target_m, lmax, is_nested):
     """
     Apply a directional spatial filter to isolate specific zonal wavenumbers (m) 
     and propagation directions (eastward/westward) using Spherical Harmonics.
-
-    Given a temporal Fourier decomposition of a field at frequency omega:
-        T(t, x) = A(x) * cos(omega * t) + B(x) * sin(omega * t)
     
-    We want to isolate a wave traveling in a specific direction with zonal wavenumber m.
-    A pure traveling wave takes the form: cos(m * lambda +/- omega * t)
-    
-    Expanding this using trigonometric identities:
-    - Westward (m > 0): cos(m*lambda + omega*t) = cos(m*lambda)*cos(omega*t) - sin(m*lambda)*sin(omega*t)
-                         Here, A ~ cos(m*lambda) and B ~ -sin(m*lambda)
-    - Eastward (m < 0):  cos(|m|*lambda - omega*t) =  cos(|m|*lambda)*cos(omega*t) + sin(|m|*lambda)*sin(omega*t)
-                         Here, A ~ cos(|m|*lambda) and B ~ sin(|m|*lambda)
-
-    In the Spherical Harmonic (ALM) domain, the basis functions are Y_l^m ~ exp(i * m * lambda).
-    To extract the directional components from the full fields A and B:
-    1. Transform A and B to the spherical harmonic domain: alm_a and alm_b.
-    2. For a target wavenumber |m|, mask out all other wavenumbers.
-    3. Apply the phase relationship between A and B to isolate the direction:
-       - For m > 0 (Westward): 
-           alm_a_out = 0.5 * (alm_a - i * alm_b)
-           alm_b_out = i * alm_a_out
-       - For m < 0 (Eastward): 
-           alm_a_out = 0.5 * (alm_a + i * alm_b)
-           alm_b_out = -i * alm_a_out
-       - For m = 0 (Zonal Mean):
-           alm_a_out = alm_a
-           alm_b_out = alm_b
-    4. Transform back to the spatial domain via Inverse Spherical Harmonics.
+    Transforms the temporal cosine (a_block) and sine (b_block) components to the
+    spherical harmonic domain, isolates the specified wavenumber, applies phase 
+    relationships to extract the desired propagation direction, and transforms back
+    to the spatial domain.
 
     Args:
         a_block: Cosine temporal component field.
@@ -113,8 +90,11 @@ def _directional_filter_block(a_block, b_block, target_m, lmax, is_nested):
 
     n = a_2d.shape[0]
     if n > 1:
+        from concurrent.futures import as_completed
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            list(pool.map(_process_slice, range(n)))
+            futures = [pool.submit(_process_slice, i) for i in range(n)]
+            for f in get_progress_bar(as_completed(futures), desc="Directional filtering", total=n):
+                f.result()
     else:
         _process_slice(0)
 

@@ -9,7 +9,7 @@ import xarray as xr
 from ._common import (
     logger, EARTH_RADIUS_KM, _EARTH_RADIUS_M, _MAX_WORKERS,
     get_healpix_order, get_cells_dim, ensure_ring, ensure_original_order, append_history,
-    ThreadPoolExecutor,
+    ThreadPoolExecutor, get_progress_bar,
 )
 
 # Earth radius in metres (used to scale streamfunction / velocity potential to m²/s)
@@ -101,8 +101,11 @@ def _helmholtz_block(u_block, v_block, lmax, nside, is_nested):
         chi[i] = ensure_original_order(chi_map, order_str)
 
     if n > 1:
+        from concurrent.futures import as_completed
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            list(pool.map(_process_slice, range(n)))
+            futures = [pool.submit(_process_slice, i) for i in range(n)]
+            for f in get_progress_bar(as_completed(futures), desc="Helmholtz decomposition", total=n):
+                f.result()
     else:
         _process_slice(0)
 
@@ -235,9 +238,7 @@ def _vorticity_divergence_block(u_block, v_block, lmax, nside, is_nested):
     vor_out = np.zeros_like(v_2d)
 
     l, m = hp.Alm.getlm(lmax)
-    # The prefactor for vector fields: 
-    # Div = -sqrt(l(l+1)) * E
-    # Vor = sqrt(l(l+1)) * B (signs may vary by convention, typical meteorological is positive curl)
+    # Prefactors for vector fields (using positive curl convention)
     fl = np.sqrt(l * (l + 1))
     R = EARTH_RADIUS_KM * 1000.0
     order_str = 'nested' if is_nested else 'ring'
@@ -273,8 +274,11 @@ def _vorticity_divergence_block(u_block, v_block, lmax, nside, is_nested):
 
     n = u_2d.shape[0]
     if n > 1:
+        from concurrent.futures import as_completed
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            list(pool.map(_process_slice, range(n)))
+            futures = [pool.submit(_process_slice, i) for i in range(n)]
+            for f in get_progress_bar(as_completed(futures), desc="Computing vorticity/divergence", total=n):
+                f.result()
     else:
         _process_slice(0)
 
@@ -404,8 +408,11 @@ def _uv_from_vorticity_divergence_block(div_block, vor_block, lmax, nside, is_ne
 
     n = div_2d.shape[0]
     if n > 1:
+        from concurrent.futures import as_completed
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            list(pool.map(_process_slice, range(n)))
+            futures = [pool.submit(_process_slice, i) for i in range(n)]
+            for f in get_progress_bar(as_completed(futures), desc="Reconstructing wind components", total=n):
+                f.result()
     else:
         _process_slice(0)
 

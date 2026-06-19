@@ -62,10 +62,12 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
 
     modes = {
         'DW1': {'period': p_24, 'm': 1, 'type': 'Symmetric'},
-        'SW2': {'period': p_12, 'm': 2, 'type': 'Symmetric'},
-        'DE3': {'period': p_24, 'm': -3, 'type': 'Symmetric'},
-        'SE2': {'period': p_12, 'm': -2, 'type': 'Symmetric'},
         'DW1_asy': {'period': p_24, 'm': 1, 'type': 'Antisymmetric'},
+        'SW2': {'period': p_12, 'm': 2, 'type': 'Symmetric'},
+        'SW2_asy': {'period': p_12, 'm': 2, 'type': 'Antisymmetric'},
+        'SE2': {'period': p_12, 'm': -2, 'type': 'Symmetric'},
+        'SE2_asy': {'period': p_12, 'm': -2, 'type': 'Antisymmetric'},
+        'DE3': {'period': p_24, 'm': -3, 'type': 'Symmetric'},
         'DE3_asy': {'period': p_24, 'm': -3, 'type': 'Antisymmetric'},
     }
 

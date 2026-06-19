@@ -22,6 +22,7 @@ dependencies = [
     "pyyaml",
     "click",
     "pint",
+    "tqdm",
 ]
 
 [project.optional-dependencies]

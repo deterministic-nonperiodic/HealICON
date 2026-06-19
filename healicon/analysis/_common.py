@@ -70,3 +70,20 @@ def wavelength_to_degree(wavelength, radius=EARTH_RADIUS_KM):
     val = (2 * np.pi * radius) / wavelength
     # Solve l^2 + l - val^2 = 0
     return (-1.0 + np.sqrt(1.0 + 4.0 * val ** 2)) / 2.0
+
+
+def get_progress_bar(iterable, desc=None, total=None, leave=False):
+    """
+    Returns a tqdm progress bar if called from the main thread,
+    otherwise returns a quiet/silent iterator.
+    """
+    import threading
+    is_main_thread = threading.current_thread() == threading.main_thread()
+    env_disable = os.environ.get("HEALICON_DISABLE_PROGRESS", "0") == "1"
+    if not is_main_thread or env_disable:
+        return iterable
+    try:
+        from tqdm import tqdm
+        return tqdm(iterable, desc=desc, total=total, leave=leave)
+    except ImportError:
+        return iterable

@@ -30,6 +30,7 @@ from healicon.grid import (get_cells_dim, get_healpix_order,
 
 logger = logging.getLogger(__name__)
 logging.getLogger('healpy').setLevel(logging.WARNING)
+from ._common import get_progress_bar
 
 
 @lru_cache(maxsize=16)
@@ -41,20 +42,6 @@ def _get_basis_maps(nside: int, lmax: int, abs_m: int):
  
     The result is cached so that repeated calls with the same
     (nside, lmax, abs_m) are free.
-
-    Optimization (mmax truncation): only m = abs_m is ever nonzero in the alm array
-    passed to alm2map, so we build *compact* arrays sized for mmax=abs_m
-    (rather than the full mmax=lmax array implied by a bare
-    hp.Alm.getsize(lmax)) and pass the explicit lmax/mmax through to
-    alm2map. healpy's alm storage convention lays alms out in blocks of
-    increasing m, and the index formula for a given (l, m) depends only on
-    lmax, not mmax -- so an mmax=abs_m array is exactly the leading prefix
-    of the full mmax=lmax array, and the idx_m positions computed below
-    from the full-size (l, m) layout remain valid indices into the smaller
-    compact array. This lets healpy's associated-Legendre-transform step
-    (the dominant cost of alm2map for large lmax) skip all m > abs_m
-    instead of wastefully evaluating them against all-zero coefficients.
-    The synthesized maps are numerically unchanged.
     """
     npix = hp.nside2npix(nside)
     n_alm_compact = hp.Alm.getsize(lmax, abs_m)
@@ -77,7 +64,7 @@ def _get_basis_maps(nside: int, lmax: int, abs_m: int):
 
     n_workers = min(32, os.cpu_count() or 4)
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        for k, cos_map, sin_map in pool.map(_synth_one, range(n_l)):
+        for k, cos_map, sin_map in get_progress_bar(pool.map(_synth_one, range(n_l)), desc="Precomputing basis maps", total=n_l):
             basis_cos[k] = cos_map
             basis_sin[k] = sin_map
 
@@ -268,14 +255,6 @@ def _wavelet_basis(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int]:
     """Precompute the data-independent pieces of the wavelet transform.
 
-    The wavelet basis ("daughter"), period, scale, and coi arrays depend
-    only on the time-axis configuration (n1, dt, pad, dj, s0, J1, mother,
-    param) -- never on the values of Y. wavelet() is called once per
-    height level / zonal wavenumber (via _compute_cwt_coefficients), and
-    those calls all share the same time-axis configuration within a given
-    dataset, so this basis is built once per unique configuration and
-    reused from cache thereafter.
-
     Returns:
         daughter: complex wavelet basis, shape (n_scales, n_padded).
         period: Fourier period for each scale.
@@ -363,11 +342,6 @@ def wavelet(
     
     Returns:
         tuple containing (wave, period, scale, coi).
-
-    Optimization (cached basis): the data-independent basis/period/scale/coi
-    arrays are now built by the cached _wavelet_basis() helper above, so
-    only the data-dependent demean/pad/FFT/multiply/IFFT steps run here on
-    every call. Verified to reproduce the original output bit-for-bit.
     """
     n1 = Y.shape[axis]
 
@@ -726,24 +700,11 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
                                         order: str | None = None) -> xr.Dataset:
     """
     Computes the Spherical-Harmonic Wavelet spectrum of a HEALPix DataArray.
-
-    This is the SH analogue of ``fourier_wavelet_spectrum``.  Instead of
-    a longitude FFT, the cos(m·λ) and sin(m·λ) spectral coefficients are
-    extracted via Spherical Harmonic analysis, correctly handling the
-    latitude-dependent associated Legendre functions.
-
-    Pipeline:
-        1. For each time step, compute map2alm → keep only m = |zwn|.
-           Extract real spectral coefficients:
-             A_l(t) = 2·Re(a_lm(t))   — cos(m·λ) coefficient for each degree l
-             B_l(t) = -2·Im(a_lm(t))  — sin(m·λ) coefficient for each degree l
-        2. Apply CWT along the time axis to each A_l(t), B_l(t).
-        3. Separate westward / eastward components using the Yamazaki (2023)
-           analytic-signal formulation.
-        4. Compute global-mean amplitude via Parseval's theorem:
-             Amp_global = sqrt(Σ_l (Rw_l² or Re_l²) / 2)
-        5. Optionally reconstruct full spatial maps at selected periods using
-           basis-map synthesis, then decompose into symmetric/antisymmetric.
+    Extracts the cos(m·λ) and sin(m·λ) spectral coefficients via Spherical Harmonic
+    analysis, applies a Continuous Wavelet Transform (CWT), and separates the 
+    signals into westward and eastward components using the Yamazaki (2023)
+    analytic-signal formulation. Optionally reconstructs spatial amplitude and 
+    phase maps at specified periods.
 
     Args:
         da: Input xarray.DataArray on a HEALPix grid with a time dimension.
@@ -849,7 +810,7 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
     try:
         n_workers = min(32, os.cpu_count() or 4)
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            for i, alm_m in pool.map(_map2alm_one, range(n_time)):
+            for i, alm_m in get_progress_bar(pool.map(_map2alm_one, range(n_time)), desc="Spherical harmonic transform", total=n_time):
                 if alm_m is None:
                     continue
                 if abs_m == 0:
@@ -959,7 +920,7 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
             }
 
             # Process in time-chunks to cap intermediate memory at O(TIME_CHUNK × npix)
-            for t0 in range(0, n_time, TIME_CHUNK):
+            for t0 in get_progress_bar(range(0, n_time, TIME_CHUNK), desc=f"Spatial reconstruction (period {actual_p:.1f}h)", total=int(np.ceil(n_time / TIME_CHUNK))):
                 t1 = min(t0 + TIME_CHUNK, n_time)
                 sl = slice(t0, t1)
 

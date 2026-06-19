@@ -98,7 +98,11 @@ def _guess_variable(ds, target_type: str) -> str:
 @click.group()
 def cli():
     """HealICON: Interpolate atmospheric model outputs to HEALPix grid."""
-    pass
+    try:
+        from dask.diagnostics import ProgressBar
+        ProgressBar().register()
+    except ImportError:
+        pass
 
 
 def _load_and_ensure_healpix(ifile, target_nside=None):

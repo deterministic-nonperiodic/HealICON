@@ -9,7 +9,7 @@ from ._common import (
     logger, _MAX_WORKERS,
     get_healpix_order, get_cells_dim, append_history,
     add_healpix_grid_mapping,
-    ThreadPoolExecutor,
+    ThreadPoolExecutor, get_progress_bar,
 )
 
 
@@ -34,8 +34,11 @@ def _regrade_block(data_block, nside_out, is_nested):
 
     n = data_2d.shape[0]
     if n > 1:
+        from concurrent.futures import as_completed
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            list(pool.map(_process_slice, range(n)))
+            futures = [pool.submit(_process_slice, i) for i in range(n)]
+            for f in get_progress_bar(as_completed(futures), desc="Regrading resolution", total=n):
+                f.result()
     else:
         _process_slice(0)
 

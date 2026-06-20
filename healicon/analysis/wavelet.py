@@ -64,7 +64,8 @@ def _get_basis_maps(nside: int, lmax: int, abs_m: int):
 
     n_workers = min(32, os.cpu_count() or 4)
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        for k, cos_map, sin_map in get_progress_bar(pool.map(_synth_one, range(n_l)), desc="Precomputing basis maps", total=n_l):
+        for k, cos_map, sin_map in get_progress_bar(pool.map(_synth_one, range(n_l)),
+                                                    desc="Precomputing basis maps", total=n_l):
             basis_cos[k] = cos_map
             basis_sin[k] = sin_map
 
@@ -112,7 +113,7 @@ def wave_bases(
         norm = np.sqrt(scale * k[1]) * (np.pi ** (-0.25)) * np.sqrt(n)
         daughter = norm[:, None] * np.exp(expnt) * kplus[None, :]
         fourier_factor = (4 * np.pi) / (k0 + np.sqrt(2 + k0 ** 2))
-        coi = fourier_factor / np.sqrt(2)
+        coi = fourier_factor * np.sqrt(2)  # T&C (1998) Table 1: COI factor = sqrt(2) * lambda
         dofmin = 2
     elif mother == 'PAUL':
         m = param
@@ -810,7 +811,8 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
     try:
         n_workers = min(32, os.cpu_count() or 4)
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            for i, alm_m in get_progress_bar(pool.map(_map2alm_one, range(n_time)), desc="Spherical harmonic transform", total=n_time):
+            for i, alm_m in get_progress_bar(pool.map(_map2alm_one, range(n_time)),
+                                             desc="Spherical harmonic transform", total=n_time):
                 if alm_m is None:
                     continue
                 if abs_m == 0:
@@ -920,7 +922,9 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
             }
 
             # Process in time-chunks to cap intermediate memory at O(TIME_CHUNK × npix)
-            for t0 in get_progress_bar(range(0, n_time, TIME_CHUNK), desc=f"Spatial reconstruction (period {actual_p:.1f}h)", total=int(np.ceil(n_time / TIME_CHUNK))):
+            for t0 in get_progress_bar(range(0, n_time, TIME_CHUNK),
+                                       desc=f"Spatial reconstruction (period {actual_p:.1f}h)",
+                                       total=int(np.ceil(n_time / TIME_CHUNK))):
                 t1 = min(t0 + TIME_CHUNK, n_time)
                 sl = slice(t0, t1)
 

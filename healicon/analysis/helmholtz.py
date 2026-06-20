@@ -104,7 +104,8 @@ def _helmholtz_block(u_block, v_block, lmax, nside, is_nested):
         from concurrent.futures import as_completed
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             futures = [pool.submit(_process_slice, i) for i in range(n)]
-            for f in get_progress_bar(as_completed(futures), desc="Helmholtz decomposition", total=n):
+            for f in get_progress_bar(as_completed(futures), desc="Helmholtz decomposition",
+                                      total=n):
                 f.result()
     else:
         _process_slice(0)
@@ -277,7 +278,8 @@ def _vorticity_divergence_block(u_block, v_block, lmax, nside, is_nested):
         from concurrent.futures import as_completed
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             futures = [pool.submit(_process_slice, i) for i in range(n)]
-            for f in get_progress_bar(as_completed(futures), desc="Computing vorticity/divergence", total=n):
+            for f in get_progress_bar(as_completed(futures), desc="Computing vorticity/divergence",
+                                      total=n):
                 f.result()
     else:
         _process_slice(0)
@@ -411,7 +413,8 @@ def _uv_from_vorticity_divergence_block(div_block, vor_block, lmax, nside, is_ne
         from concurrent.futures import as_completed
         with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
             futures = [pool.submit(_process_slice, i) for i in range(n)]
-            for f in get_progress_bar(as_completed(futures), desc="Reconstructing wind components", total=n):
+            for f in get_progress_bar(as_completed(futures), desc="Reconstructing wind components",
+                                      total=n):
                 f.result()
     else:
         _process_slice(0)

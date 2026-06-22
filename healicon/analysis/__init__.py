@@ -51,7 +51,6 @@ from .tides import (
     _get_symmetric_pixels,
     _extract_spatial_tide_components,
     compute_leastsquares_tidal_analysis,
-    compute_fourier_tidal_analysis,
     compute_wavelet_tidal_analysis,
 )
 
@@ -78,7 +77,6 @@ __all__ = [
     "fourier_wavelet_spectrum",
     "spherical_harmonic_wavelet_spectrum",
     "compute_wavelet_tidal_analysis",
-    "compute_fourier_tidal_analysis",
     # Internal but used by wavelet module
     "ensure_ring",
     "ensure_original_order",

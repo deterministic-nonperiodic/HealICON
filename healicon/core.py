@@ -9,6 +9,7 @@ import xarray as xr
 from .config import load_variable_mapping, apply_cf_conventions
 from .grid import LONLAT_COORD_NAMES, get_spatial_dims, get_cells_dim
 from .interpolate import HealpixInterpolator
+from .io_utils import write_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -110,9 +111,8 @@ def process_dataset(
     # Save to NetCDF
     logger.info(f"Saving to {output_file}")
 
-    # Use dask delayed for parallel write if needed, but since we chunked, to_netcdf with compute=True handles it.
-    # If the dataset is large, we might want to use engine='netcdf4'
-    out_ds.to_netcdf(output_file, engine='netcdf4')
+    # Use parallel write_dataset for memory safety and cluster capability
+    write_dataset(out_ds, output_file, engine='netcdf4')
 
     ds.close()
     out_ds.close()

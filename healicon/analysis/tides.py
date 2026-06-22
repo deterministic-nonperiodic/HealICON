@@ -16,6 +16,8 @@ from ._common import (
     ensure_original_order, append_history, add_healpix_grid_mapping,
     ThreadPoolExecutor, get_progress_bar,
 )
+from .wavelet import (_sh_precompute_alm, _fourier_precompute_ring_coefs,
+                      fourier_wavelet_spectrum, _compute_lev_batch)
 from ..grid import get_healpix_coords
 
 
@@ -461,67 +463,173 @@ def _build_tidal_output_dataset(
 
 
 # --------------------------------------------------------------------------
-# DATASET-LEVEL FOURIER TIDAL ANALYSIS
+# --------------------------------------------------------------------------
+# WAVELET TIDAL ANALYSIS — per-block worker functions
 # --------------------------------------------------------------------------
 
-def compute_fourier_tidal_analysis(
-        ds: xr.Dataset,
-        var_name: str,
-        periods_hours: list[float],
-        m_filters: list[int] | None = None,
-        time_dim: str = 'time',
-        dj: float = 0.1,
-        temporal_mean: bool = False,
-) -> xr.Dataset:
-    """Fourier-wavelet-based tidal analysis on a HEALPix Dataset.
+def _assemble_tidal_block(assembled, modes, periods_hours, var_name, var_units,
+                          target_lon, target_lat, cell_dim, time_dim,
+                          temporal_mean, non_core_dims, da_block):
+    """Build and transpose the output Dataset from an ``assembled`` dict.
 
-    Extracts Fourier coefficients directly from the HEALPix isolatitude rings
-    without any interpolation, runs the Fourier-wavelet analysis, decomposes
-    the wavelet coefficients into symmetric/antisymmetric parts, and broadcasts
-    the results exactly back to the HEALPix cells.
+    Shared by both SH and Fourier block functions.
     """
-    from .wavelet import fourier_wavelet_spectrum
 
-    if time_dim not in ds.dims:
-        raise ValueError(f"Dataset must have a '{time_dim}' dimension for Fourier tidal analysis.")
+    ds_2d = _build_tidal_output_dataset(
+        assembled, modes, periods_hours, var_name, var_units,
+        target_lon, target_lat, cell_dim
+    )
 
-    cell_dim = get_cells_dim(ds)
-    hp_order = get_healpix_order(ds)
+    if non_core_dims:
+        ds_2d = ds_2d.expand_dims({d: da_block.coords[d].values for d in non_core_dims})
 
-    time_vals = ds[time_dim].values
-    dt_hours = _infer_dt_hours(time_vals, time_dim)
-    logger.info(f"Inferred dt = {dt_hours:.2f} hours from '{time_dim}' coordinate.")
+        # Propagate auxiliary coordinates that live on non-core dims
+        # (e.g. 'plev' indexed by 'lev').  expand_dims only creates the
+        # index-dimension coordinate; non-dimension coords are silently
+        # dropped, which causes map_blocks to raise a mismatch error
+        # because the template (built from da.coords) does include them.
+        aux_coords = {}
+        for name, coord in da_block.coords.items():
+            if name in ds_2d.coords:
+                continue  # already present
+            if any(d in non_core_dims for d in coord.dims):
+                aux_coords[name] = coord
+        if aux_coords:
+            ds_2d = ds_2d.assign_coords(aux_coords)
 
-    if m_filters is None:
-        m_filters = [1]
-        logger.warning("No m_filters specified; defaulting to m=[1] (DW1).")
+    expected_dims = ['m', 'period']
+    if not temporal_mean:
+        expected_dims.append(time_dim)
+    expected_dims.extend(non_core_dims)
+    expected_dims.append(cell_dim)
+    return ds_2d.transpose(*expected_dims)
 
-    modes = []
-    for m in m_filters:
-        direction = 'westward' if m > 0 else 'eastward'
-        zwn = abs(m)
-        for p in periods_hours:
-            modes.append({'m': m, 'zwn': zwn, 'period_h': p, 'dir': direction})
 
-    zwn_mode_groups = {}
-    for mode in modes:
-        zwn_mode_groups.setdefault(mode['zwn'], []).append(mode)
 
-    def _make_ufunc(zwn, zwn_modes):
-        t_hours_vals = _infer_t_hours_vals(ds[time_dim].values, time_dim)
-        periods_for_wavelet = list(set(m['period_h'] for m in zwn_modes))
+def _wavelet_sh_analysis_block(
+        da_block, modes, zwn_mode_groups, time_dim, cell_dim, hp_order,
+        dt_hours, dj, temporal_mean, periods_hours, var_name, var_units,
+        target_lon, target_lat, spectrum_kwargs,
+):
+    """SH block: CWT + spatial reconstruction using pre-computed A_lm/B_lm.
 
-        def _func(data_np):
-            da_tmp = xr.DataArray(
-                data_np, dims=[time_dim, cell_dim],
-                coords={time_dim: ds[time_dim]},
-            )
+    ``spectrum_kwargs`` must contain ``'_alm_cache'`` (dict returned by
+    ``_sh_precompute_alm``) and ``'_da_ref'`` (the original full DataArray,
+    used to map block coordinates to linear level indices).
+    """
+    from .wavelet import _sh_reconstruct_level
+
+    non_core_dims = [d for d in da_block.dims if d not in (time_dim, cell_dim)]
+
+    alm_cache = spectrum_kwargs['_alm_cache']
+    A_lm_all = alm_cache['A_lm']  # {abs_m: (n_time, n_extra, n_l)}
+    B_lm_all = alm_cache['B_lm']
+    nside_sh = alm_cache['nside']
+    lmax_sh = alm_cache['lmax']
+    is_nested_sh = alm_cache['is_nested']
+
+    # Map this block's coordinate value(s) to a linear index in A_lm.
+    # Use argmin (nearest-match) to be robust against float rounding.
+    if non_core_dims:
+        da_full = spectrum_kwargs['_da_ref']
+        flat_idx = 0
+        stride = 1
+        for d in reversed(non_core_dims):
+            coord_val = float(da_block[d].values.flat[0])
+            full_coords = np.asarray(da_full.coords[d].values, dtype=float)
+            local_idx = int(np.argmin(np.abs(full_coords - coord_val)))
+            flat_idx += local_idx * stride
+            stride *= len(full_coords)
+    else:
+        flat_idx = 0
+
+    assembled = {}
+    for zwn, zwn_modes in zwn_mode_groups.items():
+        abs_m = abs(zwn)
+        A_lm_lev = A_lm_all[abs_m][:, flat_idx, :]  # (n_time, n_l)
+        B_lm_lev = B_lm_all[abs_m][:, flat_idx, :]
+
+        rec = _sh_reconstruct_level(
+            A_lm_lev, B_lm_lev,
+            dt=dt_hours, dj=dj,
+            nside=nside_sh, lmax=lmax_sh, abs_m=abs_m,
+            periods_to_reconstruct=list(periods_hours),
+            is_nested=is_nested_sh,
+        )
+        period_arr = rec['period']
+
+        for mode in zwn_modes:
+            direction = mode['dir']
+            actual_p = float(period_arr[np.argmin(np.abs(period_arr - mode['period_h']))])
+
+            for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
+                sa = comp.split('_')[1]  # 'sym' / 'asy'
+                ap = comp.split('_')[0]  # 'amp' / 'pha'
+                arr = rec[(actual_p, direction, sa, ap)]  # (n_time, npix)
+
+                if temporal_mean:
+                    nside_local = hp.npix2nside(arr.shape[-1])
+                    lon_deg, _ = get_healpix_coords(nside_local)
+                    if hp_order == 'nested':
+                        lon_deg = ensure_original_order(lon_deg, 'nested')
+                    lon_phase = mode['m'] * np.radians(lon_deg)
+                    t_hrs = _infer_t_hours_vals(da_block[time_dim].values, time_dim)
+                    arr = _demodulate_mode(
+                        rec[(actual_p, direction, sa, 'amp')],
+                        rec[(actual_p, direction, sa, 'pha')],
+                        t_hrs, mode['period_h'],
+                        want_phase=(ap == 'pha'), lon_phase=lon_phase,
+                    )
+                    _cell_coords = ({cell_dim: da_block.coords[cell_dim]}
+                                    if cell_dim in da_block.coords else {})
+                    da_out = xr.DataArray(arr, dims=[cell_dim], coords=_cell_coords)
+                else:
+                    _cell_coords = ({cell_dim: da_block.coords[cell_dim]}
+                                    if cell_dim in da_block.coords else {})
+                    da_out = xr.DataArray(
+                        arr, dims=[time_dim, cell_dim],
+                        coords={time_dim: da_block.coords[time_dim], **_cell_coords},
+                    )
+                assembled[(mode['m'], mode['period_h'], comp)] = da_out
+
+    return _assemble_tidal_block(
+        assembled, modes, periods_hours, var_name, var_units,
+        target_lon, target_lat, cell_dim, time_dim,
+        temporal_mean, non_core_dims, da_block,
+    )
+
+
+def _wavelet_fourier_analysis_block(
+        da_block, modes, zwn_mode_groups, time_dim, cell_dim, hp_order,
+        dt_hours, dj, temporal_mean, periods_hours, var_name, var_units,
+        target_lon, target_lat, spectrum_kwargs,
+):
+    """Fourier block: CWT + spatial reconstruction using pre-computed ring series.
+
+    When ``spectrum_kwargs`` contains ``'_ring_cache'`` (dict returned by
+    :func:`_fourier_precompute_ring_coefs`), the block reads the pre-computed
+    ``(Ck, Sk)`` ring Fourier coefficients for its level and runs CWT +
+    ``assign_to_cells`` directly — no pixel loads inside the block.
+
+    Falls back to :func:`fourier_wavelet_spectrum` if ``'_ring_cache'`` is
+    absent (e.g. when called from user code without the precompute step).
+    """
+
+    non_core_dims = [d for d in da_block.dims if d not in (time_dim, cell_dim)]
+    da_2d = da_block.isel({d: 0 for d in non_core_dims})
+    t_hours_vals = _infer_t_hours_vals(da_2d[time_dim].values, time_dim)
+
+    ring_cache = spectrum_kwargs.get('_ring_cache')
+
+    if ring_cache is None:
+        # ── Fallback: call full fourier_wavelet_spectrum (old path) ──────
+        assembled = {}
+        for zwn, zwn_modes in zwn_mode_groups.items():
             ds_w = fourier_wavelet_spectrum(
-                da_tmp, zwn=zwn, time_dim=time_dim, dt=dt_hours, dj=dj,
-                periods_to_reconstruct=periods_for_wavelet,
+                da_2d, zwn=zwn, time_dim=time_dim, dt=dt_hours, dj=dj,
+                periods_to_reconstruct=list(periods_hours),
                 order=hp_order,
             )
-
             period_lookup = {}
             for v in ds_w.data_vars:
                 parts = v.split('_')
@@ -531,88 +639,240 @@ def compute_fourier_tidal_analysis(
                 if direction not in ('westward', 'eastward'):
                     continue
                 try:
-                    actual_p = float(p_str)
+                    period_lookup[(direction, p_str)] = float(p_str)
                 except ValueError:
                     continue
-                period_lookup[(direction, p_str)] = actual_p
 
-            outputs = []
             for mode in zwn_modes:
                 direction = mode['dir']
-                target_p_h = mode['period_h']
-
                 best_p_str = min(
                     (p_str for (d, p_str) in period_lookup if d == direction),
-                    key=lambda s: abs(period_lookup[(direction, s)] - target_p_h),
+                    key=lambda s: abs(period_lookup[(direction, s)] - mode['period_h']),
                 )
-
                 for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
                     arr = ds_w[f"{comp}_{direction}_{best_p_str}"].values
                     if temporal_mean:
                         sa = comp.split('_')[1]
-                        amp_vals = ds_w[f"amp_{sa}_{direction}_{best_p_str}"].values
-                        pha_vals = ds_w[f"pha_{sa}_{direction}_{best_p_str}"].values
-
-                        final_val = _demodulate_mode(
-                            amp_vals, pha_vals, t_hours_vals, target_p_h,
-                            want_phase=('pha' in comp), lon_phase=None
+                        arr = _demodulate_mode(
+                            ds_w[f"amp_{sa}_{direction}_{best_p_str}"].values,
+                            ds_w[f"pha_{sa}_{direction}_{best_p_str}"].values,
+                            t_hours_vals, mode['period_h'],
+                            want_phase=('pha' in comp), lon_phase=None,
                         )
-                        outputs.append(final_val)
+                    _cell_c = ({cell_dim: da_2d.coords[cell_dim]}
+                               if cell_dim in da_2d.coords else {})
+                    if temporal_mean:
+                        da_out = xr.DataArray(arr, dims=[cell_dim], coords=_cell_c)
                     else:
-                        outputs.append(arr)
+                        da_out = xr.DataArray(
+                            arr, dims=[time_dim, cell_dim],
+                            coords={time_dim: da_2d[time_dim], **_cell_c},
+                        )
+                    assembled[(mode['m'], mode['period_h'], comp)] = da_out
 
-            return tuple(outputs)
+        return _assemble_tidal_block(
+            assembled, modes, periods_hours, var_name, var_units,
+            target_lon, target_lat, cell_dim, time_dim,
+            temporal_mean, non_core_dims, da_block,
+        )
 
-        return _func
+    # ── Fast path: use precomputed ring Fourier coefficients ─────────────
+    # Resolve level index using the same flat_idx logic as the SH block.
+    da_ref = spectrum_kwargs['_da_ref']
+    if non_core_dims:
+        flat_idx = 0
+        stride = 1
+        for d in reversed(non_core_dims):
+            coord_val = float(da_block[d].values.flat[0])
+            full_coords = np.asarray(da_ref.coords[d].values, dtype=float)
+            local_idx = int(np.argmin(np.abs(full_coords - coord_val)))
+            flat_idx += local_idx * stride
+            stride *= len(full_coords)
+    else:
+        flat_idx = 0
+
+    # Helper: expand ring values to pixel space.
+    npix = da_block.sizes[cell_dim]
+    nside = hp.npix2nside(npix)
+    is_nested = hp_order == 'nested'
+
+    from .wavelet import _fourier_reconstruct_level
 
     assembled = {}
     for zwn, zwn_modes in zwn_mode_groups.items():
-        n_modes = len(zwn_modes)
-        out_dtypes = [ds[var_name].dtype] * (n_modes * 4)
+        cache = ring_cache[zwn]
+        Ck_lev = cache['Ck'][:, flat_idx, :]  # (n_time, n_rings)
+        Sk_lev = cache['Sk'][:, flat_idx, :]
+        ring_pix = cache['ring_pix']
 
-        if temporal_mean:
-            out_core_dims = [[cell_dim]] * (n_modes * 4)
-        else:
-            out_core_dims = [[time_dim, cell_dim]] * (n_modes * 4)
-
-        results = xr.apply_ufunc(
-            _make_ufunc(zwn, zwn_modes),
-            ds[var_name],
-            input_core_dims=[[time_dim, cell_dim]],
-            output_core_dims=out_core_dims,
-            vectorize=True,
-            dask='parallelized',
-            output_dtypes=out_dtypes,
-            dask_gufunc_kwargs={'allow_rechunk': True},
+        rec = _fourier_reconstruct_level(
+            Ck_lev, Sk_lev, ring_pix,
+            dt_hours, dj, nside, is_nested,
+            periods_to_reconstruct=list(periods_hours),
         )
+        period_arr = rec['period']
 
-        flat_modes = []
         for mode in zwn_modes:
+            direction = mode['dir']
+            actual_p = float(period_arr[np.argmin(np.abs(period_arr - mode['period_h']))])
+
             for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
-                flat_modes.append((mode['m'], mode['period_h'], comp))
+                ap, sa = comp.split('_')
+                arr = rec[(actual_p, direction, sa, ap)]
 
-        if not isinstance(results, tuple):
-            results = (results,)
+                if temporal_mean:
+                    arr = _demodulate_mode(
+                        rec[(actual_p, direction, sa, 'amp')],
+                        rec[(actual_p, direction, sa, 'pha')],
+                        t_hours_vals, mode['period_h'],
+                        want_phase=(ap == 'pha'), lon_phase=None,
+                    )
 
-        for i, key in enumerate(flat_modes):
-            assembled[key] = results[i]
+                _cell_c = ({cell_dim: da_2d.coords[cell_dim]}
+                           if cell_dim in da_2d.coords else {})
+                if temporal_mean:
+                    da_out = xr.DataArray(arr, dims=[cell_dim], coords=_cell_c)
+                else:
+                    da_out = xr.DataArray(
+                        arr, dims=[time_dim, cell_dim],
+                        coords={time_dim: da_2d[time_dim], **_cell_c},
+                    )
+                assembled[(mode['m'], mode['period_h'], comp)] = da_out
 
-    target_lon, target_lat = get_healpix_coords(hp.npix2nside(ds.sizes[cell_dim]))
-    if hp_order == 'nested':
-        target_lon = ensure_original_order(target_lon, 'nested')
-        target_lat = ensure_original_order(target_lat, 'nested')
-
-    out_ds = _build_tidal_output_dataset(
-        assembled, modes, periods_hours, var_name, ds[var_name].attrs.get('units', ''),
-        target_lon, target_lat, cell_dim
+    return _assemble_tidal_block(
+        assembled, modes, periods_hours, var_name, var_units,
+        target_lon, target_lat, cell_dim, time_dim,
+        temporal_mean, non_core_dims, da_block,
     )
 
-    out_ds.attrs['history'] = f"Fourier-Wavelet Tidal Analysis (dt={dt_hours}h)"
+
+def _recommend_dask_scheduler(
+        bytes_per_block: int,
+        budget_fraction: float = 0.40,
+) -> tuple[str, int]:
+    """Return a safe ``(scheduler, n_workers)`` pair for Dask block execution.
+
+    Estimates how many blocks can run concurrently without exhausting RAM,
+    using *budget_fraction* of currently available system memory.  The result
+    is capped at ``n_cpu // 2`` so NumPy's internal BLAS / OpenMP threads
+    retain enough CPU cores and memory bandwidth.
+
+    Args:
+        bytes_per_block: Peak RAM per Dask block in bytes.  Should include
+            ALL arrays that coexist during one block's execution (output maps
+            for every ZWN group and period).
+        budget_fraction: Fraction of available RAM allowed for concurrent
+            blocks.  Default 0.40 leaves headroom for the spectral cache,
+            OS buffers, and NumPy thread pools.
+
+    Returns:
+        ``('synchronous', 1)`` when only one block fits, otherwise
+        ``('threads', n_workers)``.
+    """
+    import os as _os
+    try:
+        import psutil as _psutil
+        available_bytes = _psutil.virtual_memory().available
+    except ImportError:
+        available_bytes = 16 * 1024 ** 3  # conservative 16 GB fallback
+
+    n_cpu = _os.cpu_count() or 4
+    n_workers = max(1, min(
+        n_cpu // 2,
+        int(available_bytes * budget_fraction / bytes_per_block),
+    ))
+    scheduler = 'synchronous' if n_workers == 1 else 'threads'
+    logger.info(
+        f"Adaptive scheduler: {n_workers} worker(s) "
+        f"(block_peak={bytes_per_block / 1e9:.1f} GB, "
+        f"budget={available_bytes * budget_fraction / 1e9:.0f} GB of "
+        f"{available_bytes / 1e9:.0f} GB available)"
+    )
+    return scheduler, n_workers
+
+
+def _iterate_tidal_analysis(
+        da, ds, modes, zwn_mode_groups, time_dim, cell_dim, hp_order,
+        dt_hours, dj, temporal_mean, method, periods_hours, var_name,
+        var_units, target_lon, target_lat, spectrum_kwargs
+):
+    """Execute wavelet tidal analysis via map_blocks.
+
+    Uses chunk=1 per non-core dimension (one level per block) to keep
+    peak memory bounded.  For the 'sh' method, map2alm has already been
+    pre-computed across all levels by ``compute_wavelet_tidal_analysis``
+    and is stored in ``spectrum_kwargs['_alm_cache']``.
+    """
+    non_core_dims = [d for d in da.dims if d not in (time_dim, cell_dim)]
+
+    block_args = (modes, zwn_mode_groups, time_dim, cell_dim, hp_order,
+                  dt_hours, dj, temporal_mean, periods_hours,
+                  var_name, var_units, target_lon, target_lat, spectrum_kwargs)
+
+    # Both methods use map_blocks — one level per block, streams to disk
+    # without accumulating all levels in memory simultaneously.
+    # For the SH method the caller should use scheduler='synchronous' to
+    # avoid N_threads × block_memory concurrent allocations; see cli.py.
+    rechunk_dict = {time_dim: -1, cell_dim: -1}
+    for d in non_core_dims:
+        rechunk_dict[d] = 1
+    da_chunked = da.chunk(rechunk_dict)
+
+    dummy_assembled = {}
+    for mode in modes:
+        for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
+            key = (mode['m'], mode['period_h'], comp)
+            dummy_assembled[key] = (da_chunked.isel({time_dim: 0}, drop=True)
+                                    if temporal_mean else da_chunked)
+
+    template = _build_tidal_output_dataset(
+        dummy_assembled, modes, periods_hours, var_name, var_units,
+        target_lon, target_lat, cell_dim
+    ).chunk({'m': -1, 'period': -1})
+
+    block_fn = _wavelet_sh_analysis_block if method == 'sh' else _wavelet_fourier_analysis_block
+    out_ds = xr.map_blocks(
+        block_fn,
+        da_chunked,
+        args=block_args,
+        template=template,
+    )
+
+    # Re-attach auxiliary coordinates from da (e.g. pressure levels indexed by
+    # a height dimension).  These are excluded from map_blocks blocks to avoid
+    # template-mismatch errors, so we add them back here once, outside the graph.
+    if non_core_dims:
+        allowed_dims = set(non_core_dims) | {cell_dim}
+        if not temporal_mean:
+            allowed_dims.add(time_dim)
+        aux_coords = {
+            name: coord
+            for name, coord in da.coords.items()
+            if (name not in out_ds.coords
+                and name not in non_core_dims
+                and name != time_dim
+                and name != cell_dim
+                and all(d in allowed_dims for d in coord.dims))
+        }
+        if aux_coords:
+            out_ds = out_ds.assign_coords(aux_coords)
+
+    # ── Adaptive scheduler recommendation ────────────────────────────────
+    # Block peak = 8 output maps × n_periods × n_zwn_groups × n_time × n_cell × 8 B.
+    n_periods_out = len(periods_hours)
+    n_zwn_groups = len(zwn_mode_groups)
+    bytes_per_block = (
+        8 * n_periods_out * n_zwn_groups * da.sizes[time_dim] * da.sizes[cell_dim] * 8
+    )
+    scheduler, n_workers = _recommend_dask_scheduler(bytes_per_block, budget_fraction=0.65)
+    out_ds.attrs['_recommended_dask_scheduler'] = scheduler
+    out_ds.attrs['_recommended_dask_num_workers'] = n_workers
+
     return out_ds
 
 
 # --------------------------------------------------------------------------
-# DATASET-LEVEL SH-WAVELET TIDAL ANALYSIS
+# DATASET-LEVEL WAVELET TIDAL ANALYSIS
 # --------------------------------------------------------------------------
 
 def compute_wavelet_tidal_analysis(
@@ -625,22 +885,13 @@ def compute_wavelet_tidal_analysis(
         dj: float = 0.1,
         temporal_mean: bool = False,
         map2alm_iter: int = 3,
+        method: str = 'sh',
 ) -> xr.Dataset:
     """Wavelet-based tidal analysis on a HEALPix Dataset.
 
-    This is the wavelet analogue of
-    :func:`compute_leastsquares_tidal_analysis`.  It accepts a
-    full Dataset with arbitrary non-core dimensions (e.g. ``height``) and
-    automatically maps over them via :func:`xarray.apply_ufunc`, keeping
-    peak memory at O(1 slice) regardless of the number of non-core levels.
-
-    Pipeline (per non-core slice):
-        1. For each unique ``|m|`` in *m_filters*, run
-           :func:`~healicon.analysis.wavelet.spherical_harmonic_wavelet_spectrum`
-           to obtain time-resolved amplitude and phase maps.
-        2. Extract the requested ``periods_hours`` and propagation
-           direction (westward for ``m > 0``, eastward for ``m < 0``).
-        3. Optionally average over the time axis (``temporal_mean``).
+    Supports both spherical harmonics ('sh') and Fourier ('fourier') wavelet methods.
+    Non-core dimensions (e.g. height) are processed in parallel/lazy mode level-by-level
+    via xr.map_blocks to keep memory usage bounded.
 
     Args:
         ds:  Input Dataset on a HEALPix grid with a time dimension.
@@ -649,13 +900,16 @@ def compute_wavelet_tidal_analysis(
         m_filters:  Signed zonal wavenumbers to extract.  Positive values
             denote westward propagation, negative values eastward.
             If *None*, defaults to ``[1]``.
-        lmax:  Maximum spherical harmonic degree.  If *None*, uses
-            ``3 * nside - 1``.
+        lmax:  Maximum spherical harmonic degree (SH method only).
+            If *None*, uses ``3 * nside - 1``.
         time_dim:  Name of the time dimension.
         dj:  Spacing between discrete wavelet scales (default 0.1).
         temporal_mean:  If *True*, average the wavelet amplitude over time
             before returning (produces output comparable to LS tides).
             Default is *False* (return the full time-resolved envelope).
+        map2alm_iter:  Number of iterations for map2alm (SH method only).
+        method:  The spectral method to use: 'sh' (spherical harmonics CWT) or
+            'fourier' (ring Fourier CWT).
 
     Returns:
         xr.Dataset with variables ``{var_name}_amp_sym``,
@@ -663,8 +917,6 @@ def compute_wavelet_tidal_analysis(
         ``{var_name}_pha_asy``.  Dimensions are
         ``(m, period, [time], *non_core_dims, cells)``.
     """
-    from .wavelet import spherical_harmonic_wavelet_spectrum
-
     if time_dim not in ds.dims:
         raise ValueError(
             f"Dataset must have a '{time_dim}' dimension for wavelet "
@@ -699,132 +951,77 @@ def compute_wavelet_tidal_analysis(
     for mode in modes:
         zwn_mode_groups.setdefault(mode['zwn'], []).append(mode)
 
-    unique_zwn = sorted(zwn_mode_groups.keys())
-    periods_for_wavelet = list(periods_hours)
-
-    # ── Core function applied per non-core slice ─────────────────────
-
-    def _make_ufunc(zwn, zwn_modes):
-        """Build a ufunc for a specific zonal wavenumber."""
-        n_modes = len(zwn_modes)
-
-        t_hours_vals = _infer_t_hours_vals(ds[time_dim].values, time_dim)
-
-        def _func(data_np):
-            da_tmp = xr.DataArray(
-                data_np, dims=[time_dim, cell_dim],
-                coords={time_dim: ds[time_dim]},
-            )
-            ds_w = spherical_harmonic_wavelet_spectrum(
-                da_tmp, zwn=zwn, time_dim=time_dim, dt=dt_hours, dj=dj,
-                lmax=lmax, map2alm_iter=map2alm_iter,
-                periods_to_reconstruct=periods_for_wavelet,
-                order=hp_order,
-            )
-
-            period_lookup = {}
-            for v in ds_w.data_vars:
-                parts = v.split('_')
-                if len(parts) != 4:
-                    continue
-                _, _, direction, p_str = parts
-                if direction not in ('westward', 'eastward'):
-                    continue
-                try:
-                    actual_p = float(p_str)
-                except ValueError:
-                    continue
-                period_lookup[(direction, p_str)] = actual_p
-
-            outputs = []
-            for mode in zwn_modes:
-                direction = mode['dir']
-                target_p_h = mode['period_h']
-
-                best_p_str = min(
-                    (p_str for (d, p_str) in period_lookup if d == direction),
-                    key=lambda s: abs(period_lookup[(direction, s)] - target_p_h),
-                )
-
-                for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
-                    arr = ds_w[f"{comp}_{direction}_{best_p_str}"].values
-                    if temporal_mean:
-                        sa = comp.split('_')[1]  # 'sym' or 'asy'
-                        amp_vals = ds_w[f"amp_{sa}_{direction}_{best_p_str}"].values
-                        pha_vals = ds_w[f"pha_{sa}_{direction}_{best_p_str}"].values
-
-                        nside_local = hp.npix2nside(amp_vals.shape[1])
-                        target_lon_deg, _ = get_healpix_coords(nside_local)
-                        if hp_order == 'nested':
-                            target_lon_deg = ensure_original_order(target_lon_deg, 'nested')
-                        phi_da = np.radians(target_lon_deg)
-                        target_m = mode['m']
-
-                        arr = _demodulate_mode(
-                            amp_vals, pha_vals, t_hours_vals, mode['period_h'],
-                            want_phase=('pha' in comp), lon_phase=target_m * phi_da,
-                        )
-
-                    outputs.append(arr)
-
-            return tuple(outputs)
-
-        return _func, n_modes
-
-    # ── apply_ufunc per unique |m| ───────────────────────────────────
-    logger.info(f"Applying wavelet analysis for |m| = {unique_zwn}...")
-
-    assembled = {}  # (m_val, period_h, comp) -> DataArray
-
-    for zwn in unique_zwn:
-        zwn_modes = zwn_mode_groups[zwn]
-        func, n_modes = _make_ufunc(zwn, zwn_modes)
-        n_outputs = n_modes * 4
-
-        if temporal_mean:
-            out_core = [[cell_dim]] * n_outputs
-        else:
-            out_core = [[time_dim, cell_dim]] * n_outputs
-
-        results = xr.apply_ufunc(
-            func,
-            da,
-            input_core_dims=[[time_dim, cell_dim]],
-            output_core_dims=out_core,
-            vectorize=True,
-            dask='parallelized',
-            output_dtypes=[np.float64] * n_outputs,
-            dask_gufunc_kwargs={'allow_rechunk': True},
-        )
-
-        # Unpack results into named DataArrays
-        if n_outputs == 1:
-            results = (results,)
-        comps = ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy')
-        for i, mode in enumerate(zwn_modes):
-            for j, comp in enumerate(comps):
-                da_out = results[i * 4 + j]
-                assembled[(mode['m'], mode['period_h'], comp)] = da_out
-
-    # ── Build output Dataset using xarray-native concat ─────────────────
     target_lon, target_lat = get_healpix_coords(nside)
     if hp_order == 'nested':
         target_lon = ensure_original_order(target_lon, 'nested')
         target_lat = ensure_original_order(target_lat, 'nested')
 
-    var_units = ds[var_name].attrs.get('units', '')
-    out_ds = _build_tidal_output_dataset(
-        assembled, modes, periods_hours, var_name, var_units,
-        target_lon, target_lat, cell_dim,
+    if method == 'sh':
+        if lmax is None:
+            lmax = 3 * nside - 1
+
+        # Pre-compute A_lm/B_lm for ALL levels in batched map2alm calls.
+        # This is the only place map2alm runs; each map_blocks block uses
+        # the pre-computed coefficients without touching pixel data again.
+        zwn_list = list({mode['zwn'] for mode in modes})
+        non_core = [d for d in da.dims if d not in (time_dim, cell_dim)]
+        n_extra = max(1, int(np.prod([da.sizes[d] for d in non_core])))
+        lev_batch = _compute_lev_batch(da.sizes[time_dim], da.sizes[cell_dim], n_extra=n_extra)
+        logger.info(
+            f"Pre-computing SH coefficients for {len(zwn_list)} |m| group(s) "
+            f"across all levels (lev_batch={lev_batch})..."
+        )
+        alm_cache = _sh_precompute_alm(
+            da, zwn_list=zwn_list, time_dim=time_dim,
+            lmax=lmax, map2alm_iter=map2alm_iter,
+            order=hp_order, lev_batch=lev_batch,
+        )
+        spectrum_kwargs = {
+            '_alm_cache': alm_cache,
+            '_da_ref': da,  # used to map block coords to linear indices
+        }
+    elif method == 'fourier':
+        # Pre-compute ring Fourier coefficients (Ck, Sk) for ALL levels.
+        # Memory cost: n_zwn × n_time × n_extra × n_rings × 16 bytes ≈ trivial
+        # compared to pixel data.  Allows each map_blocks block to run the
+        # CWT + assign_to_cells without loading any pixel data.
+        zwn_list = list({mode['zwn'] for mode in modes})
+        logger.info(
+            f"Pre-computing ring Fourier coefficients for "
+            f"{len(zwn_list)} ZWN group(s) across all levels..."
+        )
+        ring_cache = _fourier_precompute_ring_coefs(
+            da, zwn_list=zwn_list, time_dim=time_dim, order=hp_order,
+        )
+        spectrum_kwargs = {
+            '_ring_cache': ring_cache,
+            '_da_ref': da,  # used to map block coords to linear indices
+        }
+    else:
+        raise ValueError(f"Unknown wavelet method: {method}")
+
+    # Compute tidal analysis on each ZWN group
+    out_ds = _iterate_tidal_analysis(
+        da, ds, modes, zwn_mode_groups, time_dim, cell_dim, hp_order,
+        dt_hours, dj, temporal_mean, method, periods_hours, var_name,
+        ds[var_name].attrs.get('units', ''), target_lon, target_lat,
+        spectrum_kwargs
     )
+
+    # _iterate_tidal_analysis sets '_recommended_dask_scheduler' on out_ds;
+    # save it before the attrs overwrite below wipes it.
+    scheduler = out_ds.attrs.pop('_recommended_dask_scheduler', 'synchronous')
+    n_workers = out_ds.attrs.pop('_recommended_dask_num_workers', 1)
 
     # Preserve dataset attributes and grid mapping
     out_ds.attrs = ds.attrs.copy()
     out_ds = add_healpix_grid_mapping(out_ds, nside, order=hp_order)
     out_ds.attrs = append_history(
         out_ds.attrs,
-        f"Wavelet tidal analysis (periods: {periods_hours}h, "
+        f"Wavelet tidal analysis (method: {method}, periods: {periods_hours}h, "
         f"m: {m_filters}, temporal_mean={temporal_mean})."
     )
+    out_ds.attrs['_recommended_dask_scheduler'] = scheduler
+    out_ds.attrs['_recommended_dask_num_workers'] = n_workers
 
     return out_ds

@@ -37,6 +37,10 @@ def run():
     ds_out.to_netcdf(out_file)
     print(f"\nSaved wavelet tides to {out_file}")
 
+    # Reload the saved dataset to sever the lazy Dask graph
+    # This prevents duplicate calculations during plotting
+    ds_out = xr.open_dataset(out_file).load()
+
     # 3. Compute Zonal Mean using precise HEALPix rings
     print("\nComputing Zonal Mean...")
     from healicon.extract import zonal_mean
@@ -66,12 +70,15 @@ def run():
     ds_zm.to_netcdf(out_zm)
     print(f"Saved zonal mean to {out_zm}")
 
+    # Reload the zonal mean dataset to sever the lazy Dask graph
+    ds_zm = xr.open_dataset(out_zm).load()
+
 
     # 4. Plotting
     print("\nGenerating Plots...")
     from healicon.visualize import plot_tides, plot_map
 
-    plot_tides(ds_zm, out_dir=".", prefix="wavelet_tides_plot_optimal_v5", max_amplitude=6.0)
+    plot_tides(ds_zm, out_dir=".", prefix="wavelet_tides_plot_optimal_v7", max_amplitude=6.0)
     print("Generated tides plot")
 
     # Generate tides maps at ~100 km
@@ -92,7 +99,7 @@ def run():
                     else 'temp_amp_asy')
         data_slice = ds_out.sel(period=meta['period'], m=meta['m'],
                                 height=target_height, method='nearest')
-        prefix = f"wavelet_tides_map_{name}_optimal_v5"
+        prefix = f"wavelet_tides_map_{name}_optimal_v7"
         plot_map(data_slice, var_name=var_name, out_dir=".", prefix=prefix)
     print("Generated tides maps")
 

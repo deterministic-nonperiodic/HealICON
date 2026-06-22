@@ -45,6 +45,7 @@ share/python-wheels/
 *.txt
 *.dat
 /dev/
+/scratch/
 docs/*.aux
 docs/*.log
 docs/*.out

@@ -62,3 +62,101 @@ def test_run_sequential_cat():
         assert out_ds.sizes["altitude"] == 10
         
         out_ds.close()
+
+
+# --- write_dataset tests ---
+import pytest
+from healicon.io_utils import write_dataset, _resolve_store_and_path
+from pathlib import Path
+
+
+def _make_simple_ds():
+    """Create a small in-memory Dataset for I/O testing."""
+    data = np.random.rand(5, 10).astype("float32")
+    return xr.Dataset({"temperature": (["z", "cells"], data)})
+
+
+def test_resolve_store_and_path_netcdf():
+    path, store = _resolve_store_and_path("/tmp/out.nc")
+    assert store == "netcdf"
+    assert str(path).endswith(".nc")
+
+
+def test_resolve_store_and_path_zarr():
+    path, store = _resolve_store_and_path("/tmp/out.zarr")
+    assert store == "zarr"
+    assert str(path).endswith(".zarr")
+
+
+def test_resolve_store_and_path_unknown_extension_defaults_netcdf():
+    path, store = _resolve_store_and_path("/tmp/out.bin")
+    assert store == "netcdf"
+
+
+def test_resolve_store_and_path_override():
+    # Extension says .nc but store_type forces zarr
+    path, store = _resolve_store_and_path("/tmp/out.nc", store_type="zarr")
+    assert store == "zarr"
+    assert str(path).endswith(".zarr")
+
+
+def test_write_dataset_netcdf():
+    ds = _make_simple_ds()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ofile = os.path.join(tmpdir, "output.nc")
+        write_dataset(ds, ofile)
+        assert os.path.exists(ofile)
+        out = xr.open_dataset(ofile)
+        assert "temperature" in out.data_vars
+        out.close()
+
+
+def test_write_dataset_zarr():
+    from healicon.io_utils import _ZARR_AVAILABLE
+    if not _ZARR_AVAILABLE:
+        pytest.skip("zarr not installed")
+    ds = _make_simple_ds()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ofile = os.path.join(tmpdir, "output.zarr")
+        write_dataset(ds, ofile)
+        assert os.path.isdir(ofile)
+        out = xr.open_zarr(ofile, consolidated=False)
+        assert "temperature" in out.data_vars
+        out.close()
+
+
+def test_write_dataset_overwrite_false_raises():
+    ds = _make_simple_ds()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ofile = os.path.join(tmpdir, "output.nc")
+        write_dataset(ds, ofile)
+        # Write again without overwrite: should raise
+        with pytest.raises(FileExistsError):
+            write_dataset(ds, ofile, overwrite=False)
+
+
+def test_write_dataset_overwrite_true_replaces():
+    ds = _make_simple_ds()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ofile = os.path.join(tmpdir, "output.nc")
+        write_dataset(ds, ofile)
+        # Modify dataset and overwrite
+        ds2 = _make_simple_ds()
+        ds2["pressure"] = xr.DataArray(np.ones((5, 10), dtype="float32"), dims=["z", "cells"])
+        write_dataset(ds2, ofile, overwrite=True)
+        out = xr.open_dataset(ofile)
+        assert "pressure" in out.data_vars
+        out.close()
+
+
+def test_write_dataset_dask_backed_netcdf():
+    """Test write with a dask-backed dataset (simulating large file workflow)."""
+    ds = _make_simple_ds()
+    ds_dask = ds.chunk({"z": 2, "cells": 5})
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ofile = os.path.join(tmpdir, "output.nc")
+        write_dataset(ds_dask, ofile)
+        assert os.path.exists(ofile)
+        out = xr.open_dataset(ofile)
+        assert "temperature" in out.data_vars
+        out.close()

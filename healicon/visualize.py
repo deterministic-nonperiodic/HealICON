@@ -41,7 +41,11 @@ def set_publication_style():
 def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_amplitude=None):
     """
     Plot tidal amplitude and phase across latitudes and heights.
-    Expects zonal mean dataset with 'lat' and 'z_mc' (or 'plev') coordinates.
+
+    Accepts either a pre-processed zonal-mean dataset (with a ``'lat'``
+    coordinate) or a raw tidal analysis output (with a HEALPix cell dimension).
+    In the latter case zonal mean is computed on-the-fly.  If the dataset still
+    has a ``'time'`` dimension, a temporal mean is applied automatically.
     """
     set_publication_style()
 
@@ -52,10 +56,86 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
         return
     level_name = vert_dims[0]
 
-    if 'lat' in ds.coords:
+    if 'lat' not in ds.dims:
+        # Raw HEALPix output — compute zonal mean on-the-fly.
+        from .extract import zonal_mean
+        logger.info("'lat' coordinate not found — computing zonal mean before plotting.")
+        try:
+            # If 'time' is still present, collapse it first.
+            # amp variables: linear temporal mean; pha variables: circular mean.
+            if 'time' in ds.dims:
+                logger.info("Averaging over 'time' dimension before zonal mean.")
+                amp_vars = [v for v in ds.data_vars if '_amp_' in v]
+                pha_vars = [v for v in ds.data_vars if '_pha_' in v]
+                parts = {}
+                if amp_vars:
+                    parts.update(ds[amp_vars].mean('time').data_vars)
+                if pha_vars:
+                    import numpy as _np
+                    for v in pha_vars:
+                        pha = ds[v]
+                        # Amplitude-weighted circular mean: phase is meaningful
+                        # only where amplitude is large; weight by amplitude so
+                        # that low-amplitude (noisy) time steps barely contribute.
+                        v_amp = v.replace('_pha_', '_amp_')
+                        if v_amp in ds.data_vars:
+                            w = ds[v_amp]
+                        else:
+                            w = xr.ones_like(pha)
+                        parts[v] = _np.arctan2(
+                            (w * _np.sin(pha)).mean('time'),
+                            (w * _np.cos(pha)).mean('time'),
+                        )
+                # Preserve 0-D grid-mapping scalars (e.g. 'healpix') so that
+                # zonal_mean can detect the pixel ordering (nested vs ring).
+                for v in ds.data_vars:
+                    if ds[v].dims == () and v not in parts:
+                        parts[v] = ds[v]
+                ds_new = xr.Dataset(
+                    parts,
+                    coords={k: v for k, v in ds.coords.items()
+                            if 'time' not in ds[k].dims},
+                )
+                ds_new.attrs = ds.attrs
+                ds = ds_new
+            # Zonal mean: amplitude variables — arithmetic ring average.
+            # Phase variables — must go via cos/sin so zonal_mean does
+            # circular (not arithmetic) averaging.  Matches the explicit
+            # cos/sin decomposition used in recreate_tides_wavelet.py.
+            pha_vars_ds = [v for v in ds.data_vars if '_pha_' in v]
+            cos_sin_map = {}  # original var → (cos_name, sin_name)
+            ds_for_zm = ds
+            for v in pha_vars_ds:
+                cos_name = f'__cos_{v}'
+                sin_name = f'__sin_{v}'
+                ds_for_zm = ds_for_zm.assign({cos_name: np.cos(ds_for_zm[v]),
+                                              sin_name: np.sin(ds_for_zm[v])})
+                cos_sin_map[v] = (cos_name, sin_name)
+            if cos_sin_map:
+                ds_for_zm = ds_for_zm.drop_vars(list(cos_sin_map.keys()))
+
+            ds = zonal_mean(ds_for_zm)
+
+            # Reconstruct phase from zonal-mean cos/sin
+            for v, (cos_name, sin_name) in cos_sin_map.items():
+                ds[v] = np.arctan2(ds[sin_name], ds[cos_name])
+                ds = ds.drop_vars([cos_name, sin_name])
+
+
+        except Exception as exc:
+            logger.error(f"Automatic zonal mean failed: {exc}")
+            return
+
+    if 'lat' in ds.dims and level_name in ds.dims:
         ds = ds.sortby(['lat', level_name])
-    else:
-        logger.warning("Dataset missing 'lat' coordinate for tidal cross-section.")
+
+
+    # Dynamic variable base name detection (detects e.g., 'temp' or 'u')
+    amp_sym_vars = [v for v in ds.data_vars if v.endswith('_amp_sym')]
+    if not amp_sym_vars:
+        logger.error("No tidal amplitude variables (*_amp_sym) found in dataset.")
+        return
+    var_base = amp_sym_vars[0][:-8]  # Remove '_amp_sym'
 
     p_12 = np.timedelta64(12, 'h')
     p_24 = np.timedelta64(24, 'h')
@@ -74,12 +154,9 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
     # Identify available modes in the dataset
     available_modes = {}
     for name, meta in modes.items():
-        var_name = 'temp_amp_sym' if meta['type'] == 'Symmetric' else 'temp_amp_asy'
+        var_name = f'{var_base}_amp_sym' if meta['type'] == 'Symmetric' else f'{var_base}_amp_asy'
         if var_name in ds and 'period' in ds.coords and 'm' in ds.coords:
             try:
-                # Check if exact period/m exists
-                p_val = ds['period'].values
-                m_val = ds['m'].values
                 # We use nearest to just check if it's broadly there, or let sel handle it
                 ds[var_name].sel(period=meta['period'], m=meta['m'], method='nearest')
                 available_modes[name] = meta
@@ -105,7 +182,7 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
 
     # Try to find max amplitude for better scaling
     try:
-        max_amp = float(ds[['temp_amp_sym', 'temp_amp_asy']].to_array().max())
+        max_amp = float(ds[[f'{var_base}_amp_sym', f'{var_base}_amp_asy']].to_array().max())
         if np.isfinite(max_amp) and max_amp > 0:
             vmax = min(max_amp,
                        max_amplitude if max_amplitude is not None else 20.0)  # Cap at 20 for visibility
@@ -117,18 +194,28 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
     cf = None
     for i, (name, meta) in enumerate(available_modes.items()):
         ax = axes[i]
-        var_name = 'temp_amp_sym' if meta['type'] == 'Symmetric' else 'temp_amp_asy'
+        var_name = f'{var_base}_amp_sym' if meta['type'] == 'Symmetric' else f'{var_base}_amp_asy'
         data = ds[var_name].sel(period=meta['period'], m=meta['m'], method='nearest')
 
         # Ensure correct dimension order: (height, lat)
         if data.dims != (level_name, 'lat'):
             data = data.transpose(level_name, 'lat')
 
-        y = data[level_name] / 1000.0 if level_name in ['z_mc', 'height', 'altitude'] else data[
-            level_name]
-        x = data.lat
+        if level_name in ['z_mc', 'height', 'altitude']:
+            data = data.assign_coords({level_name: data[level_name] / 1000.0})
+            data[level_name].attrs['units'] = 'km'
+            if 'long_name' not in data[level_name].attrs:
+                data[level_name].attrs['long_name'] = 'Height'
 
-        cf = ax.contourf(x, y, data, levels=levels, cmap='inferno', extend='max')
+        cf = data.plot.contourf(
+            ax=ax,
+            x='lat',
+            y=level_name,
+            levels=levels,
+            cmap='inferno',
+            add_colorbar=False,
+            add_labels=False
+        )
         ax.set_title(f"{name.split('_')[0]} ({meta['type']})", fontweight='bold')
         ax.grid(True, linestyle='--', alpha=0.5)
 
@@ -138,9 +225,10 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
             ax.remove()
         else:
             if i % n_cols == 0:
-                ylabel = "Height / km" if level_name in ['z_mc', 'height',
-                                                         'altitude'] else "Pressure / hPa"
-                ax.set_ylabel(ylabel)
+                y_label_name = data[level_name].attrs.get('long_name',
+                                                          level_name.replace('_', ' ').title())
+                y_units = data[level_name].attrs.get('units', '')
+                ax.set_ylabel(f"{y_label_name} / {y_units}" if y_units else y_label_name)
             if i >= n_modes - n_cols:
                 ax.set_xlabel("Latitude")
                 ax.set_xlim(-60, 60)
@@ -157,7 +245,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
     if cf:
         cbar_ax = fig.add_axes([0.26, 0.05, 0.52, 0.02])
         cbar = fig.colorbar(cf, cax=cbar_ax, orientation='horizontal')
-        cbar.set_label('Amplitude / K')
+        var_units = ds[f'{var_base}_amp_sym'].attrs.get('units', 'K')
+        cbar.set_label(f'Amplitude / {var_units}')
 
     os.makedirs(out_dir, exist_ok=True)
     amp_out_path = os.path.join(out_dir, f"{prefix}_amplitude.png")
@@ -174,18 +263,28 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
     cf_pha = None
     for i, (name, meta) in enumerate(available_modes.items()):
         ax = axes_pha[i]
-        var_name = 'temp_pha_sym' if meta['type'] == 'Symmetric' else 'temp_pha_asy'
+        var_name = f'{var_base}_pha_sym' if meta['type'] == 'Symmetric' else f'{var_base}_pha_asy'
         data = ds[var_name].sel(period=meta['period'], m=meta['m'], method='nearest')
 
         # Ensure correct dimension order: (height, lat)
         if data.dims != (level_name, 'lat'):
             data = data.transpose(level_name, 'lat')
 
-        y = data[level_name] / 1000.0 if level_name in ['z_mc', 'height', 'altitude'] else data[
-            level_name]
-        x = data.lat
+        if level_name in ['z_mc', 'height', 'altitude']:
+            data = data.assign_coords({level_name: data[level_name] / 1000.0})
+            data[level_name].attrs['units'] = 'km'
+            if 'long_name' not in data[level_name].attrs:
+                data[level_name].attrs['long_name'] = 'Height'
 
-        cf_pha = ax.contourf(x, y, data, levels=levels_pha, cmap='twilight_shifted', extend='both')
+        cf_pha = data.plot.contourf(
+            ax=ax,
+            x='lat',
+            y=level_name,
+            levels=levels_pha,
+            cmap='twilight_shifted',
+            add_colorbar=False,
+            add_labels=False
+        )
         ax.set_title(f"{name.split('_')[0]} Phase ({meta['type']})", fontweight='bold')
         ax.grid(True, linestyle='--', alpha=0.5)
 
@@ -194,9 +293,10 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
             ax.remove()
         else:
             if i % n_cols == 0:
-                ylabel = "Height / km" if level_name in ['z_mc', 'height',
-                                                         'altitude'] else "Pressure / hPa"
-                ax.set_ylabel(ylabel)
+                y_label_name = data[level_name].attrs.get('long_name',
+                                                          level_name.replace('_', ' ').title())
+                y_units = data[level_name].attrs.get('units', '')
+                ax.set_ylabel(f"{y_label_name} / {y_units}" if y_units else y_label_name)
             if i >= n_modes - n_cols:
                 ax.set_xlabel("Latitude")
                 ax.set_xlim(-60, 60)
@@ -215,7 +315,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
         cbar_pha = fig_pha.colorbar(cf_pha, cax=cbar_ax_pha, orientation='horizontal',
                                     ticks=[-np.pi, -np.pi / 2, 0, np.pi / 2, np.pi])
         cbar_pha.ax.set_xticklabels([r'$-\pi$', r'$-\pi/2$', '0', r'$\pi/2$', r'$\pi$'])
-        cbar_pha.set_label('Phase / rad')
+        var_units_pha = ds[f'{var_base}_pha_sym'].attrs.get('units', 'rad')
+        cbar_pha.set_label(f'Phase / {var_units_pha}')
 
     pha_out_path = os.path.join(out_dir, f"{prefix}_phase.png")
     plt.savefig(pha_out_path, dpi=300, bbox_inches='tight')
@@ -249,24 +350,27 @@ def plot_section(ds: xr.Dataset, var_name: str, x_dim: str = 'lat', y_dim: str =
         logger.info(f"Averaging over additional dimensions: {reduced_dims}")
         data = data.mean(dim=reduced_dims)
 
-    y_vals = data[y_dim] / 1000.0 if y_dim in ['z_mc', 'height', 'altitude'] else data[y_dim]
-    x_vals = data[x_dim]
+    if y_dim in ['z_mc', 'height', 'altitude']:
+        data = data.assign_coords({y_dim: data[y_dim] / 1000.0})
+        data[y_dim].attrs['units'] = 'km'
+        if 'long_name' not in data[y_dim].attrs:
+            data[y_dim].attrs['long_name'] = 'Height'
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
     # Determine colormap based on variable
     cmap = temp_cm if 'temp' in var_name else wind_cm
 
-    cf = ax.contourf(x_vals, y_vals, data, levels=20, cmap=cmap)
-    cbar = plt.colorbar(cf, ax=ax, pad=0.02)
-
-    units = ds[var_name].attrs.get('units', '')
-    long_name = ds[var_name].attrs.get('long_name', var_name)
-    cbar.set_label(f"{long_name} [{units}]" if units else long_name)
-
-    # Axis labels
-    ax.set_ylabel("Height / km" if y_dim in ['z_mc', 'height', 'altitude'] else y_dim)
-    ax.set_xlabel(x_dim.capitalize())
+    # Use xarray's built-in contourf plotting
+    cf = data.plot.contourf(
+        ax=ax,
+        x=x_dim,
+        y=y_dim,
+        levels=20,
+        cmap=cmap,
+        add_colorbar=True,
+        cbar_kwargs={'pad': 0.02}
+    )
 
     if x_dim == 'lat':
         ax.set_xlim(-90, 90)
@@ -277,6 +381,8 @@ def plot_section(ds: xr.Dataset, var_name: str, x_dim: str = 'lat', y_dim: str =
         ax.invert_yaxis()
         ax.set_yscale('log')
 
+    # Title & grid customization
+    long_name = data.attrs.get('long_name', var_name)
     ax.set_title(f"{long_name} Cross-Section", fontweight='bold')
     ax.grid(True, linestyle='--', alpha=0.5)
 
@@ -339,8 +445,8 @@ def plot_map(ds: xr.Dataset, var_name: str, target_height: float | None = None, 
         logger.info(f"Selecting first index for extra dimensions: {reduced_dims}")
         data = data.isel({dim: 0 for dim in reduced_dims})
 
-    units = ds[var_name].attrs.get('units', '')
-    long_name = ds[var_name].attrs.get('long_name', var_name)
+    units = data.attrs.get('units', '')
+    long_name = data.attrs.get('long_name', var_name)
     cmap = temp_cm if 'temp' in var_name else wind_cm
 
     fig = plt.figure(figsize=(10, 5))
@@ -360,13 +466,17 @@ def plot_map(ds: xr.Dataset, var_name: str, target_height: float | None = None, 
             return
 
         ax = plt.axes()
-        cf = ax.contourf(data.lon, data.lat, data, levels=20, cmap=cmap)
-        cbar = plt.colorbar(cf, ax=ax, orientation='horizontal', pad=0.1)
-        cbar.set_label(f"{long_name} [{units}]" if units else long_name)
+        # Use xarray's built-in contourf plotting
+        cf = data.plot.contourf(
+            ax=ax,
+            x='lon',
+            y='lat',
+            levels=20,
+            cmap=cmap,
+            cbar_kwargs={'orientation': 'horizontal', 'pad': 0.1}
+        )
 
         ax.set_title(f"{long_name} Map{title_suffix}", fontweight='bold')
-        ax.set_xlabel("Longitude")
-        ax.set_ylabel("Latitude")
         ax.grid(True, linestyle='--', alpha=0.5)
 
     os.makedirs(out_dir, exist_ok=True)
@@ -431,9 +541,6 @@ def plot_spectrum(ds: xr.Dataset, var_name: str = None, target_height: float | N
             logger.info(f"Selecting first index for extra dimensions: {reduced_dims}")
             data = data.isel({dim: 0 for dim in reduced_dims})
 
-        x_vals = data[x_dim].values
-        valid_idx = x_vals > 0
-
         # Get metadata
         var_base = var.replace('_cl', '')
         long_name = ds[var].attrs.get('long_name',
@@ -443,7 +550,19 @@ def plot_spectrum(ds: xr.Dataset, var_name: str = None, target_height: float | N
             ds, var_base) else ''
         label = f"{long_name} ({units})" if units else long_name
 
-        ax.loglog(x_vals[valid_idx], data.values[valid_idx], label=label, linewidth=2)
+        # Slice data to only keep valid (positive) coordinates
+        data_valid = data.sel({x_dim: data[x_dim] > 0})
+
+        # Use xarray's built-in line plotting
+        data_valid.plot.line(
+            ax=ax,
+            x=x_dim,
+            xscale='log',
+            yscale='log',
+            label=label,
+            linewidth=2,
+            add_legend=False
+        )
 
     ax.set_xlabel("Spherical Harmonic Degree ($l$)", fontsize=12)
     ax.set_ylabel("Power / Energy", fontsize=12)

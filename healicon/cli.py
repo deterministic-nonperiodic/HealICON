@@ -10,6 +10,7 @@ import click
 from .cf_coords import _cf_guess
 from .core import run_sequential
 from .grid import get_spatial_dims
+from .io_utils import write_dataset
 
 
 def profile_command(func):
@@ -208,7 +209,7 @@ def extract_lat(ifile, ofile, lat, num_lons):
     out_ds = extract_along_latitude(ds, lat=lat, num_lons=num_lons)
 
     logger.info(f"Computing and saving extracted data to {ofile}")
-    out_ds.compute().to_netcdf(ofile)
+    write_dataset(out_ds, ofile)
     logger.info("Done.")
 
 
@@ -237,7 +238,7 @@ def extract_lon(ifile, ofile, lon, num_lats):
     ds = _load_and_ensure_healpix(ifile)
     out_ds = extract_along_longitude(ds, lon=lon, num_lats=num_lats)
     logger.info(f"Computing and saving extracted data to {ofile}")
-    out_ds.compute().to_netcdf(ofile)
+    write_dataset(out_ds, ofile)
     logger.info("Done.")
 
 
@@ -264,7 +265,7 @@ def extract_point(ifile, ofile, lat, lon):
     ds = _load_and_ensure_healpix(ifile)
     out_ds = ep(ds, lat=lat, lon=lon)
     logger.info(f"Computing and saving extracted data to {ofile}")
-    out_ds.compute().to_netcdf(ofile)
+    write_dataset(out_ds, ofile)
     logger.info("Done.")
 
 
@@ -297,7 +298,7 @@ def fill(ifile, ofile, spatial_dim, time_dim):
     out_ds = fill_healpix_gaps(ds, spatial_dim=spatial_dim, time_dim=time_dim)
 
     logger.info(f"Saving filled dataset to {ofile}")
-    out_ds.compute().to_netcdf(ofile)
+    write_dataset(out_ds, ofile)
     logger.info("Done.")
 
 
@@ -320,7 +321,7 @@ def zonal_mean(ifile, ofile):
     ds = _load_and_ensure_healpix(ifile)
     out_ds = zm(ds)
     logger.info(f"Computing and saving zonal mean to {ofile}")
-    out_ds.compute().to_netcdf(ofile)
+    write_dataset(out_ds, ofile)
     logger.info("Done.")
 
 
@@ -362,7 +363,7 @@ def spectrum(ifile, ofile, var_name, lmax, spectrum_type):
     actual_lmax = int(out_ds['l'].max())
     nyquist_km = degree_to_wavelength(actual_lmax)
     logger.info(f"Spectrum resolved up to lmax={actual_lmax} (~{nyquist_km:.0f} km Nyquist scale).")
-    out_ds.to_netcdf(ofile)
+    write_dataset(out_ds, ofile)
     logger.info("Done.")
 
 
@@ -394,7 +395,7 @@ def filter(ifile, ofile, fwhm, lmax, wavelength_km):
     ds = _load_and_ensure_healpix(ifile)
     out_ds = filter_spatial(ds, fwhm_deg=fwhm, lmax=lmax, wavelength_km=wavelength_km)
     logger.info(f"Computing and saving filtered data to {ofile}")
-    out_ds.compute().to_netcdf(ofile)
+    write_dataset(out_ds, ofile)
     logger.info("Done.")
 
 
@@ -439,7 +440,7 @@ def regrade(ifile, ofile, nside, zoom):
     except ValueError:
         out_ds = regrade_resolution(ds, new_nside=nside)
     logger.info(f"Computing and saving regraded data to {ofile}")
-    out_ds.compute().to_netcdf(ofile)
+    write_dataset(out_ds, ofile)
     logger.info("Done.")
 
 
@@ -472,7 +473,7 @@ def uv2dv(ifile, ofile, u_var, v_var, lmax):
         v_var = _guess_variable(ds, "v")
     out_ds = compute_vorticity_divergence(ds, u_var=u_var, v_var=v_var, lmax=lmax)
     logger.info(f"Computing and saving vorticity/divergence to {ofile}")
-    out_ds.compute().to_netcdf(ofile)
+    write_dataset(out_ds, ofile)
     logger.info("Done.")
 
 
@@ -505,7 +506,7 @@ def dv2uv(ifile, ofile, div_var, vor_var, lmax):
         vor_var = _guess_variable(ds, "vorticity")
     out_ds = compute_uv_from_vorticity_divergence(ds, div_var=div_var, vor_var=vor_var, lmax=lmax)
     logger.info(f"Computing and saving U/V to {ofile}")
-    out_ds.compute().to_netcdf(ofile)
+    write_dataset(out_ds, ofile)
     logger.info("Done.")
 
 
@@ -549,7 +550,7 @@ def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
     out_ds = compute_helmholtz(ds, u_var=u_var, v_var=v_var, lmax=lmax,
                                include_psi=psi, include_chi=chi)
     logger.info(f"Computing and saving Helmholtz decomposition to {ofile}")
-    out_ds.compute().to_netcdf(ofile)
+    write_dataset(out_ds, ofile)
     logger.info("Done.")
 
 
@@ -570,7 +571,7 @@ def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
 @click.option('--lmax', type=int, default=None, help='Max spherical harmonic degree.')
 @click.option('--time-dim', default='time', show_default=True,
               help='Dimension name for time-like axis (e.g., "time" or "lst").')
-@click.option('--method', default='ls', type=click.Choice(['ls', 'fourier', 'wavelet']),
+@click.option('--method', default='ls', type=click.Choice(['ls', 'fourier', 'sh']),
               show_default=True, help='Tidal analysis method to use.')
 @click.option('--temporal-mean/--no-temporal-mean', default=True, show_default=True,
               help='Average wavelet/fourier amplitudes over time (comparable to LS).')
@@ -655,25 +656,29 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim,
             ds, var_name=var_name, periods_hours=periods_hours,
             m_filters=m_filters, lmax=lmax, time_dim=time_dim
         )
-    elif method == 'wavelet':
+    elif method in ('sh', 'fourier'):
         from .analysis import compute_wavelet_tidal_analysis
         out_ds = compute_wavelet_tidal_analysis(
             ds, var_name=var_name, periods_hours=periods_hours,
             m_filters=m_filters, lmax=lmax, time_dim=time_dim,
-            dj=dj, temporal_mean=temporal_mean
-        )
-    elif method == 'fourier':
-        from .analysis import compute_fourier_tidal_analysis
-        out_ds = compute_fourier_tidal_analysis(
-            ds, var_name=var_name, periods_hours=periods_hours,
-            m_filters=m_filters, time_dim=time_dim,
-            dj=dj, temporal_mean=temporal_mean
+            dj=dj, temporal_mean=temporal_mean, method=method
         )
     else:
         raise click.UsageError(f"Unsupported method '{method}'.")
 
     logger.info(f"Computing and saving tidal analysis to {ofile}")
-    out_ds.compute().to_netcdf(ofile)
+    recommended = out_ds.attrs.pop('_recommended_dask_scheduler', None)
+    n_workers = int(out_ds.attrs.pop('_recommended_dask_num_workers', 1))
+    import dask
+    if recommended == 'synchronous' or n_workers == 1:
+        logger.debug("Scheduler: synchronous (1 block at a time)")
+        with dask.config.set(scheduler='synchronous'):
+            write_dataset(out_ds, ofile)
+    else:
+        logger.debug(f"Scheduler: threads with {n_workers} worker(s)")
+        with dask.config.set(scheduler='threads', num_workers=n_workers):
+            write_dataset(out_ds, ofile)
+
     logger.info("Done.")
 
 

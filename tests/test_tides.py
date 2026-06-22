@@ -7,7 +7,6 @@ from click.testing import CliRunner
 from healicon import (
     compute_leastsquares_tidal_analysis,
     compute_wavelet_tidal_analysis,
-    compute_fourier_tidal_analysis,
 )
 from healicon.cli import tides
 
@@ -63,8 +62,8 @@ def test_tides_methods(synthetic_healpix_ds):
     assert ds_wav['temp_amp_sym'].shape == (1, 1, ds.sizes['cells'])
     
     # 3. Fourier
-    ds_four = compute_fourier_tidal_analysis(
-        ds, 'temp', periods, m_filters, dj=0.1, temporal_mean=True, time_dim='lst'
+    ds_four = compute_wavelet_tidal_analysis(
+        ds, 'temp', periods, m_filters, dj=0.1, temporal_mean=True, time_dim='lst', method='fourier'
     )
     assert 'temp_amp_sym' in ds_four
     assert ds_four['temp_amp_sym'].shape == (1, 1, ds.sizes['cells'])
@@ -108,14 +107,14 @@ def test_tides_cli(tmp_path, synthetic_healpix_ds):
     assert ofile.exists()
     ofile.unlink()
     
-    # Test Wavelet CLI
+    # Test Wavelet CLI (sh)
     result = runner.invoke(tides, [
         str(ifile), str(ofile),
         '-v', 'temp',
         '-p', '24.0',
         '-m', '1',
         '--time-dim', 'lst',
-        '--method', 'wavelet',
+        '--method', 'sh',
         '--temporal-mean'
     ])
     assert result.exit_code == 0
@@ -123,7 +122,7 @@ def test_tides_cli(tmp_path, synthetic_healpix_ds):
     ofile.unlink()
 
     # Test --modes option for all three methods
-    for meth in ('ls', 'fourier', 'wavelet'):
+    for meth in ('ls', 'fourier', 'sh'):
         result = runner.invoke(tides, [
             str(ifile), str(ofile),
             '-v', 'temp',

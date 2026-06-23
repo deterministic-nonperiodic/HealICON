@@ -16,8 +16,15 @@ from ._common import (
     ensure_original_order, append_history, add_healpix_grid_mapping,
     ThreadPoolExecutor, get_progress_bar,
 )
-from .wavelet import (_sh_precompute_alm, _fourier_precompute_ring_coefs,
-                      fourier_wavelet_spectrum, _compute_lev_batch)
+from .wavelet import (
+    _sh_precompute_alm,
+    _sh_reconstruct_level,
+    _fourier_precompute_ring_coefs,
+    _fourier_reconstruct_level,
+    _get_symmetric_pixels,
+    _compute_lev_batch,
+    fourier_wavelet_spectrum,
+)
 from ..grid import get_healpix_coords
 
 
@@ -101,24 +108,6 @@ def _directional_filter_block(a_block, b_block, target_m, lmax, is_nested):
         _process_slice(0)
 
     return out_a.reshape(orig_shape), out_b.reshape(orig_shape)
-
-
-def _get_symmetric_pixels(nside, is_nested=False):
-    """
-    Returns an array of pixel indices that correspond to the exact reflection
-    across the equator for each pixel in a HEALPix grid.
-
-    Args:
-        nside: HEALPix resolution parameter
-        is_nested: Whether the HEALPix grid is in nested order
-
-    Returns:
-        Array of symmetric pixel indices
-    """
-    npix = hp.nside2npix(nside)
-    theta, phi = hp.pix2ang(nside, np.arange(npix), nest=is_nested)
-    theta_sym = np.pi - theta
-    return hp.ang2pix(nside, theta_sym, phi, nest=is_nested)
 
 
 def _extract_spatial_tide_components(da_cos: xr.DataArray, da_sin: xr.DataArray,
@@ -505,7 +494,6 @@ def _assemble_tidal_block(assembled, modes, periods_hours, var_name, var_units,
     return ds_2d.transpose(*expected_dims)
 
 
-
 def _wavelet_sh_analysis_block(
         da_block, modes, zwn_mode_groups, time_dim, cell_dim, hp_order,
         dt_hours, dj, temporal_mean, periods_hours, var_name, var_units,
@@ -517,8 +505,6 @@ def _wavelet_sh_analysis_block(
     ``_sh_precompute_alm``) and ``'_da_ref'`` (the original full DataArray,
     used to map block coordinates to linear level indices).
     """
-    from .wavelet import _sh_reconstruct_level
-
     non_core_dims = [d for d in da_block.dims if d not in (time_dim, cell_dim)]
 
     alm_cache = spectrum_kwargs['_alm_cache']
@@ -696,8 +682,6 @@ def _wavelet_fourier_analysis_block(
     nside = hp.npix2nside(npix)
     is_nested = hp_order == 'nested'
 
-    from .wavelet import _fourier_reconstruct_level
-
     assembled = {}
     for zwn, zwn_modes in zwn_mode_groups.items():
         cache = ring_cache[zwn]
@@ -862,9 +846,9 @@ def _iterate_tidal_analysis(
     n_periods_out = len(periods_hours)
     n_zwn_groups = len(zwn_mode_groups)
     bytes_per_block = (
-        8 * n_periods_out * n_zwn_groups * da.sizes[time_dim] * da.sizes[cell_dim] * 8
+            8 * n_periods_out * n_zwn_groups * da.sizes[time_dim] * da.sizes[cell_dim] * 8
     )
-    scheduler, n_workers = _recommend_dask_scheduler(bytes_per_block, budget_fraction=0.65)
+    scheduler, n_workers = _recommend_dask_scheduler(bytes_per_block, budget_fraction=0.8)
     out_ds.attrs['_recommended_dask_scheduler'] = scheduler
     out_ds.attrs['_recommended_dask_num_workers'] = n_workers
 

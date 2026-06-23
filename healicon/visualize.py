@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 
+from .cf_coords import _find_coordinate, _coord_is_meter
+
 logger = logging.getLogger(__name__)
 
 # Try to import cmasher, fallback to standard matplotlib cmaps
@@ -49,17 +51,20 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
     """
     set_publication_style()
 
-    vert_dims = [d for d in ['height', 'z_mc', 'altitude', 'plev'] if
-                 d in ds.coords or d in ds.dims]
-    if not vert_dims:
+    level_coord = _find_coordinate(ds, 'level', raise_notfound=False)
+    if level_coord is None:
         logger.error("Dataset missing height coordinate for tidal cross-section.")
         return
-    level_name = vert_dims[0]
+    level_name = level_coord.name
 
-    if 'lat' not in ds.dims:
+    lat_coord = _find_coordinate(ds, 'lat', raise_notfound=False)
+    lat_name = lat_coord.name if (
+                lat_coord is not None and lat_coord.ndim == 1 and lat_coord.name in ds.dims) else 'lat'
+
+    if lat_name not in ds.dims:
         # Raw HEALPix output — compute zonal mean on-the-fly.
         from .extract import zonal_mean
-        logger.info("'lat' coordinate not found — computing zonal mean before plotting.")
+        logger.info(f"'{lat_name}' coordinate not found — computing zonal mean before plotting.")
         try:
             # If 'time' is still present, collapse it first.
             # amp variables: linear temporal mean; pha variables: circular mean.
@@ -115,6 +120,7 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
                 ds_for_zm = ds_for_zm.drop_vars(list(cos_sin_map.keys()))
 
             ds = zonal_mean(ds_for_zm)
+            lat_name = 'lat'
 
             # Reconstruct phase from zonal-mean cos/sin
             for v, (cos_name, sin_name) in cos_sin_map.items():
@@ -126,9 +132,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
             logger.error(f"Automatic zonal mean failed: {exc}")
             return
 
-    if 'lat' in ds.dims and level_name in ds.dims:
-        ds = ds.sortby(['lat', level_name])
-
+    if lat_name in ds.dims and level_name in ds.dims:
+        ds = ds.sortby([lat_name, level_name])
 
     # Dynamic variable base name detection (detects e.g., 'temp' or 'u')
     amp_sym_vars = [v for v in ds.data_vars if v.endswith('_amp_sym')]
@@ -198,10 +203,10 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
         data = ds[var_name].sel(period=meta['period'], m=meta['m'], method='nearest')
 
         # Ensure correct dimension order: (height, lat)
-        if data.dims != (level_name, 'lat'):
-            data = data.transpose(level_name, 'lat')
+        if data.dims != (level_name, lat_name):
+            data = data.transpose(level_name, lat_name)
 
-        if level_name in ['z_mc', 'height', 'altitude']:
+        if _coord_is_meter(level_coord):
             data = data.assign_coords({level_name: data[level_name] / 1000.0})
             data[level_name].attrs['units'] = 'km'
             if 'long_name' not in data[level_name].attrs:
@@ -209,7 +214,7 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
 
         cf = data.plot.contourf(
             ax=ax,
-            x='lat',
+            x=lat_name,
             y=level_name,
             levels=levels,
             cmap='inferno',
@@ -236,9 +241,9 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
                 ax.set_xticklabels(lat_labels)
             ax.label_outer()
 
-    if level_name in ['z_mc', 'height', 'altitude']:
+    if _coord_is_meter(level_coord):
         axes[0].set_ylim(60, 110)
-    elif level_name == 'plev':
+    else:
         axes[0].invert_yaxis()
 
     fig.subplots_adjust(bottom=0.15, hspace=0.1, wspace=0.1)
@@ -267,10 +272,10 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
         data = ds[var_name].sel(period=meta['period'], m=meta['m'], method='nearest')
 
         # Ensure correct dimension order: (height, lat)
-        if data.dims != (level_name, 'lat'):
-            data = data.transpose(level_name, 'lat')
+        if data.dims != (level_name, lat_name):
+            data = data.transpose(level_name, lat_name)
 
-        if level_name in ['z_mc', 'height', 'altitude']:
+        if _coord_is_meter(level_coord):
             data = data.assign_coords({level_name: data[level_name] / 1000.0})
             data[level_name].attrs['units'] = 'km'
             if 'long_name' not in data[level_name].attrs:
@@ -278,7 +283,7 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
 
         cf_pha = data.plot.contourf(
             ax=ax,
-            x='lat',
+            x=lat_name,
             y=level_name,
             levels=levels_pha,
             cmap='twilight_shifted',
@@ -304,9 +309,9 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
                 ax.set_xticklabels(lat_labels)
             ax.label_outer()
 
-    if level_name in ['z_mc', 'height', 'altitude']:
+    if _coord_is_meter(level_coord):
         axes_pha[0].set_ylim(60, 110)
-    elif level_name == 'plev':
+    else:
         axes_pha[0].invert_yaxis()
 
     fig_pha.subplots_adjust(bottom=0.15, hspace=0.1, wspace=0.1)
@@ -350,7 +355,7 @@ def plot_section(ds: xr.Dataset, var_name: str, x_dim: str = 'lat', y_dim: str =
         logger.info(f"Averaging over additional dimensions: {reduced_dims}")
         data = data.mean(dim=reduced_dims)
 
-    if y_dim in ['z_mc', 'height', 'altitude']:
+    if y_dim in ds.coords and _coord_is_meter(ds[y_dim]):
         data = data.assign_coords({y_dim: data[y_dim] / 1000.0})
         data[y_dim].attrs['units'] = 'km'
         if 'long_name' not in data[y_dim].attrs:
@@ -377,7 +382,13 @@ def plot_section(ds: xr.Dataset, var_name: str, x_dim: str = 'lat', y_dim: str =
         ax.set_xticks([-60, -30, 0, 30, 60])
         ax.set_xticklabels(['60°S', '30°S', '0°', '30°N', '60°N'])
 
-    if y_dim == 'plev':
+    y_is_pressure = False
+    if y_dim in ds.coords:
+        units = str(ds[y_dim].attrs.get('units', '')).strip().lower()
+        if any(u in units for u in ('pa', 'hpa', 'mb', 'millibar', 'bar')):
+            y_is_pressure = True
+
+    if y_dim == 'plev' or y_is_pressure:
         ax.invert_yaxis()
         ax.set_yscale('log')
 
@@ -418,12 +429,10 @@ def plot_map(ds: xr.Dataset, var_name: str, target_height: float | None = None, 
 
     title_suffix = ""
     # Handle vertical level selection
-    vert_dims = [d for d in ['height', 'z_mc', 'altitude', 'plev'] if
-                 d in data.dims or d in ds.coords]
-    if vert_dims:
-        v_dim = vert_dims[0]
-        max_val_global = ds[v_dim].max().item() if v_dim in ds else 1000
-        is_meters = max_val_global > 500 and v_dim != 'plev'
+    level_coord = _find_coordinate(ds, 'level', raise_notfound=False)
+    if level_coord is not None:
+        v_dim = level_coord.name
+        is_meters = _coord_is_meter(level_coord)
 
         if target_height is not None:
             target_val = target_height * 1000.0 if is_meters else target_height
@@ -461,7 +470,9 @@ def plot_map(ds: xr.Dataset, var_name: str, target_height: float | None = None, 
         hp.mollview(arr, fig=fig.number, nest=is_nested, cmap=cmap,
                     title=f"{long_name}{title_suffix}", unit=units)
     else:
-        if 'lat' not in data.coords or 'lon' not in data.coords:
+        lat_coord = _find_coordinate(ds, 'lat', raise_notfound=False)
+        lon_coord = _find_coordinate(ds, 'lon', raise_notfound=False)
+        if lat_coord is None or lon_coord is None:
             logger.error("Dataset missing 'lat' or 'lon' coordinates for regular map.")
             return
 
@@ -469,8 +480,8 @@ def plot_map(ds: xr.Dataset, var_name: str, target_height: float | None = None, 
         # Use xarray's built-in contourf plotting
         cf = data.plot.contourf(
             ax=ax,
-            x='lon',
-            y='lat',
+            x=lon_coord.name,
+            y=lat_coord.name,
             levels=20,
             cmap=cmap,
             cbar_kwargs={'orientation': 'horizontal', 'pad': 0.1}
@@ -515,12 +526,10 @@ def plot_spectrum(ds: xr.Dataset, var_name: str = None, target_height: float | N
 
         title_suffix = ""
         # Handle vertical level selection
-        vert_dims = [d for d in ['height', 'z_mc', 'altitude', 'plev'] if
-                     d in data.dims or d in ds.coords]
-        if vert_dims:
-            v_dim = vert_dims[0]
-            max_val_global = ds[v_dim].max().item() if v_dim in ds else 1000
-            is_meters = max_val_global > 500 and v_dim != 'plev'
+        level_coord = _find_coordinate(ds, 'level', raise_notfound=False)
+        if level_coord is not None:
+            v_dim = level_coord.name
+            is_meters = _coord_is_meter(level_coord)
 
             if target_height is not None:
                 target_val = target_height * 1000.0 if is_meters else target_height

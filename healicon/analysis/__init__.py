@@ -48,7 +48,6 @@ from .helmholtz import (
 # --- Tidal analysis ---
 from .tides import (
     _directional_filter_block,
-    _get_symmetric_pixels,
     _extract_spatial_tide_components,
     compute_leastsquares_tidal_analysis,
     compute_wavelet_tidal_analysis,
@@ -56,6 +55,7 @@ from .tides import (
 
 # --- Wavelet analysis ---
 from .wavelet import (
+    _get_symmetric_pixels,
     fourier_wavelet_spectrum,
     spherical_harmonic_wavelet_spectrum,
 )

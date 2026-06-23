@@ -210,12 +210,21 @@ def get_spatial_dims(ds: xr.Dataset) -> list[str]:
     Return the list of spatial dimension names present in the dataset,
     by inspecting known lon/lat coordinate names and the cell dimension.
     """
+    from .cf_coords import _find_coordinate
     spatial_dims = []
-    for name in LONLAT_COORD_NAMES:
-        if name in ds.coords or name in ds.data_vars:
-            for dim in ds[name].dims:
-                if dim not in spatial_dims:
-                    spatial_dims.append(dim)
+    
+    lon_coord = _find_coordinate(ds, 'lon', raise_notfound=False)
+    if lon_coord is not None:
+        for dim in lon_coord.dims:
+            if dim not in spatial_dims:
+                spatial_dims.append(dim)
+                
+    lat_coord = _find_coordinate(ds, 'lat', raise_notfound=False)
+    if lat_coord is not None:
+        for dim in lat_coord.dims:
+            if dim not in spatial_dims:
+                spatial_dims.append(dim)
+                
     try:
         cell_dim = get_cells_dim(ds)
         if cell_dim not in spatial_dims:

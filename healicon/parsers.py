@@ -4,6 +4,8 @@ import healpy as hp
 import numpy as np
 import xarray as xr
 
+from .cf_coords import _find_coordinate
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,16 +23,32 @@ def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None) -> xr.Da
     cell_area = 4 * np.pi / npix
 
     # Ensure required coordinates exist
-    if 'tplatitude' not in ds or 'tplongitude' not in ds:
-        raise ValueError("SABER parser requires 'tplatitude' and 'tplongitude' variables.")
+    lat_coord = _find_coordinate(ds, 'lat', raise_notfound=False)
+    lon_coord = _find_coordinate(ds, 'lon', raise_notfound=False)
+    level_coord = _find_coordinate(ds, 'level', raise_notfound=False)
+
+    if lat_coord is None or lon_coord is None:
+        raise ValueError("SABER parser requires latitude and longitude coordinates.")
+    alt_name = None
+    if level_coord is not None:
+        alt_name = level_coord.name
+    else:
+        # Fallback: check if any of the dimensions look like a level coordinate
+        for dim in ds.dims:
+            dim_lower = str(dim).lower()
+            if any(pat in dim_lower for pat in
+                   ('altitude', 'height', 'z_mc', 'level', 'lev', 'plev')):
+                alt_name = str(dim)
+                break
+        if alt_name is None:
+            raise ValueError("SABER parser requires altitude/level coordinate or dimension.")
 
     # Convert coordinates to numpy arrays and handle missing values
-    lat = ds['tplatitude'].values
-    lon = ds['tplongitude'].values
+    lat = lat_coord.values
+    lon = lon_coord.values
 
     # NetCDF definition uses -999.f for missing values. Also check for NaN.
-    # The attributes might give us the exact missing value, but we can hardcode for SABER.
-    missing_val = ds['tplatitude'].attrs.get('missing_value', -999.0)
+    missing_val = lat_coord.attrs.get('missing_value', -999.0)
 
     # Valid mask for coordinates
     valid_coords = (lat != missing_val) & (lon != missing_val) & (~np.isnan(lat)) & (~np.isnan(lon))
@@ -44,7 +62,7 @@ def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None) -> xr.Da
     phi_safe = np.where(valid_coords, phi, 0.0)
     pix = hp.ang2pix(nside, theta_safe, phi_safe)
 
-    n_alt = ds.sizes['altitude']
+    n_alt = ds.sizes[alt_name]
 
     # We will build a new dataset with dimensions (altitude, cells)
     # Handle UT extraction and binning
@@ -65,16 +83,14 @@ def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None) -> xr.Da
         ut_indices = np.clip(np.where(valid_coords, ut_indices_raw, 0), 0, ut_bins - 1)
 
         out_coords = {
-            'altitude': ds[
-                'altitude'].values if 'altitude' in ds.coords or 'altitude' in ds else np.arange(
+            alt_name: level_coord.values if alt_name in ds.coords or alt_name in ds else np.arange(
                 n_alt),
             'cells': np.arange(npix),
             'ut': np.linspace(0, 24, ut_bins, endpoint=False) + (12.0 / ut_bins)  # Bin centers
         }
     else:
         out_coords = {
-            'altitude': ds[
-                'altitude'].values if 'altitude' in ds.coords or 'altitude' in ds else np.arange(
+            alt_name: level_coord.values if alt_name in ds.coords or alt_name in ds else np.arange(
                 n_alt),
             'cells': np.arange(npix)
         }
@@ -139,7 +155,7 @@ def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None) -> xr.Da
             # We can also bin tpSolarZen if useful.
             pass
 
-        if 'event' in ds[var].dims and 'altitude' in ds[var].dims:
+        if 'event' in ds[var].dims and alt_name in ds[var].dims:
             logger.info(f"Binning SABER variable {var} to HEALPix...")
             d_val = ds[var].values
             m_val = ds[var].attrs.get('missing_value', missing_val)
@@ -147,7 +163,7 @@ def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None) -> xr.Da
             binned_data = bin_var(d_val, m_val, valid_coords)
 
             # Some variables might be integer (like time), convert out to float to support NaN
-            dims_out = ['altitude', 'cells'] if ut_bins is None else ['altitude', 'cells', 'ut']
+            dims_out = [alt_name, 'cells'] if ut_bins is None else [alt_name, 'cells', 'ut']
             out_ds[var] = xr.DataArray(
                 binned_data,
                 dims=dims_out,

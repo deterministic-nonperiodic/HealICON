@@ -24,13 +24,13 @@ import xarray as xr
 from scipy.optimize import fminbound
 from scipy.special import gamma, gammainc
 
-from healicon.grid import (get_cells_dim, get_healpix_order,
-                           add_healpix_grid_mapping,
-                           get_healpix_coords, ensure_original_order)
+from ._common import get_progress_bar
+from ..grid import (get_cells_dim, get_healpix_order,
+                    add_healpix_grid_mapping,
+                    get_healpix_coords, ensure_original_order)
 
 logger = logging.getLogger(__name__)
 logging.getLogger('healpy').setLevel(logging.WARNING)
-from ._common import get_progress_bar
 
 
 @lru_cache(maxsize=4)
@@ -437,11 +437,18 @@ def _compute_cwt_coefficients(Ck: np.ndarray, Sk: np.ndarray, dt: float, dj: flo
 def _calculate_amplitudes_and_phases(Ak: np.ndarray, Bk: np.ndarray, ak: np.ndarray,
                                      bk: np.ndarray, compute_phase: bool = True):
     """Computes westward/eastward amplitudes and phases from wavelet coefficients."""
-    Rw = 0.5 * np.sqrt((Ak - bk) ** 2 + (Bk + ak) ** 2)
-    Re = 0.5 * np.sqrt((Ak + bk) ** 2 + (Bk - ak) ** 2)
+    # The four combinations below are the real/imag parts of the westward and
+    # eastward analytic signals; each was previously recomputed once for the
+    # amplitude and again inside arctan2 for the phase. Compute them once.
+    w_re = Ak - bk  # westward real
+    w_im = Bk + ak  # westward imag
+    e_re = Ak + bk  # eastward real
+    e_im = Bk - ak  # eastward imag
+    Rw = 0.5 * np.sqrt(w_re ** 2 + w_im ** 2)
+    Re = 0.5 * np.sqrt(e_re ** 2 + e_im ** 2)
     if compute_phase:
-        Pw = np.arctan2(Bk + ak, Ak - bk)
-        Pe = np.arctan2(Bk - ak, Ak + bk)
+        Pw = np.arctan2(w_im, w_re)
+        Pe = np.arctan2(e_im, e_re)
     else:
         Pw, Pe = None, None
     return Rw, Re, Pw, Pe
@@ -453,14 +460,7 @@ def _calculate_amplitudes_and_phases(Ak: np.ndarray, Bk: np.ndarray, ak: np.ndar
 
 @lru_cache(maxsize=8)
 def _get_ring2nest(nside: int) -> np.ndarray:
-    """Cached RING->NEST pixel permutation for a given nside.
-
-    fourier_wavelet_spectrum previously called hp.ring2nest(nside, ...)
-    fresh every invocation, and (inside the assign_to_cells closure) called
-    hp.nest2ring(nside, ...) fresh on every one of up to ~10 calls per
-    invocation, even though the permutation depends only on nside. Caching
-    it removes that repeated work without changing any values.
-    """
+    """Cached RING->NEST pixel permutation for a given nside."""
     return hp.ring2nest(nside, np.arange(hp.nside2npix(nside)))
 
 
@@ -469,6 +469,25 @@ def _get_nest2ring(nside: int) -> np.ndarray:
     """Cached NEST->RING pixel permutation for a given nside (see
     _get_ring2nest above for rationale)."""
     return hp.nest2ring(nside, np.arange(hp.nside2npix(nside)))
+
+
+def _get_symmetric_pixels(nside: int, is_nested: bool = False) -> np.ndarray:
+    """Return pixel indices of the equatorial reflection for each HEALPix pixel.
+
+    For each pixel *p*, returns the pixel index that corresponds to flipping
+    the colatitude ``theta`` to ``pi - theta`` (i.e. reflecting across the
+    equator) while keeping the longitude ``phi`` fixed.
+
+    Args:
+        nside: HEALPix resolution parameter.
+        is_nested: Whether the grid uses NESTED ordering.
+
+    Returns:
+        Integer array of length ``hp.nside2npix(nside)``.
+    """
+    npix = hp.nside2npix(nside)
+    theta, phi = hp.pix2ang(nside, np.arange(npix), nest=is_nested)
+    return hp.ang2pix(nside, np.pi - theta, phi, nest=is_nested)
 
 
 # --------------------------------------------------------------------------
@@ -1003,10 +1022,14 @@ def _sh_precompute_alm(
                 data_np = hp.reorder(data_np.reshape(-1, n_cell), n2r=True)
                 data_np = data_np.reshape(orig_shape)
 
-            has_nan = bool(np.isnan(np.sum(data_np)))
+            # Single NaN scan reused for all three derived quantities, rather
+            # than scanning the full (n_time, batch, npix) array three times
+            # (np.isnan(np.sum(...)) + np.where's isnan + .all()'s isnan).
+            nan_mask = np.isnan(data_np)
+            has_nan = bool(nan_mask.any())
             if has_nan:
-                filled = np.where(np.isnan(data_np), 0.0, data_np)
-                all_nan = np.isnan(data_np).all(axis=-1)
+                filled = np.where(nan_mask, 0.0, data_np)
+                all_nan = nan_mask.all(axis=-1)
                 eff_iter = map2alm_iter
 
                 def _alm_fn(args, _f=filled, _an=all_nan, _bs=batch_start, _it=eff_iter):
@@ -1087,8 +1110,6 @@ def _sh_reconstruct_level(
         requested period: ``(actual_p, direction, sa, ap)`` keys mapping to
         ``(n_time, npix)`` arrays.
     """
-    from .tides import _get_symmetric_pixels
-
     npix = hp.nside2npix(nside)
     n_time = A_lm_lev.shape[0]
 
@@ -1169,8 +1190,19 @@ def _sh_reconstruct_level(
             del sym, asy
 
         if is_nested:
-            for arr in [aw_s, aw_a, pw_s, pw_a, ae_s, ae_a, pe_s, pe_a]:
-                arr[:] = ensure_original_order(arr, 'nested')
+            # ensure_original_order returns a fresh reordered array (fancy
+            # indexing copies), so assign its result straight into `result`
+            # rather than writing it back into the source buffer first — the
+            # previous `arr[:] = ...` form did an extra full-size copy per
+            # array (8 arrays per requested period) for no benefit.
+            aw_s = ensure_original_order(aw_s, 'nested')
+            aw_a = ensure_original_order(aw_a, 'nested')
+            pw_s = ensure_original_order(pw_s, 'nested')
+            pw_a = ensure_original_order(pw_a, 'nested')
+            ae_s = ensure_original_order(ae_s, 'nested')
+            ae_a = ensure_original_order(ae_a, 'nested')
+            pe_s = ensure_original_order(pe_s, 'nested')
+            pe_a = ensure_original_order(pe_a, 'nested')
 
         result[(actual_p, 'westward', 'sym', 'amp')] = aw_s
         result[(actual_p, 'westward', 'asy', 'amp')] = aw_a

@@ -1,16 +1,16 @@
-import shutil
 import logging
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Tuple, Optional
 
-import dask
 import xarray as xr
 from dask.base import is_dask_collection
 
 try:
     # pyrefly: ignore [missing-import]
     import zarr as _zarr
+
     _ZARR_AVAILABLE = True
 except ImportError:
     _ZARR_AVAILABLE = False
@@ -61,13 +61,13 @@ def _resolve_store_and_path(path: Path | str, store_type: Optional[str] = None) 
 
 
 def write_dataset(
-    ds: xr.Dataset,
-    ofile: Optional[str | Path] = None,
-    overwrite: bool = True,
-    store_type: Optional[str] = None,
-    client=None,
-    engine: str = "netcdf4",
-    cfg=None
+        ds: xr.Dataset,
+        ofile: Optional[str | Path] = None,
+        overwrite: bool = True,
+        store_type: Optional[str] = None,
+        client=None,
+        engine: str = "netcdf4",
+        cfg=None
 ) -> None:
     """
     Write a Dask-backed xarray.Dataset to disk efficiently.

@@ -128,9 +128,8 @@ def _find_coordinate(ds: xr.Dataset, name: str,
         The found coordinate, or None if not found and raise_notfound=False
     """
     # Try exact name match first
-    coord = ds.coords.get(name)
-    if coord is not None:
-        return coord
+    if name in ds.variables:
+        return ds[name]
 
     if name not in _CF_COORDS_LOOKUP:
         raise ValueError(
@@ -185,8 +184,8 @@ def _find_coordinate(ds: xr.Dataset, name: str,
 
         return False
 
-    # Search through all coordinates, not just dimension coordinates
-    candidates = [coord for _, coord in ds.coords.items() if matches_criteria(coord)]
+    # Search through all variables, not just coordinates
+    candidates = [ds[var_name] for var_name in ds.variables if matches_criteria(ds[var_name])]
 
     if check_duplicates and len(candidates) > 1:
         raise ValueError(f"Multiple {name} coordinates found: {[c.name for c in candidates]}")

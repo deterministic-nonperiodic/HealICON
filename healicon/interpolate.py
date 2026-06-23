@@ -4,7 +4,7 @@ import math
 import numpy as np
 import xarray as xr
 
-from .grid import get_healpix_coords, LONLAT_COORD_NAMES, append_history, add_healpix_grid_mapping
+from .grid import get_healpix_coords, append_history, add_healpix_grid_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +80,18 @@ class HealpixInterpolator:
         self._source_lat = None
 
     def _determine_nside(self, ds: xr.Dataset):
+        from .cf_coords import _find_coordinate
         spatial_dims = []
-        for name in LONLAT_COORD_NAMES:
-            if name in ds.coords or name in ds.data_vars:
-                for dim in ds[name].dims:
-                    if dim not in spatial_dims:
-                        spatial_dims.append(dim)
+        lon_coord = _find_coordinate(ds, "lon", raise_notfound=False)
+        lat_coord = _find_coordinate(ds, "lat", raise_notfound=False)
+        if lon_coord is not None:
+            for dim in lon_coord.dims:
+                if dim not in spatial_dims:
+                    spatial_dims.append(dim)
+        if lat_coord is not None:
+            for dim in lat_coord.dims:
+                if dim not in spatial_dims:
+                    spatial_dims.append(dim)
         if not spatial_dims:
             raise ValueError("nside must be provided if spatial dimensions cannot be determined.")
         n_orig = 1
@@ -181,6 +187,7 @@ class HealpixInterpolator:
             k = 3
             if self.use_gpu:
                 try:
+                    # pyrefly: ignore [missing-import]
                     import cuml
                     logger.info("Using cuML for KDTree with GPU support.")
                     nn = cuml.neighbors.NearestNeighbors(n_neighbors=k)

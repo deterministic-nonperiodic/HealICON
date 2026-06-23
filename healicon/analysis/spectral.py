@@ -12,6 +12,7 @@ from ._common import (
     degree_to_wavelength, get_healpix_order, get_cells_dim, ensure_ring, append_history,
     ThreadPoolExecutor, get_progress_bar,
 )
+from ..cf_coords import _cf_guess
 
 
 def _anafast_block(*args, lmax=None, is_nested=False, op_type='power'):
@@ -104,6 +105,18 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
     If var_name is None, computes the spectrum for all data variables in the dataset that are defined
     on the HEALPix grid. Supported spectrum types: 'power' (default), 'cross', 'kinetic'
 
+    Note:
+        For computing kinetic energy spectra, using `spectrum_type="kinetic"` is superior to
+        computing the "power" spectrum on both velocity components individually and averaging them
+        via `(u_pow + v_pow) / 2`. While the difference may be small at small scales (high spherical
+        harmonic degrees l), it is significant at large scales (low l). The reason is that
+        velocity components u and v constitute a tangent vector field on the sphere rather than
+        scalar fields. Treating them as independent scalars ignores the spherical geometry and coordinate
+        singularities at the poles. The vector field must instead be decomposed using spin-weighted
+        (spin-1) spherical harmonics to resolve it into coordinate-invariant gradient (E-mode/divergence)
+        and curl (B-mode/vorticity) components. The true, coordinate-invariant kinetic energy spectrum
+        is then given by the sum of these components: KE(l) = 0.5 * (C_l^E + C_l^B).
+
     Args:
         ds: Input dataset
         var_name: Name of the variable to compute the spectrum for (optional)
@@ -130,15 +143,18 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
 
     # Auto-detect variables for kinetic energy if not explicitly provided
     if spectrum_type == 'kinetic' and not var_names:
-        if 'u' in ds and 'v' in ds:
-            var_names = ['u', 'v']
-            logger.info("Auto-detected wind components 'u' and 'v' for kinetic energy spectrum.")
-        elif 'divergence' in ds and 'vorticity' in ds:
-            var_names = ['divergence', 'vorticity']
-            logger.info("Auto-detected 'divergence' and 'vorticity' for kinetic energy spectrum.")
-        elif 'div' in ds and 'vor' in ds:
-            var_names = ['div', 'vor']
-            logger.info("Auto-detected 'div' and 'vor' for kinetic energy spectrum.")
+        u_name = _cf_guess(ds, "u")
+        v_name = _cf_guess(ds, "v")
+        div_name = _cf_guess(ds, "divergence")
+        vor_name = _cf_guess(ds, "vorticity")
+
+        if u_name and v_name:
+            var_names = [u_name, v_name]
+            logger.info(
+                f"Auto-detected wind components '{u_name}' and '{v_name}' for kinetic energy spectrum.")
+        elif div_name and vor_name:
+            var_names = [div_name, vor_name]
+            logger.info(f"Auto-detected '{div_name}' and '{vor_name}' for kinetic energy spectrum.")
         else:
             raise ValueError(
                 "Could not auto-detect variables for kinetic energy spectrum. Please specify using --var.")

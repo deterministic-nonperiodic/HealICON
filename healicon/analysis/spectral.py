@@ -3,6 +3,8 @@ Spectral analysis: power spectra, cross-spectra, and kinetic energy spectra
 using spherical harmonic transforms.
 """
 
+from concurrent.futures import as_completed as _as_completed
+
 import healpy as hp
 import numpy as np
 import xarray as xr
@@ -19,83 +21,88 @@ def _anafast_block(*args, lmax=None, is_nested=False, op_type='power'):
     """
     Internal helper function to compute the angular power spectrum (Cl) of one or more variables
     using spherical harmonics.
-    
+
     Args:
-        *args: One or more arrays of data (should be )
+        *args: One or more arrays of data (should be HEALPix maps)
         lmax: Maximum spherical harmonic degree (optional)
         is_nested: Whether the input data is in nested order
-        op_type: Type of spectrum to compute ('power', 'cross', 'kinetic')
+        op_type: Type of spectrum to compute ('power', 'cross', 'kinetic-spin1', 'kinetic-scalar')
 
     Returns:
-        Dataset containing the power spectrum
+        Array of shape (*leading_dims, lmax+1) containing the power spectrum.
     """
     data_blocks = args
 
     orig_shape = data_blocks[0].shape
     npix = orig_shape[-1]
+    n_l = lmax + 1
 
-    import warnings
-
-    # Vectorize pre-processing (ordering, NaN checks, and mean filling) across all slices
+    # --- Pre-processing: ordering, NaN fill, and validity mask ---
     prepared_2ds = []
     valid_masks = []
     for block in data_blocks:
         d_2d = block.reshape(-1, npix)
         d_2d_ring = ensure_ring(d_2d, 'nested' if is_nested else 'ring')
 
-        valid_mask = ~np.isnan(d_2d_ring)
+        valid_mask = ~np.isnan(d_2d_ring)  # shape (n, npix)
 
-        # Calculate mean for each map, ignoring all-NaN slice warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            means = np.nanmean(d_2d_ring, axis=-1, keepdims=True)
+        # Fill NaN pixels with the per-slice mean.
+        # Use nansum/count instead of nanmean to avoid RuntimeWarning on all-NaN slices.
+        # All-NaN rows get fill=0.0, which is harmless: they are already flagged invalid below.
+        count = np.maximum(valid_mask.sum(axis=-1, keepdims=True), 1)
+        means = np.nansum(d_2d_ring, axis=-1, keepdims=True) / count
 
-        d_filled = np.where(valid_mask, d_2d_ring, means)
-        prepared_2ds.append(d_filled)
+        prepared_2ds.append(np.where(valid_mask, d_2d_ring, means))
         valid_masks.append(valid_mask)
 
-    # A slice is valid only if it has at least one valid pixel in every variable
-    is_slice_valid = np.all([np.any(mask, axis=-1) for mask in valid_masks], axis=0)
+    n = prepared_2ds[0].shape[0]
 
-    n_l = lmax + 1
-    out_data = np.zeros((prepared_2ds[0].shape[0], n_l), dtype=prepared_2ds[0].dtype)
+    # Vectorised validity check: a slice is valid when every variable has ≥1 finite pixel
+    # valid_masks[k] has shape (n, npix); any(axis=-1) → (n,); stack + all(axis=0) → (n,)
+    is_slice_valid = np.all(
+        np.stack([m.any(axis=-1) for m in valid_masks], axis=0), axis=0
+    )  # shape (n,)
 
-    # Pre-compute scalar kinetic factors once (outside thread loop)
+    # Output is always float64 – spectral coefficients require full precision
+    out_data = np.empty((n, n_l), dtype=np.float64)
+    out_data[~is_slice_valid] = np.nan
+
+    # Pre-compute l-dependent kinetic-scalar factor once per call
     if op_type == 'kinetic-scalar':
-        l = np.arange(lmax + 1)
-        l_fac = np.zeros_like(l, dtype=float)
-        l_fac[1:] = 1.0 / (l[1:] * (l[1:] + 1))
-        R_sq = (EARTH_RADIUS_KM * 1000) ** 2
+        l_arr = np.arange(n_l, dtype=np.float64)
+        l_fac = np.zeros(n_l, dtype=np.float64)
+        l_fac[1:] = 1.0 / (l_arr[1:] * (l_arr[1:] + 1.0))
+        R_sq = (EARTH_RADIUS_KM * 1_000.0) ** 2
 
     def _process_slice(i):
-        if not is_slice_valid[i]:
-            out_data[i] = np.nan
-            return
-        d_filled_list = [d[i] for d in prepared_2ds]
+        slices = [d[i] for d in prepared_2ds]
         if op_type == 'power':
-            out_data[i] = hp.anafast(d_filled_list[0], lmax=lmax)
+            out_data[i] = hp.anafast(slices[0], lmax=lmax)
         elif op_type == 'cross':
-            out_data[i] = hp.anafast(d_filled_list[0], map2=d_filled_list[1], lmax=lmax)
+            out_data[i] = hp.anafast(slices[0], map2=slices[1], lmax=lmax)
         elif op_type == 'kinetic-spin1':
-            alm_E, alm_B = hp.map2alm_spin([d_filled_list[0], d_filled_list[1]], spin=1, lmax=lmax)
+            alm_E, alm_B = hp.map2alm_spin([slices[0], slices[1]], spin=1, lmax=lmax)
             out_data[i] = 0.5 * (hp.alm2cl(alm_E) + hp.alm2cl(alm_B))
         elif op_type == 'kinetic-scalar':
-            cl_D = hp.anafast(d_filled_list[0], lmax=lmax)
-            cl_Z = hp.anafast(d_filled_list[1], lmax=lmax)
+            cl_D = hp.anafast(slices[0], lmax=lmax)
+            cl_Z = hp.anafast(slices[1], lmax=lmax)
             out_data[i] = 0.5 * R_sq * l_fac * (cl_D + cl_Z)
 
-    n = prepared_2ds[0].shape[0]
-    if n > 1:
-        from concurrent.futures import as_completed
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            futures = [pool.submit(_process_slice, i) for i in range(n)]
-            for f in get_progress_bar(as_completed(futures), desc="Spectral analysis", total=n):
-                f.result()
-    else:
-        _process_slice(0)
+    valid_indices = np.where(is_slice_valid)[0]
 
-    out_shape = orig_shape[:-1] + (n_l,)
-    return out_data.reshape(out_shape)
+    if len(valid_indices) == 0:
+        pass  # all slices invalid – out_data already filled with NaN
+    elif len(valid_indices) == 1:
+        _process_slice(valid_indices[0])
+    else:
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            futures = [pool.submit(_process_slice, i) for i in valid_indices]
+            for f in get_progress_bar(
+                    _as_completed(futures), desc="Spectral analysis", total=len(valid_indices)
+            ):
+                f.result()  # propagate any worker exception immediately
+
+    return out_data.reshape(orig_shape[:-1] + (n_l,))
 
 
 def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
@@ -126,6 +133,7 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
     Returns:
         Dataset containing the power spectrum
     """
+
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'
     npix = ds.sizes[cell_dim]
@@ -134,12 +142,13 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
     if lmax is None:
         lmax = 3 * nside - 1
 
-    var_names = []
-    if var_name is not None:
-        if isinstance(var_name, str):
-            var_names = [var_name]
-        else:
-            var_names = list(var_name)
+    # --- Resolve variable names ---
+    if var_name is None:
+        var_names = []
+    elif isinstance(var_name, str):
+        var_names = [var_name]
+    else:
+        var_names = list(var_name)
 
     # Auto-detect variables for kinetic energy if not explicitly provided
     if spectrum_type == 'kinetic' and not var_names:
@@ -161,22 +170,32 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
 
     if not var_names and spectrum_type == 'power':
         exclude = {'lon', 'lat', 'clon', 'clat'}
-        for v in ds.data_vars:
-            if cell_dim in ds[v].dims:
-                v_str = str(v)
-                if v_str not in exclude and not v_str.endswith('_bnds') and not v_str.endswith(
-                        '_bounds'):
-                    var_names.append(v_str)
+        var_names = [
+            str(v) for v in ds.data_vars
+            if cell_dim in ds[v].dims
+               and str(v) not in exclude
+               and not str(v).endswith('_bnds')
+               and not str(v).endswith('_bounds')
+        ]
         if not var_names:
             raise ValueError(
                 f"No variables found with spatial dimension '{cell_dim}' to compute spectrum.")
 
     if spectrum_type in ('cross', 'kinetic') and len(var_names) != 2:
         raise ValueError(
-            f"Spectrum type '{spectrum_type}' requires exactly 2 variables, but got {len(var_names)}: {var_names}")
+            f"Spectrum type '{spectrum_type}' requires exactly 2 variables, "
+            f"but got {len(var_names)}: {var_names}"
+        )
 
     l_coords = np.arange(lmax + 1)
     out_ds = xr.Dataset(coords={'l': l_coords})
+
+    # Shared apply_ufunc kwargs
+    _ufunc_kw = dict(
+        dask="parallelized",
+        output_core_dims=[['l']],
+        dask_gufunc_kwargs={'output_sizes': {'l': len(l_coords)}, 'allow_rechunk': True},
+    )
 
     if spectrum_type == 'power':
         for v in var_names:
@@ -186,25 +205,23 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
                 ds[v],
                 kwargs={'lmax': lmax, 'is_nested': is_nested, 'op_type': 'power'},
                 input_core_dims=[[cell_dim]],
-                output_core_dims=[['l']],
-                dask="parallelized",
-                output_dtypes=[ds[v].dtype],
-                dask_gufunc_kwargs={'output_sizes': {'l': len(l_coords)}, 'allow_rechunk': True}
+                output_dtypes=[np.float64],
+                **_ufunc_kw,
             )
-            out_ds[f"{v}_cl"] = da
-            out_ds[f"{v}_cl"].attrs = ds[v].attrs.copy()
-            orig_units = ds[v].attrs.get('units', '').strip()
+            cl_name = f"{v}_cl"
+            out_ds[cl_name] = da
+            attrs = ds[v].attrs.copy()
+            orig_units = attrs.get('units', '').strip()
             if orig_units:
                 try:
-                    new_units = str((_parse_units(orig_units) ** 2).units)
+                    attrs['units'] = str((_parse_units(orig_units) ** 2).units)
                 except Exception:
-                    # Fallback if pint fails to parse
-                    new_units = f"({orig_units})2" if any(
-                        c in orig_units for c in [' ', '/', '^', '-']) else f"{orig_units}2"
-                out_ds[f"{v}_cl"].attrs['units'] = new_units
+                    has_special = any(c in orig_units for c in (' ', '/', '^', '-'))
+                    attrs['units'] = f"({orig_units})2" if has_special else f"{orig_units}2"
+            orig_name = attrs.get('long_name', attrs.get('standard_name', v))
+            attrs['long_name'] = f"Power spectrum of {orig_name}"
+            out_ds[cl_name].attrs = attrs
 
-            orig_name = ds[v].attrs.get('long_name', ds[v].attrs.get('standard_name', v))
-            out_ds[f"{v}_cl"].attrs['long_name'] = f"Power spectrum of {orig_name}"
     else:
         v1, v2 = var_names
         if spectrum_type == 'cross':
@@ -214,14 +231,13 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
         else:  # kinetic
             logger.info(
                 f"Computing kinetic energy spectrum using '{v1}' and '{v2}' up to lmax={lmax}.")
-            # Check units to decide between wind components (spin-1) and div/vor (scalar)
             units1 = str(ds[v1].attrs.get('units', '')).strip().lower()
-            if units1 in ('s-1', 's^-1', '1/s') or v1 in ('divergence', 'div', 'vorticity', 'vor'):
-                # Assume divergence and vorticity in s^-1
-                op_type = 'kinetic-scalar'
-            else:
-                # Assume vector wind components (u, v) in m/s
-                op_type = 'kinetic-spin1'
+            op_type = (
+                'kinetic-scalar'
+                if units1 in ('s-1', 's^-1', '1/s') or v1 in ('divergence', 'div', 'vorticity',
+                                                              'vor')
+                else 'kinetic-spin1'
+            )
             out_name = "kinetic_energy_cl"
 
         da = xr.apply_ufunc(
@@ -229,15 +245,13 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
             ds[v1], ds[v2],
             kwargs={'lmax': lmax, 'is_nested': is_nested, 'op_type': op_type},
             input_core_dims=[[cell_dim], [cell_dim]],
-            output_core_dims=[['l']],
-            dask="parallelized",
-            output_dtypes=[ds[v1].dtype],
-            dask_gufunc_kwargs={'output_sizes': {'l': len(l_coords)}, 'allow_rechunk': True}
+            output_dtypes=[np.float64],
+            **_ufunc_kw,
         )
         out_ds[out_name] = da
         if spectrum_type == 'kinetic':
-            out_ds[out_name].attrs['units'] = 'm2 s-2'
-            out_ds[out_name].attrs['long_name'] = 'Kinetic Energy Spectrum'
+            out_ds[out_name].attrs.update(
+                {'units': 'm2 s-2', 'long_name': 'Kinetic Energy Spectrum'})
 
     # Attach wavelength as a secondary coordinate on l for convenience
     wavelength_km = degree_to_wavelength(np.maximum(l_coords, 1))  # avoid l=0 singularity
@@ -247,13 +261,28 @@ def compute_spectrum(ds: xr.Dataset, var_name: str | list[str] | None = None,
         'units': 'km',
     }
 
+    # Forward non-spatial coordinates from the first variable.
+    # Exclude HEALPix grid coordinates — the output lives in l-space, not pixel-space.
     first_var = var_names[0]
+    _healpix_coord_prefixes = ('healpix_', 'grid_mapping')
+    coords_to_skip = {cell_dim, 'l', 'lat', 'lon'}
+    coords_to_skip.update(
+        c for c in ds[first_var].coords
+        if any(c.startswith(p) for p in _healpix_coord_prefixes)
+    )
     for coord in ds[first_var].coords:
-        if coord not in [cell_dim, 'l', 'lat', 'lon'] and coord in ds.coords:
+        if coord not in coords_to_skip and coord in ds.coords:
             out_ds.coords[coord] = ds.coords[coord]
 
     out_ds.l.attrs = {"long_name": "Spherical harmonic degree (l)"}
-    out_ds.attrs = ds.attrs
+
+    # Copy global attrs but drop any HEALPix / grid-mapping references that are
+    # no longer meaningful for an l-space dataset.
+    _healpix_attr_prefixes = ('healpix_', 'grid_mapping')
+    out_ds.attrs = {
+        k: v for k, v in ds.attrs.items()
+        if not any(k.startswith(p) for p in _healpix_attr_prefixes)
+    }
 
     if spectrum_type == 'power':
         desc = f"power spectrum for {', '.join(var_names)}"

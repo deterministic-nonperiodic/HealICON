@@ -65,6 +65,7 @@ SPECTRAL_KEYMAP: dict[str, str] = {
     'rho_cl': r'$C_l^{\rho}$',
 }
 
+
 def cf_to_latex(unit_string: str) -> str:
     """Convert a CF/udunits unit string to a minimal LaTeX math-mode string.
 
@@ -80,23 +81,23 @@ def cf_to_latex(unit_string: str) -> str:
     """
     # 1. Normalise verbose CF/udunits names to SI abbreviations (whole words only)
     _ABBREV = {
-        'kelvin':     'K',
-        'meter':      'm',
-        'second':     's',
-        'kilogram':   'kg',
-        'pascal':     'Pa',
-        'joule':      'J',
-        'watt':       'W',
-        'radian':     'rad',
-        'degree':     'deg',
-        'kilometer':  'km',
+        'kelvin': 'K',
+        'meter': 'm',
+        'second': 's',
+        'kilogram': 'kg',
+        'pascal': 'Pa',
+        'joule': 'J',
+        'watt': 'W',
+        'radian': 'rad',
+        'degree': 'deg',
+        'kilometer': 'km',
     }
     for long, short in _ABBREV.items():
         unit_string = re.sub(rf'\b{long}\b', short, unit_string, flags=re.IGNORECASE)
 
     # 2. Normalise exponentiation: '**' → '^', then strip spaces around '^'
     unit_string = unit_string.replace('**', '^')
-    unit_string = re.sub(r'\s*\^\s*', '^', unit_string)   # 'K ^ 2' → 'K^2'
+    unit_string = re.sub(r'\s*\^\s*', '^', unit_string)  # 'K ^ 2' → 'K^2'
 
     # 3. Wrap exponents in braces: 'K^2' → 'K^{2}', 'm s-1' → 'm s^{-1}'
     unit_string = re.sub(r'([a-zA-Z])\^?([\-]?\d+)', r'\1^{\2}', unit_string)
@@ -217,17 +218,17 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
         ds = ds.sortby([lat_name, level_name])
 
     # ── Detect decomposition mode ─────────────────────────────────────────
-    amp_sym_vars  = [v for v in ds.data_vars if v.endswith('_amp_sym')]
+    amp_sym_vars = [v for v in ds.data_vars if v.endswith('_amp_sym')]
     amp_total_vars = [v for v in ds.data_vars if v.endswith('_amp_total')]
 
     if amp_sym_vars:
         # Standard sym/asy output
         decompose_sym_asy = True
-        var_base = amp_sym_vars[0][:-8]          # strip '_amp_sym'
+        var_base = amp_sym_vars[0][:-8]  # strip '_amp_sym'
     elif amp_total_vars:
         # --no-sym-asy output
         decompose_sym_asy = False
-        var_base = amp_total_vars[0][:-10]       # strip '_amp_total'
+        var_base = amp_total_vars[0][:-10]  # strip '_amp_total'
     else:
         logger.error("No tidal amplitude variables (*_amp_sym or *_amp_total) found in dataset.")
         return
@@ -246,20 +247,20 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
 
     if decompose_sym_asy:
         modes = {
-            'DW1':      {'period': p_24, 'm':  1, 'sa': 'sym'},
-            'DW1_asy':  {'period': p_24, 'm':  1, 'sa': 'asy'},
-            'SW2':      {'period': p_12, 'm':  2, 'sa': 'sym'},
-            'SW2_asy':  {'period': p_12, 'm':  2, 'sa': 'asy'},
-            'SE2':      {'period': p_12, 'm': -2, 'sa': 'sym'},
-            'SE2_asy':  {'period': p_12, 'm': -2, 'sa': 'asy'},
-            'DE3':      {'period': p_24, 'm': -3, 'sa': 'sym'},
-            'DE3_asy':  {'period': p_24, 'm': -3, 'sa': 'asy'},
+            'DW1': {'period': p_24, 'm': 1, 'sa': 'sym'},
+            'DW1_asy': {'period': p_24, 'm': 1, 'sa': 'asy'},
+            'SW2': {'period': p_12, 'm': 2, 'sa': 'sym'},
+            'SW2_asy': {'period': p_12, 'm': 2, 'sa': 'asy'},
+            'SE2': {'period': p_12, 'm': -2, 'sa': 'sym'},
+            'SE2_asy': {'period': p_12, 'm': -2, 'sa': 'asy'},
+            'DE3': {'period': p_24, 'm': -3, 'sa': 'sym'},
+            'DE3_asy': {'period': p_24, 'm': -3, 'sa': 'asy'},
         }
     else:
         # Total mode: one panel per mode name, no sym/asy split
         modes = {
-            'DW1': {'period': p_24, 'm':  1, 'sa': 'total'},
-            'SW2': {'period': p_12, 'm':  2, 'sa': 'total'},
+            'DW1': {'period': p_24, 'm': 1, 'sa': 'total'},
+            'SW2': {'period': p_12, 'm': 2, 'sa': 'total'},
             'SE2': {'period': p_12, 'm': -2, 'sa': 'total'},
             'DE3': {'period': p_24, 'm': -3, 'sa': 'total'},
         }
@@ -730,8 +731,8 @@ def plot_spectrum(ds: xr.Dataset, var_name: str = None, target_height: float | N
     lmax_observed = 0  # updated from every variable; stays at data truncation
     ydata_min = np.inf  # finite positive extremes across all variables
     ydata_max = -np.inf
-    all_units = []          # units string per variable (in plot order)
-    all_long_names = []     # long_name per variable
+    all_units = []  # units string per variable (in plot order)
+    all_long_names = []  # long_name per variable
 
     for var in vars_to_plot:
         data = ds[var].squeeze()
@@ -762,7 +763,6 @@ def plot_spectrum(ds: xr.Dataset, var_name: str = None, target_height: float | N
                 val = data[v_dim].item()
                 val_km = val / 1000.0 if is_meters else val
                 title_suffix = f" at ~{val_km:.1f} km"
-
 
         reduced_dims = [dim for dim in data.dims if dim != x_dim]
         if reduced_dims:
@@ -837,7 +837,7 @@ def plot_spectrum(ds: xr.Dataset, var_name: str = None, target_height: float | N
     if is_single:
         # Descriptive y-label: "<long_name> / <units in LaTeX>"
         _ln = all_long_names[0] if all_long_names else vars_to_plot[0]
-        _u  = all_units[0] if all_units else ''
+        _u = all_units[0] if all_units else ''
         y_label = f"{_ln} / {cf_to_latex(_u)}" if _u else _ln
 
         # AnchoredText: "$E_K$ at ~50.0 km" (math symbol + altitude)

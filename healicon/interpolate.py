@@ -59,7 +59,7 @@ def _interp_regular_block(data_block, lon_coords, lat_coords, target_lon, target
 
 
 class HealpixInterpolator:
-    def __init__(self, nside: int = None, use_gpu: bool = False):
+    def __init__(self, nside: int | None = None, use_gpu: bool = False):
         self.nside = nside
         self.use_gpu = use_gpu
         self._is_setup = False

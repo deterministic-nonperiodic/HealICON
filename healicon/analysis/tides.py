@@ -653,16 +653,32 @@ def _wavelet_fourier_analysis_block(
                     (p_str for (d, p_str) in period_lookup if d == direction),
                     key=lambda s: abs(period_lookup[(direction, s)] - mode['period_h']),
                 )
-                for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
-                    arr = ds_w[f"{comp}_{direction}_{best_p_str}"].values
-                    if temporal_mean:
+                for comp in (('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy') if decompose_sym_asy
+                             else ('amp_total', 'pha_total')):
+                    if decompose_sym_asy:
                         sa = comp.split('_')[1]
-                        arr = _demodulate_mode(
-                            ds_w[f"amp_{sa}_{direction}_{best_p_str}"].values,
-                            ds_w[f"pha_{sa}_{direction}_{best_p_str}"].values,
-                            t_hours_vals, mode['period_h'],
-                            want_phase=('pha' in comp), lon_phase=None,
-                        )
+                        arr = ds_w[f"{comp}_{direction}_{best_p_str}"].values
+                        if temporal_mean:
+                            arr = _demodulate_mode(
+                                ds_w[f"amp_{sa}_{direction}_{best_p_str}"].values,
+                                ds_w[f"pha_{sa}_{direction}_{best_p_str}"].values,
+                                t_hours_vals, mode['period_h'],
+                                want_phase=('pha' in comp), lon_phase=None,
+                            )
+                    else:
+                        # total field: legacy fallback only produces sym/asy —
+                        # use sym as a proxy for the total field
+                        sa = 'sym'
+                        amp_arr = ds_w[f"amp_sym_{direction}_{best_p_str}"].values
+                        pha_arr = ds_w[f"pha_sym_{direction}_{best_p_str}"].values
+                        if temporal_mean:
+                            arr = _demodulate_mode(
+                                amp_arr, pha_arr,
+                                t_hours_vals, mode['period_h'],
+                                want_phase=('pha' in comp), lon_phase=None,
+                            )
+                        else:
+                            arr = amp_arr if comp == 'amp_total' else pha_arr
                     _cell_c = ({cell_dim: da_2d.coords[cell_dim]}
                                if cell_dim in da_2d.coords else {})
                     if temporal_mean:
@@ -678,6 +694,7 @@ def _wavelet_fourier_analysis_block(
             assembled, modes, periods_hours, var_name, var_units,
             target_lon, target_lat, cell_dim, time_dim,
             temporal_mean, non_core_dims, da_block,
+            decompose_sym_asy=decompose_sym_asy,
         )
 
     # ── Fast path: use precomputed ring Fourier coefficients ─────────────
@@ -748,6 +765,7 @@ def _wavelet_fourier_analysis_block(
         assembled, modes, periods_hours, var_name, var_units,
         target_lon, target_lat, cell_dim, time_dim,
         temporal_mean, non_core_dims, da_block,
+        decompose_sym_asy=decompose_sym_asy,
     )
 
 

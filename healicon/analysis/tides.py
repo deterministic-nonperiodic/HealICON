@@ -400,6 +400,7 @@ def _build_tidal_output_dataset(
         target_lon: np.ndarray,
         target_lat: np.ndarray,
         cell_dim: str,
+        decompose_sym_asy: bool = True,
 ) -> xr.Dataset:
     """Assemble the (m, period, ...) output Dataset shared by both
     wavelet-based tidal-analysis entry points.
@@ -420,8 +421,10 @@ def _build_tidal_output_dataset(
                'description': 'positive=westward, negative=eastward'},
     )
 
+    comps = ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy') if decompose_sym_asy else ('amp_total',
+                                                                                    'pha_total')
     data_vars = {}
-    for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
+    for comp in comps:
         stacked = xr.concat(
             [xr.concat([assembled[(m, p, comp)] for p in periods_hours], dim=period_td)
              for m in m_vals],
@@ -437,14 +440,24 @@ def _build_tidal_output_dataset(
                           attrs={'standard_name': 'latitude', 'units': 'degrees_north'})
     out_ds = out_ds.assign_coords(lon=lon_da, lat=lat_da)
 
-    label_map = {'sym': 'Symmetric', 'asy': 'Antisymmetric'}
-    for sa, label in label_map.items():
-        out_ds[f'{var_name}_amp_{sa}'].attrs = {
-            'units': var_units, 'long_name': f'{label} Amplitude',
+    if decompose_sym_asy:
+        label_map = {'sym': 'Symmetric', 'asy': 'Antisymmetric'}
+        for sa, label in label_map.items():
+            out_ds[f'{var_name}_amp_{sa}'].attrs = {
+                'units': var_units, 'long_name': f'{label} Amplitude',
+                'grid_mapping': 'healpix',
+            }
+            out_ds[f'{var_name}_pha_{sa}'].attrs = {
+                'units': 'rad', 'long_name': f'{label} Phase',
+                'grid_mapping': 'healpix',
+            }
+    else:
+        out_ds[f'{var_name}_amp_total'].attrs = {
+            'units': var_units, 'long_name': 'Total Amplitude',
             'grid_mapping': 'healpix',
         }
-        out_ds[f'{var_name}_pha_{sa}'].attrs = {
-            'units': 'rad', 'long_name': f'{label} Phase',
+        out_ds[f'{var_name}_pha_total'].attrs = {
+            'units': 'rad', 'long_name': 'Total Phase',
             'grid_mapping': 'healpix',
         }
 
@@ -458,7 +471,8 @@ def _build_tidal_output_dataset(
 
 def _assemble_tidal_block(assembled, modes, periods_hours, var_name, var_units,
                           target_lon, target_lat, cell_dim, time_dim,
-                          temporal_mean, non_core_dims, da_block):
+                          temporal_mean, non_core_dims, da_block,
+                          decompose_sym_asy=True):
     """Build and transpose the output Dataset from an ``assembled`` dict.
 
     Shared by both SH and Fourier block functions.
@@ -466,7 +480,7 @@ def _assemble_tidal_block(assembled, modes, periods_hours, var_name, var_units,
 
     ds_2d = _build_tidal_output_dataset(
         assembled, modes, periods_hours, var_name, var_units,
-        target_lon, target_lat, cell_dim
+        target_lon, target_lat, cell_dim, decompose_sym_asy=decompose_sym_asy,
     )
 
     if non_core_dims:
@@ -497,7 +511,7 @@ def _assemble_tidal_block(assembled, modes, periods_hours, var_name, var_units,
 def _wavelet_sh_analysis_block(
         da_block, modes, zwn_mode_groups, time_dim, cell_dim, hp_order,
         dt_hours, dj, temporal_mean, periods_hours, var_name, var_units,
-        target_lon, target_lat, spectrum_kwargs,
+        target_lon, target_lat, spectrum_kwargs, decompose_sym_asy=True,
 ):
     """SH block: CWT + spatial reconstruction using pre-computed A_lm/B_lm.
 
@@ -541,6 +555,7 @@ def _wavelet_sh_analysis_block(
             nside=nside_sh, lmax=lmax_sh, abs_m=abs_m,
             periods_to_reconstruct=list(periods_hours),
             is_nested=is_nested_sh,
+            decompose_sym_asy=decompose_sym_asy,
         )
         period_arr = rec['period']
 
@@ -548,8 +563,10 @@ def _wavelet_sh_analysis_block(
             direction = mode['dir']
             actual_p = float(period_arr[np.argmin(np.abs(period_arr - mode['period_h']))])
 
-            for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
-                sa = comp.split('_')[1]  # 'sym' / 'asy'
+            comps = ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy') if decompose_sym_asy \
+                else ('amp_total', 'pha_total')
+            for comp in comps:
+                sa = comp.split('_')[1]  # 'sym' / 'asy' / 'total'
                 ap = comp.split('_')[0]  # 'amp' / 'pha'
                 arr = rec[(actual_p, direction, sa, ap)]  # (n_time, npix)
 
@@ -582,13 +599,14 @@ def _wavelet_sh_analysis_block(
         assembled, modes, periods_hours, var_name, var_units,
         target_lon, target_lat, cell_dim, time_dim,
         temporal_mean, non_core_dims, da_block,
+        decompose_sym_asy=decompose_sym_asy,
     )
 
 
 def _wavelet_fourier_analysis_block(
         da_block, modes, zwn_mode_groups, time_dim, cell_dim, hp_order,
         dt_hours, dj, temporal_mean, periods_hours, var_name, var_units,
-        target_lon, target_lat, spectrum_kwargs,
+        target_lon, target_lat, spectrum_kwargs, decompose_sym_asy=True,
 ):
     """Fourier block: CWT + spatial reconstruction using pre-computed ring series.
 
@@ -693,6 +711,7 @@ def _wavelet_fourier_analysis_block(
             Ck_lev, Sk_lev, ring_pix,
             dt_hours, dj, nside, is_nested,
             periods_to_reconstruct=list(periods_hours),
+            decompose_sym_asy=decompose_sym_asy,
         )
         period_arr = rec['period']
 
@@ -700,7 +719,9 @@ def _wavelet_fourier_analysis_block(
             direction = mode['dir']
             actual_p = float(period_arr[np.argmin(np.abs(period_arr - mode['period_h']))])
 
-            for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
+            comps = ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy') if decompose_sym_asy \
+                else ('amp_total', 'pha_total')
+            for comp in comps:
                 ap, sa = comp.split('_')
                 arr = rec[(actual_p, direction, sa, ap)]
 
@@ -778,7 +799,8 @@ def _recommend_dask_scheduler(
 def _iterate_tidal_analysis(
         da, ds, modes, zwn_mode_groups, time_dim, cell_dim, hp_order,
         dt_hours, dj, temporal_mean, method, periods_hours, var_name,
-        var_units, target_lon, target_lat, spectrum_kwargs
+        var_units, target_lon, target_lat, spectrum_kwargs,
+        decompose_sym_asy: bool = True,
 ):
     """Execute wavelet tidal analysis via map_blocks.
 
@@ -791,27 +813,29 @@ def _iterate_tidal_analysis(
 
     block_args = (modes, zwn_mode_groups, time_dim, cell_dim, hp_order,
                   dt_hours, dj, temporal_mean, periods_hours,
-                  var_name, var_units, target_lon, target_lat, spectrum_kwargs)
+                  var_name, var_units, target_lon, target_lat, spectrum_kwargs,
+                  decompose_sym_asy)
 
     # Both methods use map_blocks — one level per block, streams to disk
     # without accumulating all levels in memory simultaneously.
-    # For the SH method the caller should use scheduler='synchronous' to
-    # avoid N_threads × block_memory concurrent allocations; see cli.py.
     rechunk_dict = {time_dim: -1, cell_dim: -1}
     for d in non_core_dims:
         rechunk_dict[d] = 1
     da_chunked = da.chunk(rechunk_dict)
 
+    comps = ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy') if decompose_sym_asy \
+        else ('amp_total', 'pha_total')
     dummy_assembled = {}
     for mode in modes:
-        for comp in ('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy'):
+        for comp in comps:
             key = (mode['m'], mode['period_h'], comp)
             dummy_assembled[key] = (da_chunked.isel({time_dim: 0}, drop=True)
                                     if temporal_mean else da_chunked)
 
     template = _build_tidal_output_dataset(
         dummy_assembled, modes, periods_hours, var_name, var_units,
-        target_lon, target_lat, cell_dim
+        target_lon, target_lat, cell_dim,
+        decompose_sym_asy=decompose_sym_asy,
     ).chunk({'m': -1, 'period': -1})
 
     block_fn = _wavelet_sh_analysis_block if method == 'sh' else _wavelet_fourier_analysis_block
@@ -870,6 +894,7 @@ def compute_wavelet_tidal_analysis(
         temporal_mean: bool = False,
         map2alm_iter: int = 3,
         method: str = 'sh',
+        decompose_sym_asy: bool = True,
 ) -> xr.Dataset:
     """Wavelet-based tidal analysis on a HEALPix Dataset.
 
@@ -894,12 +919,16 @@ def compute_wavelet_tidal_analysis(
         map2alm_iter:  Number of iterations for map2alm (SH method only).
         method:  The spectral method to use: 'sh' (spherical harmonics CWT) or
             'fourier' (ring Fourier CWT).
+        decompose_sym_asy:  If *True* (default), decompose the spatial field into
+            symmetric and antisymmetric components relative to the equator.
+            If *False*, skip the decomposition and return the total tidal field
+            under ``{var}_amp_total`` / ``{var}_pha_total``.
 
     Returns:
         xr.Dataset with variables ``{var_name}_amp_sym``,
         ``{var_name}_pha_sym``, ``{var_name}_amp_asy``,
-        ``{var_name}_pha_asy``.  Dimensions are
-        ``(m, period, [time], *non_core_dims, cells)``.
+        ``{var_name}_pha_asy`` (or ``_total`` when *decompose_sym_asy* is False).
+        Dimensions are ``(m, period, [time], *non_core_dims, cells)``.
     """
     if time_dim not in ds.dims:
         raise ValueError(
@@ -989,7 +1018,7 @@ def compute_wavelet_tidal_analysis(
         da, ds, modes, zwn_mode_groups, time_dim, cell_dim, hp_order,
         dt_hours, dj, temporal_mean, method, periods_hours, var_name,
         ds[var_name].attrs.get('units', ''), target_lon, target_lat,
-        spectrum_kwargs
+        spectrum_kwargs, decompose_sym_asy=decompose_sym_asy,
     )
 
     # _iterate_tidal_analysis sets '_recommended_dask_scheduler' on out_ds;

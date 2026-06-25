@@ -7,13 +7,9 @@ import numpy as np
 import xarray as xr
 
 from ._common import (
-    logger, EARTH_RADIUS_KM, _EARTH_RADIUS_M, _MAX_WORKERS,
+    logger, EARTH_RADIUS_KM, _EARTH_RADIUS_M,
     get_healpix_order, get_cells_dim, ensure_ring, ensure_original_order, append_history,
-    ThreadPoolExecutor, get_progress_bar,
 )
-
-# Earth radius in metres (used to scale streamfunction / velocity potential to m²/s)
-_EARTH_RADIUS_M = EARTH_RADIUS_KM * 1e3
 
 
 def _helmholtz_block(u_block, v_block, lmax, nside, is_nested):
@@ -100,15 +96,8 @@ def _helmholtz_block(u_block, v_block, lmax, nside, is_nested):
                            np.nan)
         chi[i] = ensure_original_order(chi_map, order_str)
 
-    if n > 1:
-        from concurrent.futures import as_completed
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            futures = [pool.submit(_process_slice, i) for i in range(n)]
-            for f in get_progress_bar(as_completed(futures), desc="Helmholtz decomposition",
-                                      total=n):
-                f.result()
-    else:
-        _process_slice(0)
+    for i in range(n):
+        _process_slice(i)
 
     s = orig_shape
     return (u_rot.reshape(s), v_rot.reshape(s),
@@ -274,15 +263,8 @@ def _vorticity_divergence_block(u_block, v_block, lmax, nside, is_nested):
         vor_out[i] = ensure_original_order(vor_map, order_str)
 
     n = u_2d.shape[0]
-    if n > 1:
-        from concurrent.futures import as_completed
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            futures = [pool.submit(_process_slice, i) for i in range(n)]
-            for f in get_progress_bar(as_completed(futures), desc="Computing vorticity/divergence",
-                                      total=n):
-                f.result()
-    else:
-        _process_slice(0)
+    for i in range(n):
+        _process_slice(i)
 
     out_shape = orig_shape
     return div_out.reshape(out_shape), vor_out.reshape(out_shape)
@@ -409,15 +391,8 @@ def _uv_from_vorticity_divergence_block(div_block, vor_block, lmax, nside, is_ne
         v_out[i] = ensure_original_order(v_ring, order_str)
 
     n = div_2d.shape[0]
-    if n > 1:
-        from concurrent.futures import as_completed
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            futures = [pool.submit(_process_slice, i) for i in range(n)]
-            for f in get_progress_bar(as_completed(futures), desc="Reconstructing wind components",
-                                      total=n):
-                f.result()
-    else:
-        _process_slice(0)
+    for i in range(n):
+        _process_slice(i)
 
     out_shape = orig_shape
     return u_out.reshape(out_shape), v_out.reshape(out_shape)

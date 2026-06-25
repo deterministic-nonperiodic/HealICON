@@ -216,35 +216,61 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
     if lat_name in ds.dims and level_name in ds.dims:
         ds = ds.sortby([lat_name, level_name])
 
-    # Dynamic variable base name detection (detects e.g., 'temp' or 'u')
-    amp_sym_vars = [v for v in ds.data_vars if v.endswith('_amp_sym')]
-    if not amp_sym_vars:
-        logger.error("No tidal amplitude variables (*_amp_sym) found in dataset.")
+    # ── Detect decomposition mode ─────────────────────────────────────────
+    amp_sym_vars  = [v for v in ds.data_vars if v.endswith('_amp_sym')]
+    amp_total_vars = [v for v in ds.data_vars if v.endswith('_amp_total')]
+
+    if amp_sym_vars:
+        # Standard sym/asy output
+        decompose_sym_asy = True
+        var_base = amp_sym_vars[0][:-8]          # strip '_amp_sym'
+    elif amp_total_vars:
+        # --no-sym-asy output
+        decompose_sym_asy = False
+        var_base = amp_total_vars[0][:-10]       # strip '_amp_total'
+    else:
+        logger.error("No tidal amplitude variables (*_amp_sym or *_amp_total) found in dataset.")
         return
-    var_base = amp_sym_vars[0][:-8]  # Remove '_amp_sym'
+
+    # ── Determine amp/pha suffixes ────────────────────────────────────────
+    # In sym/asy mode we keep the symmetric and antisymmetric panels separate.
+    # In total mode every mode maps to the single 'total' suffix.
+    def _amp_var(sa: str) -> str:
+        return f'{var_base}_amp_{sa}'
+
+    def _pha_var(sa: str) -> str:
+        return f'{var_base}_pha_{sa}'
 
     p_12 = np.timedelta64(12, 'h')
     p_24 = np.timedelta64(24, 'h')
 
-    modes = {
-        'DW1': {'period': p_24, 'm': 1, 'type': 'Symmetric'},
-        'DW1_asy': {'period': p_24, 'm': 1, 'type': 'Antisymmetric'},
-        'SW2': {'period': p_12, 'm': 2, 'type': 'Symmetric'},
-        'SW2_asy': {'period': p_12, 'm': 2, 'type': 'Antisymmetric'},
-        'SE2': {'period': p_12, 'm': -2, 'type': 'Symmetric'},
-        'SE2_asy': {'period': p_12, 'm': -2, 'type': 'Antisymmetric'},
-        'DE3': {'period': p_24, 'm': -3, 'type': 'Symmetric'},
-        'DE3_asy': {'period': p_24, 'm': -3, 'type': 'Antisymmetric'},
-    }
+    if decompose_sym_asy:
+        modes = {
+            'DW1':      {'period': p_24, 'm':  1, 'sa': 'sym'},
+            'DW1_asy':  {'period': p_24, 'm':  1, 'sa': 'asy'},
+            'SW2':      {'period': p_12, 'm':  2, 'sa': 'sym'},
+            'SW2_asy':  {'period': p_12, 'm':  2, 'sa': 'asy'},
+            'SE2':      {'period': p_12, 'm': -2, 'sa': 'sym'},
+            'SE2_asy':  {'period': p_12, 'm': -2, 'sa': 'asy'},
+            'DE3':      {'period': p_24, 'm': -3, 'sa': 'sym'},
+            'DE3_asy':  {'period': p_24, 'm': -3, 'sa': 'asy'},
+        }
+    else:
+        # Total mode: one panel per mode name, no sym/asy split
+        modes = {
+            'DW1': {'period': p_24, 'm':  1, 'sa': 'total'},
+            'SW2': {'period': p_12, 'm':  2, 'sa': 'total'},
+            'SE2': {'period': p_12, 'm': -2, 'sa': 'total'},
+            'DE3': {'period': p_24, 'm': -3, 'sa': 'total'},
+        }
 
     # Identify available modes in the dataset
     available_modes = {}
     for name, meta in modes.items():
-        var_name = f'{var_base}_amp_sym' if meta['type'] == 'Symmetric' else f'{var_base}_amp_asy'
-        if var_name in ds and 'period' in ds.coords and 'm' in ds.coords:
+        av = _amp_var(meta['sa'])
+        if av in ds and 'period' in ds.coords and 'm' in ds.coords:
             try:
-                # We use nearest to just check if it's broadly there, or let sel handle it
-                ds[var_name].sel(period=meta['period'], m=meta['m'], method='nearest')
+                ds[av].sel(period=meta['period'], m=meta['m'], method='nearest')
                 available_modes[name] = meta
             except Exception:
                 pass
@@ -267,12 +293,14 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
     vmax = 6.0
 
     # Try to find max amplitude for better scaling
+    amp_data_vars = [v for v in ds.data_vars if '_amp_' in v
+                     and not any(d in v for d in ('_cos_', '_sin_'))]
     try:
-        max_amp = float(ds[[f'{var_base}_amp_sym', f'{var_base}_amp_asy']].to_array().max())
+        max_amp = float(ds[amp_data_vars].to_array().max()) if amp_data_vars else 0.0
         if np.isfinite(max_amp) and max_amp > 0:
             vmax = min(max_amp,
-                       max_amplitude if max_amplitude is not None else 20.0)  # Cap at 20 for visibility
-    except:
+                       max_amplitude if max_amplitude is not None else 20.0)
+    except Exception:
         pass
 
     levels = np.linspace(0, vmax, 13)
@@ -280,8 +308,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
     cf = None
     for i, (name, meta) in enumerate(available_modes.items()):
         ax = axes[i]
-        var_name = f'{var_base}_amp_sym' if meta['type'] == 'Symmetric' else f'{var_base}_amp_asy'
-        data = ds[var_name].sel(period=meta['period'], m=meta['m'], method='nearest')
+        data = ds[_amp_var(meta['sa'])].sel(
+            period=meta['period'], m=meta['m'], method='nearest')
 
         # Ensure correct dimension order: (height, lat)
         if data.dims != (level_name, lat_name):
@@ -302,7 +330,9 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
             add_colorbar=False,
             add_labels=False
         )
-        ax.set_title(f"{name.split('_')[0]} ({meta['type']})", fontweight='bold')
+        label_suffix = {'sym': 'Symmetric', 'asy': 'Antisymmetric', 'total': 'Total'}.get(
+            meta['sa'], meta['sa'].title())
+        ax.set_title(f"{name.split('_')[0]} ({label_suffix})", fontweight='bold')
         ax.grid(True, linestyle='--', alpha=0.5)
 
     # Formatting
@@ -331,7 +361,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
     if cf:
         cbar_ax = fig.add_axes([0.26, 0.05, 0.52, 0.02])
         cbar = fig.colorbar(cf, cax=cbar_ax, orientation='horizontal')
-        var_units = ds[f'{var_base}_amp_sym'].attrs.get('units', 'K')
+        amp_ref = _amp_var(next(iter(available_modes.values()))['sa'])
+        var_units = ds[amp_ref].attrs.get('units', 'K')
         cbar.set_label(f'Amplitude / {var_units}')
 
     os.makedirs(out_dir, exist_ok=True)
@@ -349,8 +380,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
     cf_pha = None
     for i, (name, meta) in enumerate(available_modes.items()):
         ax = axes_pha[i]
-        var_name = f'{var_base}_pha_sym' if meta['type'] == 'Symmetric' else f'{var_base}_pha_asy'
-        data = ds[var_name].sel(period=meta['period'], m=meta['m'], method='nearest')
+        data = ds[_pha_var(meta['sa'])].sel(
+            period=meta['period'], m=meta['m'], method='nearest')
 
         # Ensure correct dimension order: (height, lat)
         if data.dims != (level_name, lat_name):
@@ -371,7 +402,9 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
             add_colorbar=False,
             add_labels=False
         )
-        ax.set_title(f"{name.split('_')[0]} Phase ({meta['type']})", fontweight='bold')
+        label_suffix = {'sym': 'Symmetric', 'asy': 'Antisymmetric', 'total': 'Total'}.get(
+            meta['sa'], meta['sa'].title())
+        ax.set_title(f"{name.split('_')[0]} Phase ({label_suffix})", fontweight='bold')
         ax.grid(True, linestyle='--', alpha=0.5)
 
     for i, ax in enumerate(axes_pha):
@@ -401,7 +434,8 @@ def plot_tides(ds: xr.Dataset, out_dir: str = ".", prefix: str = "tides", max_am
         cbar_pha = fig_pha.colorbar(cf_pha, cax=cbar_ax_pha, orientation='horizontal',
                                     ticks=[-np.pi, -np.pi / 2, 0, np.pi / 2, np.pi])
         cbar_pha.ax.set_xticklabels([r'$-\pi$', r'$-\pi/2$', '0', r'$\pi/2$', r'$\pi$'])
-        var_units_pha = ds[f'{var_base}_pha_sym'].attrs.get('units', 'rad')
+        pha_ref = _pha_var(next(iter(available_modes.values()))['sa'])
+        var_units_pha = ds[pha_ref].attrs.get('units', 'rad')
         cbar_pha.set_label(f'Phase / {var_units_pha}')
 
     pha_out_path = os.path.join(out_dir, f"{prefix}_phase.png")

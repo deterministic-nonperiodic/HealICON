@@ -3,16 +3,13 @@ Spectral analysis: power spectra, cross-spectra, and kinetic energy spectra
 using spherical harmonic transforms.
 """
 
-from concurrent.futures import as_completed as _as_completed
-
 import healpy as hp
 import numpy as np
 import xarray as xr
 
 from ._common import (
-    logger, EARTH_RADIUS_KM, _parse_units, _MAX_WORKERS,
-    degree_to_wavelength, get_healpix_order, get_cells_dim, ensure_ring, append_history,
-    ThreadPoolExecutor, get_progress_bar,
+    logger, EARTH_RADIUS_KM, _parse_units, degree_to_wavelength, get_healpix_order, get_cells_dim,
+    ensure_ring, append_history,
 )
 from ..cf_coords import _cf_guess
 
@@ -92,15 +89,9 @@ def _anafast_block(*args, lmax=None, is_nested=False, op_type='power'):
 
     if len(valid_indices) == 0:
         pass  # all slices invalid – out_data already filled with NaN
-    elif len(valid_indices) == 1:
-        _process_slice(valid_indices[0])
     else:
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            futures = [pool.submit(_process_slice, i) for i in valid_indices]
-            for f in get_progress_bar(
-                    _as_completed(futures), desc="Spectral analysis", total=len(valid_indices)
-            ):
-                f.result()  # propagate any worker exception immediately
+        for i in valid_indices:
+            _process_slice(i)
 
     return out_data.reshape(orig_shape[:-1] + (n_l,))
 

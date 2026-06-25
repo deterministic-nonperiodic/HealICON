@@ -577,9 +577,12 @@ def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
               help='Average wavelet/fourier amplitudes over time (comparable to LS).')
 @click.option('--dj', type=float, default=0.1, show_default=True,
               help='Spacing between discrete wavelet scales (for fourier and wavelet methods).')
+@click.option('--no-sym-asy', 'decompose_sym_asy', is_flag=True, default=True,
+              flag_value=False,
+              help='Skip symmetric/antisymmetric decomposition; output the total tidal field directly.')
 @profile_command
 def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim, method,
-          temporal_mean, dj):
+          temporal_mean, dj, decompose_sym_asy):
     """
     Perform a full tidal analysis (temporal fit and spatial symmetry decomposition).
 
@@ -661,7 +664,8 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim,
         out_ds = compute_wavelet_tidal_analysis(
             ds, var_name=var_name, periods_hours=periods_hours,
             m_filters=m_filters, lmax=lmax, time_dim=time_dim,
-            dj=dj, temporal_mean=temporal_mean, method=method
+            dj=dj, temporal_mean=temporal_mean, method=method,
+            decompose_sym_asy=decompose_sym_asy,
         )
     else:
         raise click.UsageError(f"Unsupported method '{method}'.")

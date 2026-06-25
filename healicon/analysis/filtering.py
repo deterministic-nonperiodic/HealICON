@@ -6,9 +6,8 @@ import numpy as np
 import xarray as xr
 
 from ._common import (
-    logger, _MAX_WORKERS, wavelength_to_degree,
+    logger, wavelength_to_degree,
     get_healpix_order, get_cells_dim, ensure_ring, ensure_original_order, append_history,
-    ThreadPoolExecutor, get_progress_bar,
 )
 
 
@@ -40,14 +39,8 @@ def _filter_block(data_block, fwhm_rad, lmax, is_nested):
         out_data[i] = ensure_original_order(filtered, order_str)
 
     n = data_2d.shape[0]
-    if n > 1:
-        from concurrent.futures import as_completed
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            futures = [pool.submit(_process_slice, i) for i in range(n)]
-            for f in get_progress_bar(as_completed(futures), desc="Spatial filtering", total=n):
-                f.result()
-    else:
-        _process_slice(0)
+    for i in range(n):
+        _process_slice(i)
 
     return out_data.reshape(orig_shape)
 

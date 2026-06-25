@@ -6,10 +6,9 @@ import numpy as np
 import xarray as xr
 
 from ._common import (
-    logger, _MAX_WORKERS,
+    logger,
     get_healpix_order, get_cells_dim, append_history,
     add_healpix_grid_mapping,
-    ThreadPoolExecutor, get_progress_bar,
 )
 
 
@@ -22,25 +21,16 @@ def _regrade_block(data_block, nside_out, is_nested):
     npix_out = hp.nside2npix(nside_out)
     out_data = np.zeros((data_2d.shape[0], npix_out), dtype=data_2d.dtype)
 
-    def _process_slice(i):
+    n = data_2d.shape[0]
+    for i in range(n):
         d = data_2d[i]
         valid_mask = ~np.isnan(d)
         if not np.any(valid_mask):
             out_data[i] = np.nan
-            return
+            continue
         d_unseen = np.where(valid_mask, d, hp.UNSEEN)
         regraded = hp.ud_grade(d_unseen, nside_out=nside_out, order_in=order, order_out=order)
         out_data[i] = np.where(regraded == hp.UNSEEN, np.nan, regraded)
-
-    n = data_2d.shape[0]
-    if n > 1:
-        from concurrent.futures import as_completed
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
-            futures = [pool.submit(_process_slice, i) for i in range(n)]
-            for f in get_progress_bar(as_completed(futures), desc="Regrading resolution", total=n):
-                f.result()
-    else:
-        _process_slice(0)
 
     out_shape = orig_shape[:-1] + (npix_out,)
     return out_data.reshape(out_shape)

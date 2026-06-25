@@ -683,6 +683,7 @@ def _fourier_reconstruct_level(
         periods_to_reconstruct: list[float] | None = None,
         min_t: float = -1,
         max_t: float = np.inf,
+        decompose_sym_asy: bool = True,
 ) -> dict:
     """CWT + spatial reconstruction for ONE level's pre-computed ring Fourier series.
 
@@ -745,35 +746,42 @@ def _fourier_reconstruct_level(
         mapped = np.repeat(ring_vals, ring_pix, axis=-1)
         return mapped[..., nest2ring_idx] if is_nested else mapped
 
-    # Symmetric / antisymmetric decomposition over the ring axis (last).
-    Ak_sym = 0.5 * (Ak + np.flip(Ak, axis=-1))
-    Ak_asy = 0.5 * (Ak - np.flip(Ak, axis=-1))
-    Bk_sym = 0.5 * (Bk + np.flip(Bk, axis=-1))
-    Bk_asy = 0.5 * (Bk - np.flip(Bk, axis=-1))
-    ak_sym = 0.5 * (ak + np.flip(ak, axis=-1))
-    ak_asy = 0.5 * (ak - np.flip(ak, axis=-1))
-    bk_sym = 0.5 * (bk + np.flip(bk, axis=-1))
-    bk_asy = 0.5 * (bk - np.flip(bk, axis=-1))
-
     for target_p in periods_to_reconstruct:
+
         idx = int(np.argmin(np.abs(period - target_p)))
         actual_p = float(period[idx])
 
-        Rw_s, Re_s, Pw_s, Pe_s = _calculate_amplitudes_and_phases(
-            Ak_sym[idx], Bk_sym[idx], ak_sym[idx], bk_sym[idx]
-        )
-        Rw_a, Re_a, Pw_a, Pe_a = _calculate_amplitudes_and_phases(
-            Ak_asy[idx], Bk_asy[idx], ak_asy[idx], bk_asy[idx]
-        )
+        if decompose_sym_asy:
+            Ak_sym = 0.5 * (Ak[idx] + np.flip(Ak[idx], axis=-1))
+            Ak_asy = 0.5 * (Ak[idx] - np.flip(Ak[idx], axis=-1))
+            Bk_sym = 0.5 * (Bk[idx] + np.flip(Bk[idx], axis=-1))
+            Bk_asy = 0.5 * (Bk[idx] - np.flip(Bk[idx], axis=-1))
+            ak_sym = 0.5 * (ak[idx] + np.flip(ak[idx], axis=-1))
+            ak_asy = 0.5 * (ak[idx] - np.flip(ak[idx], axis=-1))
+            bk_sym = 0.5 * (bk[idx] + np.flip(bk[idx], axis=-1))
+            bk_asy = 0.5 * (bk[idx] - np.flip(bk[idx], axis=-1))
 
-        result[(actual_p, 'westward', 'sym', 'amp')] = assign_to_cells(Rw_s)
-        result[(actual_p, 'westward', 'sym', 'pha')] = assign_to_cells(Pw_s)
-        result[(actual_p, 'westward', 'asy', 'amp')] = assign_to_cells(Rw_a)
-        result[(actual_p, 'westward', 'asy', 'pha')] = assign_to_cells(Pw_a)
-        result[(actual_p, 'eastward', 'sym', 'amp')] = assign_to_cells(Re_s)
-        result[(actual_p, 'eastward', 'sym', 'pha')] = assign_to_cells(Pe_s)
-        result[(actual_p, 'eastward', 'asy', 'amp')] = assign_to_cells(Re_a)
-        result[(actual_p, 'eastward', 'asy', 'pha')] = assign_to_cells(Pe_a)
+            Rw_s, Re_s, Pw_s, Pe_s = _calculate_amplitudes_and_phases(
+                Ak_sym, Bk_sym, ak_sym, bk_sym)
+            Rw_a, Re_a, Pw_a, Pe_a = _calculate_amplitudes_and_phases(
+                Ak_asy, Bk_asy, ak_asy, bk_asy)
+
+            result[(actual_p, 'westward', 'sym', 'amp')] = assign_to_cells(Rw_s)
+            result[(actual_p, 'westward', 'sym', 'pha')] = assign_to_cells(Pw_s)
+            result[(actual_p, 'westward', 'asy', 'amp')] = assign_to_cells(Rw_a)
+            result[(actual_p, 'westward', 'asy', 'pha')] = assign_to_cells(Pw_a)
+            result[(actual_p, 'eastward', 'sym', 'amp')] = assign_to_cells(Re_s)
+            result[(actual_p, 'eastward', 'sym', 'pha')] = assign_to_cells(Pe_s)
+            result[(actual_p, 'eastward', 'asy', 'amp')] = assign_to_cells(Re_a)
+            result[(actual_p, 'eastward', 'asy', 'pha')] = assign_to_cells(Pe_a)
+        else:
+            # No sym/asy split — store the full (total) field.
+            Rw, Re, Pw, Pe = _calculate_amplitudes_and_phases(
+                Ak[idx], Bk[idx], ak[idx], bk[idx])
+            result[(actual_p, 'westward', 'total', 'amp')] = assign_to_cells(Rw)
+            result[(actual_p, 'westward', 'total', 'pha')] = assign_to_cells(Pw)
+            result[(actual_p, 'eastward', 'total', 'amp')] = assign_to_cells(Re)
+            result[(actual_p, 'eastward', 'total', 'pha')] = assign_to_cells(Pe)
 
     return result
 
@@ -783,7 +791,8 @@ def fourier_wavelet_spectrum(da: xr.DataArray, zwn: int,
                              dt: float = 1.0, dj: float = 0.1,
                              min_t: float = -1, max_t: float = np.inf,
                              periods_to_reconstruct: list[float] | None = None,
-                             order: str | None = None) -> xr.Dataset:
+                             order: str | None = None,
+                             decompose_sym_asy: bool = True) -> xr.Dataset:
     """Compute the Fourier-Wavelet spectrum of a HEALPix DataArray.
 
     This is the Fourier analogue of :func:`spherical_harmonic_wavelet_spectrum`.
@@ -822,6 +831,7 @@ def fourier_wavelet_spectrum(da: xr.DataArray, zwn: int,
         Ck_lev, Sk_lev, ring_pix, dt, dj, nside, is_nested,
         periods_to_reconstruct=periods_to_reconstruct,
         min_t=min_t, max_t=max_t,
+        decompose_sym_asy=decompose_sym_asy,
     )
 
     period = rec['period']
@@ -1086,6 +1096,7 @@ def _sh_reconstruct_level(
         is_nested: bool = False,
         min_t: float = -1,
         max_t: float = np.inf,
+        decompose_sym_asy: bool = True,
 ) -> dict:
     """CWT + spatial reconstruction for ONE level's pre-computed A_lm/B_lm.
 
@@ -1148,15 +1159,16 @@ def _sh_reconstruct_level(
         re_e = 0.25 * (Ak[idx] + bk[idx])
         im_e = 0.25 * (Bk[idx] - ak[idx])
 
-        # Allocate 8 output arrays for this period — one level at a time
+        # Allocate output arrays for this period (asy arrays only when needed)
         aw_s = np.empty((n_time, npix))
-        aw_a = np.empty((n_time, npix))
         pw_s = np.empty((n_time, npix))
-        pw_a = np.empty((n_time, npix))
         ae_s = np.empty((n_time, npix))
-        ae_a = np.empty((n_time, npix))
         pe_s = np.empty((n_time, npix))
-        pe_a = np.empty((n_time, npix))
+        if decompose_sym_asy:
+            aw_a = np.empty((n_time, npix))
+            pw_a = np.empty((n_time, npix))
+            ae_a = np.empty((n_time, npix))
+            pe_a = np.empty((n_time, npix))
 
         for t0 in range(0, n_time, TIME_CHUNK):
             t1 = min(t0 + TIME_CHUNK, n_time)
@@ -1174,44 +1186,50 @@ def _sh_reconstruct_level(
                 p1 = min(p0 + PIX_CHUNK, npix)
                 maps[:, :, p0:p1] = coeff @ basis_stacked[:, p0:p1]
 
-            sym = 0.5 * (maps + maps[..., sym_idx])
-            asy = 0.5 * (maps - maps[..., sym_idx])
-            del maps
+            if decompose_sym_asy:
+                sym = 0.5 * (maps + maps[..., sym_idx])
+                asy = 0.5 * (maps - maps[..., sym_idx])
+                del maps
 
-            po = abs_m_lon[None, :]
-            aw_s[sl] = np.sqrt(sym[0] ** 2 + sym[1] ** 2)
-            aw_a[sl] = np.sqrt(asy[0] ** 2 + asy[1] ** 2)
-            ae_s[sl] = np.sqrt(sym[2] ** 2 + sym[3] ** 2)
-            ae_a[sl] = np.sqrt(asy[2] ** 2 + asy[3] ** 2)
-            pw_s[sl] = np.mod(np.arctan2(-sym[1], sym[0]) - po + np.pi, 2 * np.pi) - np.pi
-            pw_a[sl] = np.mod(np.arctan2(-asy[1], asy[0]) - po + np.pi, 2 * np.pi) - np.pi
-            pe_s[sl] = np.mod(np.arctan2(-sym[3], sym[2]) - po + np.pi, 2 * np.pi) - np.pi
-            pe_a[sl] = np.mod(np.arctan2(-asy[3], asy[2]) - po + np.pi, 2 * np.pi) - np.pi
-            del sym, asy
+                po = abs_m_lon[None, :]
+                aw_s[sl] = np.sqrt(sym[0] ** 2 + sym[1] ** 2)
+                aw_a[sl] = np.sqrt(asy[0] ** 2 + asy[1] ** 2)
+                ae_s[sl] = np.sqrt(sym[2] ** 2 + sym[3] ** 2)
+                ae_a[sl] = np.sqrt(asy[2] ** 2 + asy[3] ** 2)
+                pw_s[sl] = np.mod(np.arctan2(-sym[1], sym[0]) - po + np.pi, 2 * np.pi) - np.pi
+                pw_a[sl] = np.mod(np.arctan2(-asy[1], asy[0]) - po + np.pi, 2 * np.pi) - np.pi
+                pe_s[sl] = np.mod(np.arctan2(-sym[3], sym[2]) - po + np.pi, 2 * np.pi) - np.pi
+                pe_a[sl] = np.mod(np.arctan2(-asy[3], asy[2]) - po + np.pi, 2 * np.pi) - np.pi
+                del sym, asy
+            else:
+                po = abs_m_lon[None, :]
+                aw_s[sl] = np.sqrt(maps[0] ** 2 + maps[1] ** 2)
+                ae_s[sl] = np.sqrt(maps[2] ** 2 + maps[3] ** 2)
+                pw_s[sl] = np.mod(np.arctan2(-maps[1], maps[0]) - po + np.pi, 2 * np.pi) - np.pi
+                pe_s[sl] = np.mod(np.arctan2(-maps[3], maps[2]) - po + np.pi, 2 * np.pi) - np.pi
+                del maps
 
         if is_nested:
-            # ensure_original_order returns a fresh reordered array (fancy
-            # indexing copies), so assign its result straight into `result`
-            # rather than writing it back into the source buffer first — the
-            # previous `arr[:] = ...` form did an extra full-size copy per
-            # array (8 arrays per requested period) for no benefit.
             aw_s = ensure_original_order(aw_s, 'nested')
-            aw_a = ensure_original_order(aw_a, 'nested')
             pw_s = ensure_original_order(pw_s, 'nested')
-            pw_a = ensure_original_order(pw_a, 'nested')
             ae_s = ensure_original_order(ae_s, 'nested')
-            ae_a = ensure_original_order(ae_a, 'nested')
             pe_s = ensure_original_order(pe_s, 'nested')
-            pe_a = ensure_original_order(pe_a, 'nested')
+            if decompose_sym_asy:
+                aw_a = ensure_original_order(aw_a, 'nested')
+                pw_a = ensure_original_order(pw_a, 'nested')
+                ae_a = ensure_original_order(ae_a, 'nested')
+                pe_a = ensure_original_order(pe_a, 'nested')
 
-        result[(actual_p, 'westward', 'sym', 'amp')] = aw_s
-        result[(actual_p, 'westward', 'asy', 'amp')] = aw_a
-        result[(actual_p, 'westward', 'sym', 'pha')] = pw_s
-        result[(actual_p, 'westward', 'asy', 'pha')] = pw_a
-        result[(actual_p, 'eastward', 'sym', 'amp')] = ae_s
-        result[(actual_p, 'eastward', 'asy', 'amp')] = ae_a
-        result[(actual_p, 'eastward', 'sym', 'pha')] = pe_s
-        result[(actual_p, 'eastward', 'asy', 'pha')] = pe_a
+        sa = 'sym' if decompose_sym_asy else 'total'
+        result[(actual_p, 'westward', sa, 'amp')] = aw_s
+        result[(actual_p, 'westward', sa, 'pha')] = pw_s
+        result[(actual_p, 'eastward', sa, 'amp')] = ae_s
+        result[(actual_p, 'eastward', sa, 'pha')] = pe_s
+        if decompose_sym_asy:
+            result[(actual_p, 'westward', 'asy', 'amp')] = aw_a
+            result[(actual_p, 'westward', 'asy', 'pha')] = pw_a
+            result[(actual_p, 'eastward', 'asy', 'amp')] = ae_a
+            result[(actual_p, 'eastward', 'asy', 'pha')] = pe_a
 
     return result
 
@@ -1224,6 +1242,7 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
                                         map2alm_iter: int = 3,
                                         periods_to_reconstruct: list | None = None,
                                         order: str | None = None,
+                                        decompose_sym_asy: bool = True,
                                         ) -> xr.Dataset:
     """Spherical-harmonic wavelet spectrum of a HEALPix DataArray.
 
@@ -1307,6 +1326,7 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
             periods_to_reconstruct=periods_to_reconstruct,
             is_nested=is_nested,
             min_t=min_t, max_t=max_t,
+            decompose_sym_asy=decompose_sym_asy,
         )
         if period is None:
             period = rec['period']

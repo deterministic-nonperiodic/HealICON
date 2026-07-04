@@ -132,6 +132,9 @@ def add_healpix_grid_mapping(ds: xr.Dataset, nside: int,
     ds.attrs['healpix_npix'] = npix
     ds.attrs['healpix_scheme'] = order_lower.upper()  # 'RING' / 'NESTED'
     ds.attrs['healpix_cell_area_sr'] = f'{cell_area:.6e}'
+    _R_EARTH_KM = 6371.0  # mean Earth radius
+    resolution_km = np.sqrt(cell_area) * _R_EARTH_KM
+    ds.attrs['healpix_resolution_km'] = f'{resolution_km:.1f}'
 
     # Tag every spatial data variable
     try:

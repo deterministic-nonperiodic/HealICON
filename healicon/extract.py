@@ -252,7 +252,7 @@ def zonal_mean(ds: xr.Dataset) -> xr.Dataset:
     # Strip HEALPix-specific global attributes so the output is not
     # misidentified as a HEALPix dataset by is_healpix() or CDO.
     _HEALPIX_ATTRS = {'healpix_nside', 'healpix_npix', 'healpix_scheme',
-                      'healpix_cell_area_sr', 'healpix_order'}
+                      'healpix_cell_area_sr', 'healpix_order', 'healpix_resolution_km'}
     out_attrs = {k: v for k, v in ds.attrs.items() if k not in _HEALPIX_ATTRS}
     out_ds.attrs = out_attrs
     out_ds.attrs = append_history(out_ds.attrs, "Computed zonal mean over HEALPix rings.")

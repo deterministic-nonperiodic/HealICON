@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 _global_attrs = {
     'source': 'git@github.com:deterministic-nonperiodic/HealICON.git',
     'institution': 'Leibniz Institute for Atmospheric Physics (IAP)',
-    'history': datetime.today().strftime('Created on %c'),
+    'history': datetime.today().strftime('%a %b %d %H:%M:%S %Y: HealICON'),
     'references': '',
     'Conventions': 'CF-1.6'
 }
@@ -128,10 +128,10 @@ def write_dataset(
     # Rules:
     #   • 'history' is always *appended* to preserve the original chain.
     #   • All other keys in _global_attrs are written only when absent.
-    existing_history = ds.attrs.get('history', '')
-    new_history_entry = _global_attrs['history']  # "Created on <timestamp>"
+    existing_history = ds.attrs.get('history', '').strip()
+    new_history_entry = _global_attrs['history']
     if existing_history:
-        ds.attrs['history'] = f"{existing_history}\n{new_history_entry}"
+        ds.attrs['history'] = f"{new_history_entry}\n{existing_history}"
     else:
         ds.attrs['history'] = new_history_entry
 

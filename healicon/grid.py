@@ -250,8 +250,16 @@ def get_spatial_dims(ds: xr.Dataset) -> list[str]:
 
 
 def append_history(ds_attrs: dict, msg: str) -> dict:
-    """Return a copy of ds_attrs with msg appended to 'history'."""
+    """Return a copy of ds_attrs with msg prepended to 'history'.
+
+    Follows CDO convention: most-recent entry comes first, separated by
+    newlines from the original provenance chain.
+    Format: ``Day Mon DD HH:MM:SS YYYY: <msg>\n<previous history>``
+    """
+    from datetime import datetime
     attrs = dict(ds_attrs)
-    prev = attrs.get('history', '')
-    attrs['history'] = f"{prev}\n{msg}" if prev else msg
+    timestamp = datetime.now().strftime('%a %b %d %H:%M:%S %Y')
+    new_entry = f"{timestamp}: {msg}"
+    prev = attrs.get('history', '').strip()
+    attrs['history'] = f"{new_entry}\n{prev}" if prev else new_entry
     return attrs

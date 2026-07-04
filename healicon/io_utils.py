@@ -124,7 +124,22 @@ def write_dataset(
         else:
             output_path.unlink()
 
-    ds.attrs.update(_global_attrs)
+    # Merge global defaults without clobbering existing provenance attributes.
+    # Rules:
+    #   • 'history' is always *appended* to preserve the original chain.
+    #   • All other keys in _global_attrs are written only when absent.
+    existing_history = ds.attrs.get('history', '')
+    new_history_entry = _global_attrs['history']  # "Created on <timestamp>"
+    if existing_history:
+        ds.attrs['history'] = f"{existing_history}\n{new_history_entry}"
+    else:
+        ds.attrs['history'] = new_history_entry
+
+    for key, value in _global_attrs.items():
+        if key == 'history':
+            continue  # already handled above
+        if key not in ds.attrs:
+            ds.attrs[key] = value
 
     # ── NetCDF path: write directly, honour the caller's scheduler context ──
     if store_type == "netcdf":

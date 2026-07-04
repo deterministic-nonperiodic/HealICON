@@ -80,6 +80,19 @@ class HealpixInterpolator:
         self._source_lat = None
 
     def _determine_nside(self, ds: xr.Dataset):
+        # Fast path: HEALPix dataset — derive nside directly from npix.
+        # This works even when the file has no lon/lat coordinate variables.
+        try:
+            from .grid import get_cells_dim
+            cell_dim = get_cells_dim(ds)
+            npix = ds.sizes[cell_dim]
+            nside_float = math.sqrt(npix / 12)
+            if nside_float.is_integer():
+                return int(nside_float)
+        except ValueError:
+            pass
+
+        # Non-HEALPix source: inspect lon/lat coords to estimate grid size.
         from .cf_coords import _find_coordinate
         spatial_dims = []
         lon_coord = _find_coordinate(ds, "lon", raise_notfound=False)

@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 # --- Canonical coordinate name constants (single source of truth) ---
 LONLAT_COORD_NAMES = ("lon", "longitude", "clon", "lat", "latitude", "clat")
-CELL_DIM_NAMES = ("cells", "cell", "ncells", "x")
+CELL_DIM_NAMES = ("cells", "cell", "ncells", "healpix_index", "x")
 
 
 def _is_valid_npix(n: int) -> bool:
@@ -184,12 +184,14 @@ def ensure_original_order(data: np.ndarray, original_order: str) -> np.ndarray:
 def get_cells_dim(ds: xr.Dataset | xr.DataArray) -> str:
     """Return the HEALPix spatial dimension name.
 
-    Checks candidate names in priority order.  When a name exists AND its
-    size is a valid HEALPix pixel count it is returned immediately.
-    Falls back to the first candidate name that exists even if its size
-    is not a recognised HEALPix count.
+    Search order:
+    1. Candidate names in ``CELL_DIM_NAMES`` whose size is a valid HEALPix
+       pixel count (``12 * nside²``) — returned immediately.
+    2. First candidate name that exists, even if size is unrecognised.
+    3. Any dimension (regardless of name) whose size is a valid HEALPix
+       pixel count — handles CDO output with unexpected dimension names.
     """
-    # Prefer a candidate whose size is a valid HEALPix pixel count
+    # Pass 1 & 2: preferred canonical names
     fallback = None
     for dim in CELL_DIM_NAMES:
         if dim in ds.dims:
@@ -199,8 +201,18 @@ def get_cells_dim(ds: xr.Dataset | xr.DataArray) -> str:
                 return dim
     if fallback is not None:
         return fallback
+
+    # Pass 3: scan every dimension for a valid HEALPix pixel count.
+    # This catches CDO-produced files that use non-standard dim names
+    # (e.g. a future CDO version that changes the naming convention).
+    for dim, size in ds.sizes.items():
+        if _is_valid_npix(size):
+            return str(dim)
+
     raise ValueError(
-        f"Dataset must have a HEALPix spatial dimension (one of {CELL_DIM_NAMES}).")
+        f"Dataset must have a HEALPix spatial dimension (one of {CELL_DIM_NAMES} "
+        f"or any dim whose size equals 12·nside²). "
+        f"Available dims: {dict(ds.sizes)}")
 
 
 def get_cells_dim_da(da: xr.DataArray) -> str:

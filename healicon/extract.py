@@ -205,7 +205,24 @@ def zonal_mean(ds: xr.Dataset) -> xr.Dataset:
     out_ds = xr.Dataset(coords={'lat': lats})
     out_ds.lat.attrs = {"standard_name": "latitude", "units": "degrees_north"}
 
+    # Identify geographic coordinate variables (per-pixel lon/lat arrays that
+    # live in ds.data_vars rather than ds.coords).  These lose their meaning
+    # once the cells dimension is gone, so we must not carry them over.
+    # We check both branches (cells-dim vars AND pass-through vars).
+    from .cf_coords import _find_coordinate
+    _geo_var_names: set[str] = set()
+    for _cf_type in ('lat', 'lon'):
+        _c = _find_coordinate(ds, _cf_type, raise_notfound=False)
+        if _c is not None and _c.name in ds.data_vars:
+            _geo_var_names.add(_c.name)
+
     for var in ds.data_vars:
+        # Skip geographic coordinate arrays in ALL branches — they are per-pixel
+        # and have no meaning in the lat-averaged output.
+        if var in _geo_var_names:
+            logger.debug(f"zonal_mean: dropping geographic coordinate variable '{var}'.")
+            continue
+
         if cell_dim in ds[var].dims:
             da = xr.apply_ufunc(
                 _zonal_mean_block,
@@ -224,10 +241,20 @@ def zonal_mean(ds: xr.Dataset) -> xr.Dataset:
                 if coord not in [cell_dim, 'lat', 'lon'] and coord in ds.coords:
                     out_ds.coords[coord] = ds.coords[coord]
         else:
+            # Skip the HEALPix grid-mapping scalar — it describes the original
+            # unstructured grid and is no longer valid after the zonal mean.
+            if ds[var].dims == () and ds[var].attrs.get('grid_mapping_name') == 'healpix':
+                logger.debug(f"zonal_mean: dropping HEALPix grid-mapping variable '{var}'.")
+                continue
             out_ds[var] = ds[var]
             out_ds[var].attrs = ds[var].attrs
 
-    out_ds.attrs = ds.attrs
+    # Strip HEALPix-specific global attributes so the output is not
+    # misidentified as a HEALPix dataset by is_healpix() or CDO.
+    _HEALPIX_ATTRS = {'healpix_nside', 'healpix_npix', 'healpix_scheme',
+                      'healpix_cell_area_sr', 'healpix_order'}
+    out_attrs = {k: v for k, v in ds.attrs.items() if k not in _HEALPIX_ATTRS}
+    out_ds.attrs = out_attrs
     out_ds.attrs = append_history(out_ds.attrs, "Computed zonal mean over HEALPix rings.")
     return out_ds
 

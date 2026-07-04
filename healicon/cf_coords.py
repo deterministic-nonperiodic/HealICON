@@ -137,6 +137,14 @@ def _find_coordinate(ds: xr.Dataset, name: str,
 
     criteria = _CF_COORDS_LOOKUP[name]
 
+    # Well-known coordinate names for the 'level' (vertical) type.
+    # Used as a last-resort name-pattern fallback when CF attributes are
+    # absent or incomplete (e.g. after a NetCDF round-trip strips axis/units).
+    _LEVEL_NAME_PATTERNS = (
+        'altitude', 'height', 'depth', 'z_mc', 'z_ifc', 'zlev',
+        'lev', 'level', 'plev', 'pressure',
+    )
+
     # Build predicate function based on available criteria
     def matches_criteria(c: xr.DataArray) -> bool:
         if name in ('lat', 'lon'):
@@ -147,39 +155,53 @@ def _find_coordinate(ds: xr.Dataset, name: str,
             return True
 
         # Check standard_name attribute
+        # NOTE: criteria['standard_name'] may be a str, tuple, or set.
         if 'standard_name' in criteria:
             std_name = c.attrs.get('standard_name', '').strip().lower()
-            expected = criteria['standard_name']
-            if isinstance(expected, str):
-                if std_name == expected:
-                    return True
-            elif isinstance(expected, tuple):
-                if std_name in expected:
-                    return True
+            if std_name:
+                expected = criteria['standard_name']
+                if isinstance(expected, str):
+                    if std_name == expected:
+                        return True
+                elif isinstance(expected, (tuple, set, frozenset)):
+                    if std_name in expected:
+                        return True
 
         # Check axis attribute
         if 'axis' in criteria:
             axis = c.attrs.get('axis', '').strip().upper()
-            expected = criteria['axis']
-            if isinstance(expected, str):
-                if axis == expected:
-                    return True
-            elif isinstance(expected, tuple):
-                if axis in expected:
-                    return True
+            if axis:
+                expected = criteria['axis']
+                if isinstance(expected, str):
+                    if axis == expected:
+                        return True
+                elif isinstance(expected, (tuple, set, frozenset)):
+                    if axis in expected:
+                        return True
 
         # Check units hints
         if 'units_hints' in criteria:
             units = c.attrs.get('units', '').strip().lower()
-            if any(hint in units for hint in criteria['units_hints']):
+            if units and any(hint in units for hint in criteria['units_hints']):
                 return True
 
         # Check units (for level coordinate)
         if 'units' in criteria:
             units = c.attrs.get('units', '').strip().lower()
             expected = criteria['units']
-            if isinstance(expected, tuple):
+            if isinstance(expected, (tuple, set, frozenset)):
                 if units in expected:
+                    return True
+
+        # Last resort for 'level': match by well-known coordinate name patterns.
+        # This handles cases where CF attributes were stripped during I/O.
+        if name == 'level':
+            cname_lower = (c.name or '').lower()
+            if any(pat == cname_lower or cname_lower.startswith(pat)
+                   for pat in _LEVEL_NAME_PATTERNS):
+                # Only return True when the coordinate is actually a dimension
+                # of size > 1 (avoids misidentifying scalar variables).
+                if c.ndim >= 1:
                     return True
 
         return False

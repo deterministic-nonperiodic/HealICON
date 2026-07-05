@@ -681,6 +681,128 @@ def plot_map(ds: xr.Dataset, var_name: str, target_height: float | None = None, 
     plt.close(fig)
 
 
+def plot_ep_flux(ds: xr.Dataset, out_dir: str = ".", prefix: str = "ep_flux"):
+    """Plot Eliassen-Palm flux cross-section.
+
+    Computes EP flux on-the-fly from the input HEALPix dataset (if not already
+    computed) and produces a lat × alt section with:
+    - Filled contours: EP flux divergence expressed as zonal-mean acceleration
+      ``a_EP`` (m s⁻¹ day⁻¹), diverging colourmap centred on zero.
+    - Quiver arrows: scaled EP flux vectors (F^(φ), F^(z)), normalised by
+      ρ₀ a cosφ so that arrow lengths are comparable across altitudes.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Input dataset.  If it already contains ``a_EP`` (output of
+        ``healicon ep-flux``), the pre-computed fields are used directly.
+        Otherwise the full pipeline is run in-memory.
+    out_dir : str
+        Output directory.
+    prefix : str
+        File-name prefix for the saved PNG.
+    """
+    set_publication_style()
+
+    # ── Run pipeline if not already computed ──────────────────────────────────
+    if 'a_EP' not in ds:
+        logger.info("EP flux not pre-computed — running pipeline in-memory.")
+        from .analysis.ep_flux import eliassen_palm
+        ds = eliassen_palm(ds, time_mean=True)
+    elif 'time' in ds['a_EP'].dims:
+        logger.info("Averaging pre-computed EP flux over time.")
+        ds = ds.mean(dim='time', keep_attrs=True)
+
+    a_EP = ds['a_EP'].squeeze()
+    F_phi = ds['F_phi'].squeeze()
+    F_z = ds['F_z'].squeeze()
+
+    alt_name = 'alt' if 'alt' in a_EP.coords else 'altitude'
+
+    # Convert altitude to km for display
+    if _coord_is_meter(a_EP[alt_name]):
+        alt_km = a_EP[alt_name] / 1000.0
+        a_EP = a_EP.assign_coords({alt_name: alt_km})
+        F_phi = F_phi.assign_coords({alt_name: alt_km})
+        F_z = F_z.assign_coords({alt_name: alt_km})
+        alt_km_label = 'Altitude (km)'
+    else:
+        alt_km_label = f'{alt_name}'
+
+    # Ensure monotonic ordering for contourf
+    try:
+        a_EP = a_EP.sortby('lat').sortby(alt_name)
+        F_phi = F_phi.sortby('lat').sortby(alt_name)
+        F_z = F_z.sortby('lat').sortby(alt_name)
+    except Exception:
+        pass
+
+    lat = a_EP['lat'].values
+    alt = a_EP[alt_name].values
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # ── Filled contours: a_EP ─────────────────────────────────────────────────
+    vmax = float(np.nanpercentile(np.abs(a_EP.values), 97))
+    vmax = max(vmax, 1e-6)
+    levels = np.linspace(-vmax, vmax, 41)
+    cf = ax.contourf(lat, alt, a_EP.values.T, levels=levels,
+                     cmap='RdBu_r', extend='both')
+    cbar = plt.colorbar(cf, ax=ax, pad=0.02)
+    cbar.set_label(r'$\nabla \cdot \mathbf{F}$ acceleration  (m s$^{-1}$ day$^{-1}$)',
+                   fontsize=9)
+
+    # ── Quiver: EP flux arrows (normalise by ρ₀ a cosφ for visual balance) ───
+    rho0 = ds.get('rho0', None)
+    if rho0 is not None:
+        rho0 = rho0.squeeze()
+        if 'time' in rho0.dims:
+            rho0 = rho0.mean('time')
+        if _coord_is_meter(rho0[alt_name]):
+            rho0 = rho0.assign_coords({alt_name: rho0[alt_name] / 1000.0})
+        _A = 6.371e6
+        lat_rad = np.deg2rad(rho0['lat'].values)
+        cos_phi = np.cos(lat_rad)
+        denom = rho0.values * _A * cos_phi[np.newaxis, :]
+        Qx = (F_phi.values / denom.T).T
+        Qz = (F_z.values / denom.T).T
+    else:
+        Qx = F_phi.values
+        Qz = F_z.values
+
+    # Subsample for readable arrows
+    n_lat, n_alt = len(lat), len(alt)
+    step_lat = max(1, n_lat // 20)
+    step_alt = max(1, n_alt // 15)
+    LAT, ALT = np.meshgrid(lat[::step_lat], alt[::step_alt])
+    Qx_sub = Qx[::step_alt, ::step_lat]
+    Qz_sub = Qz[::step_alt, ::step_lat]
+
+    # Scale arrows so vertical and meridional components are visually comparable
+    scale_ratio = (alt[-1] - alt[0]) / (lat[-1] - lat[0] + 1e-6)
+    Qz_scaled = Qz_sub * scale_ratio * 10.0
+
+    ax.quiver(LAT, ALT, Qx_sub, Qz_scaled, color='k', alpha=0.6,
+              scale_units='width', scale=np.nanpercentile(np.abs(Qx_sub[np.isfinite(Qx_sub)]), 90) * 15 + 1e-30,
+              width=0.003, headwidth=4)
+
+    # ── Decoration ────────────────────────────────────────────────────────────
+    ax.set_xlim(-90, 90)
+    ax.set_xticks([-60, -30, 0, 30, 60])
+    ax.set_xticklabels(['60°S', '30°S', '0°', '30°N', '60°N'])
+    ax.set_xlabel('Latitude')
+    ax.set_ylabel(alt_km_label)
+    ax.set_title('Eliassen-Palm Flux  (arrows: F,  shading: ∇·F acceleration)',
+                 fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.4)
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{prefix}_ep_flux.png")
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    logger.info(f"Saved EP flux plot to {out_path}")
+    plt.close(fig)
+
+
 def _add_reference_slopes(ax, l_arr, data_arr):
     """
     Overlay canonical atmospheric kinetic-energy reference slopes on a log-log spectral plot.

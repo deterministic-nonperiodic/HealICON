@@ -2,32 +2,46 @@
 Eliassen-Palm Flux Analysis
 ===========================
 
-Implements the EP flux vector **F** and its divergence ∇·**F** following the
-Transformed Eulerian Mean (TEM) framework of Andrews, Holton & Leovy (1987).
+Coordinate-aware EP flux.
 
-Full TEM formulation in height coordinates (§3.5.2):
+Adds a HEIGHT vs PRESSURE branch so the diagnostic is self-consistent on
+either vertical coordinate (fixing the previous hybrid that differentiated in
+pressure while using the height-coordinate rho0 prefactor).
 
-  F^(φ) = ρ₀ a cosφ · [ f [v′θ′]/θ̄_z − [u′v′] ]
-  F^(z) = ρ₀ a cosφ · [ [v′θ′] ū_z / θ̄_z − [u′w′] ]
+  HEIGHT coords (metres):   Andrews, Holton & Leovy (1987), eq. 3.5.3
+      F^(phi) = rho0 a cosphi ( u_bar_z [v'th']/th_z - [u'v'] )
+      F^(z)   = rho0 a cosphi ( f_hat   [v'th']/th_z - [u'w'] )
+      div = (a cosphi)^-1 d(F_phi cosphi)/dphi + dF_z/dz
+      a_EP = div / (rho0 a cosphi)
 
-QG approximation (used when vertical wind w is absent):
+  PRESSURE coords (isobaric): Edmon/Hoskins/McIntyre (1980) form
+      F^(phi) = a cosphi ( u_bar_p [v'th']/th_p - [u'v'] )
+      F^(p)   = a cosphi ( f_hat   [v'th']/th_p - [u'omega] )
+      div = (a cosphi)^-1 d(F_phi cosphi)/dphi + dF_p/dp
+      a_EP = div / (a cosphi)                       # NO rho0
 
-  F^(φ) = −ρ₀ a cosφ · [u′v′]
-  F^(z) =  ρ₀ a cosφ · f [v′θ′] / θ̄_z
+f_hat = f - (a cosphi)^-1 d(u_bar cosphi)/dphi = f + zeta_bar  is the absolute
+vorticity factor and is coordinate-independent.
 
-∇·F = (a cosφ)⁻¹ ∂(F^(φ) cosφ)/∂φ + ∂F^(z)/∂z
+The isobaric vertical eddy flux needs omega = dp/dt, not w. When only w (m/s) is
+available it is converted hydrostatically: omega' ~ -rho0 g w', hence
+    [u'omega] ~ -rho0 g [u'w'] .
+This is the one place density re-enters the pressure branch; it is an excellent
+approximation for the zonal mean even where the instantaneous flow is
+non-hydrostatic, because the mean state stays close to hydrostatic balance.
 
-Density ρ₀ is resolved via a priority cascade:
-  1. `pres` present          → ρ₀ = p̄ / (Rd T̄)
-  2. `temp` present, no pres → hydrostatic integration → p̄ → ρ₀
-  3. Neither                 → exponential profile ρ_surf exp(−z/H)
-
-Scale height H = Rd T̄(z,φ)/g (locally varying); fitted from log-pressure if
-temperature is unavailable.
+Validity: above ~100-120 km molecular diffusion and ion drag dominate the
+momentum budget and the EP-flux framework itself (not the coordinate choice)
+loses meaning. compute_ep_divergence records a documented validity floor in the
+output attrs; it does NOT mask by default (that is the plotting layer's job).
 
 References:
     Andrews, D. G., Holton, J. R., & Leovy, C. B. (1987).
     Middle Atmosphere Dynamics. Academic Press.
+
+    Edmon , H. J., B. J. Hoskins, and M. E. McIntyre, 1980:
+    Eliassen-Palm Cross-Sections for the Troposphere. J. Atmos. Sci., 37, 2600-2616,
+    https://doi.org/10.1175/1520-0469(1980)037<2600:EPCSFT>2.0.CO;2.
 """
 
 from __future__ import annotations
@@ -38,32 +52,521 @@ from typing import Literal
 import numpy as np
 import xarray as xr
 
-from ..grid import append_history, get_cells_dim
+from ..cf_coords import _cf_guess, _find_coordinate, _is_z
 from ..extract import zonal_mean as _zonal_mean
+from ..grid import append_history, get_cells_dim
 
 logger = logging.getLogger(__name__)
 
 # ── Physical constants ────────────────────────────────────────────────────────
-_RD = 287.05        # J kg⁻¹ K⁻¹  dry-air gas constant
-_CP = 1004.0        # J kg⁻¹ K⁻¹  specific heat at constant pressure
-_G = 9.80665        # m s⁻²       standard gravity
+_RD = 287.05  # J kg⁻¹ K⁻¹  dry-air gas constant
+_CP = 1004.0  # J kg⁻¹ K⁻¹  specific heat at constant pressure
+_G = 9.80665  # m s⁻²       standard gravity
 _OMEGA = 7.2921e-5  # rad s⁻¹     Earth rotation rate
-_A = 6.371e6        # m            Earth mean radius
+_A = 6.371e6  # m            Earth mean radius
 _KAPPA = _RD / _CP  # ≈ 0.2857
-_P0 = 1.0e5         # Pa           reference pressure for θ
+_P0 = 1.0e5  # Pa           reference pressure for θ
 
 _SECS_PER_DAY = 86400.0
 
+# Standard isobaric levels (Pa) used when interpolating from model levels.
+_STD_PRES_LEVELS = np.array([
+    100000, 92500, 85000, 70000, 60000, 50000, 40000, 30000, 25000, 20000,
+    15000, 10000, 7000, 5000, 3000, 2000, 1000, 700, 500, 300,
+    200, 100, 70, 50, 30, 20, 10, 1, 0.1, 0.01,
+    0.001, 0.0001, 0.00001], dtype=float)  # Pa
+
+# ── Robust variable lookup ────────────────────────────────────────────────────
+
+# Fallback name patterns for each physical quantity.
+_VAR_NAME_ALIASES = {
+    'theta': ('theta', 'theta_zm', 'pot_temp', 'pt'),
+    'temperature': ('temp', 'temp_zm', 'ta', 'temperature', 't'),
+    'pressure': ('pres', 'pres_zm', 'pressure', 'pfull', 'p'),
+    'w': ('w', 'wa', 'wap', 'omega'),
+    'density': ('rho', 'rho0', 'density'),
+}
+
+
+def _find_var(ds: xr.Dataset, target: str) -> str | None:
+    """Find the actual variable name for a physical quantity in *ds*.
+
+    Priority:
+    1. Well-known name aliases (unambiguous, e.g. 'temp' → temperature).
+    2. CF ``standard_name`` match (reliable, e.g. ``air_temperature``).
+    3. CF units-only fallback (ambiguous — only for vars without standard_name).
+
+    Returns ``None`` when no candidate is found.
+    """
+    # 1. Name-alias match (most specific, no false positives)
+    for alias in _VAR_NAME_ALIASES.get(target, ()):
+        if alias in ds:
+            return alias
+    # 2. CF-aware guess (standard_name, then units-only fallback)
+    cf_hit = _cf_guess(ds, target)
+    if cf_hit is not None:
+        return cf_hit
+    return None
+
+
+def _parse_dataset(ds: xr.Dataset) -> xr.Dataset:
+    """Validate and normalise an input dataset for the EP flux pipeline.
+
+    Responsibilities
+    ----------------
+    1. Resolve variable names to **canonical** forms (``u``, ``v``, ``w``,
+       ``temp``, ``theta``, ``pres``) using CF conventions + common aliases.
+    2. Derive missing thermodynamic fields where possible:
+       * θ from T + p:  ``theta = temp * (P0/pres)^kappa``
+       * θ from T + z:  ``theta ≈ temp * exp(κ z / H)``  (analytical)
+       * p from θ + T:  ``pres = P0 * (T/θ)^(1/κ)``
+    3. Validate that the minimum required set (u, v, and at least one
+       thermodynamic path to θ) is present; raise ``ValueError`` otherwise.
+
+    Returns
+    -------
+    xr.Dataset
+        Copy with canonical variable names and any derived fields added.
+    """
+    # ── 1. Resolve variable names ────────────────────────────────────────────
+    var_map: dict[str, str | None] = {
+        'u': _find_var(ds, 'u') or ('u' if 'u' in ds else None),
+        'v': _find_var(ds, 'v') or ('v' if 'v' in ds else None),
+        'w': _find_var(ds, 'w'),
+        'temp': _find_var(ds, 'temperature'),
+        'theta': _find_var(ds, 'theta'),
+        'pres': _find_var(ds, 'pressure'),
+    }
+
+    # Required: u and v
+    missing = [k for k in ('u', 'v') if var_map[k] is None]
+    if missing:
+        raise ValueError(
+            f"Dataset missing required wind variables: {missing}. "
+            f"Available: {list(ds.data_vars)}"
+        )
+
+    # ── 2. Rename to canonical names ─────────────────────────────────────────
+    rename = {}
+    for canonical, actual in var_map.items():
+        if actual is not None and actual != canonical and actual in ds.data_vars:
+            rename[actual] = canonical
+    if rename:
+        # Avoid clobbering: only rename if the canonical name is free
+        safe_rename = {k: v for k, v in rename.items() if v not in ds.data_vars}
+        if safe_rename:
+            logger.debug(f"Renaming variables to canonical names: {safe_rename}")
+            ds = ds.rename_vars(safe_rename)
+
+    # ── 3. Derive θ if not present ───────────────────────────────────────────
+    has_theta = 'theta' in ds
+    has_temp = 'temp' in ds
+    has_pres = 'pres' in ds
+
+    if not has_theta:
+        if has_temp and has_pres:
+            logger.info("Deriving θ = T·(P₀/p)^κ from 'temp' and 'pres'.")
+            ds['theta'] = ds['temp'] * (_P0 / ds['pres']) ** _KAPPA
+            ds['theta'].attrs = {'long_name': 'Potential temperature', 'units': 'K'}
+        elif has_temp:
+            # Try multiple paths to derive θ from T alone
+            from ..cf_coords import _coord_is_meter
+            try:
+                alt_name = _find_alt_name(ds)
+                z = ds[alt_name]
+            except ValueError:
+                z = None
+
+            if z is not None and _is_pressure_coord(alt_name, ds):
+                # Vertical coordinate IS pressure → θ = T·(P₀/p)^κ
+                p_coord = z.copy()
+                units = str(z.attrs.get('units', '')).lower()
+                if units in ('hpa', 'mb', 'mbar', 'millibar', 'hectopascal'):
+                    p_coord = p_coord * 100.0  # convert to Pa
+                logger.info(f"Deriving θ from T and pressure coordinate '{alt_name}'.")
+                ds['theta'] = ds['temp'] * (_P0 / p_coord) ** _KAPPA
+                ds['theta'].attrs = {'long_name': 'Potential temperature', 'units': 'K'}
+                # Also promote the pressure coordinate to a proper variable (in Pa)
+                if 'pres' not in ds:
+                    ds['pres'] = p_coord.broadcast_like(ds['temp'])
+                    ds['pres'].attrs = {'long_name': 'Pressure', 'units': 'Pa',
+                                        'standard_name': 'air_pressure'}
+            elif z is not None and _coord_is_meter(z):
+                logger.warning("No pressure field; estimating θ from T via "
+                               "local scale height (analytical).")
+                H = (_RD * ds['temp']) / _G  # H = Rd·T/g
+                ds['theta'] = ds['temp'] * np.exp(_KAPPA * z / H)
+                ds['theta'].attrs = {'long_name': 'Potential temperature (estimated)',
+                                     'units': 'K'}
+            else:
+                raise ValueError(
+                    "Cannot compute potential temperature: no θ, no pressure, "
+                    "and the vertical coordinate is not in metres or pressure. "
+                    f"Available variables: {list(ds.data_vars)}"
+                )
+        else:
+            raise ValueError(
+                "Cannot compute potential temperature: dataset has neither θ "
+                f"nor T. Available: {list(ds.data_vars)}. "
+                "Provide at least: theta (θ), or temp (T) + pres (p)."
+            )
+
+    # ── 4. Derive pressure from θ + T if missing ─────────────────────────────
+    if 'pres' not in ds and 'temp' in ds and 'theta' in ds:
+        logger.info("Deriving p = P₀·(T/θ)^(1/κ) from 'temp' and 'theta'.")
+        ds['pres'] = _P0 * (ds['temp'] / ds['theta']) ** (1.0 / _KAPPA)
+        ds['pres'].attrs = {'long_name': 'Pressure (derived)', 'units': 'Pa',
+                            'standard_name': 'air_pressure'}
+
+    logger.info(
+        f"Parsed dataset: "
+        f"u={'u' in ds}, v={'v' in ds}, w={'w' in ds}, "
+        f"temp={'temp' in ds}, theta={'theta' in ds}, pres={'pres' in ds}"
+    )
+
+    # ── 5. Drop fully-NaN vertical levels ───────────────────────────────────
+    try:
+        alt_name = _find_alt_name(ds)
+    except ValueError:
+        alt_name = None
+    if alt_name is not None and alt_name in ds.dims:
+        # Use u as the reference field (always present after step 1)
+        ref_var = ds['u']
+        non_alt_dims = [d for d in ref_var.dims if d != alt_name]
+        if non_alt_dims:
+            all_nan = ref_var.isnull().all(dim=non_alt_dims)
+            n_drop = int(all_nan.sum())
+            if n_drop > 0:
+                valid_mask = ~all_nan
+                ds = ds.sel({alt_name: valid_mask})
+                logger.info(
+                    f"Dropped {n_drop} fully-NaN levels along '{alt_name}' "
+                    f"({ds.sizes[alt_name]} levels remain)."
+                )
+
+    return ds
+
+
+# ── Pressure-level interpolation ─────────────────────────────────────────────
+
+def _log_interp_vertical(
+        data_np: np.ndarray,
+        pres_np: np.ndarray,
+        p_tgt: np.ndarray,
+        lev_axis: int,
+) -> np.ndarray:
+    """Vectorised log-linear interpolation from varying to constant pressure levels.
+
+    Parameters
+    ----------
+    data_np : ndarray  (..., N, ...)
+        Data on model levels; vertical axis at *lev_axis*.
+    pres_np : ndarray, same shape
+        Pressure at each model level and location (Pa).
+    p_tgt : ndarray (P,)
+        Target pressure levels in Pa, any order (sorted descending internally).
+    lev_axis : int
+        Axis index of the model-level dimension.
+
+    Returns
+    -------
+    ndarray  (..., P, ...)
+    """
+    # Move level axis to last for simpler indexing
+    data = np.moveaxis(data_np, lev_axis, -1).astype(float, copy=False)  # (..., N)
+    pres = np.moveaxis(pres_np, lev_axis, -1).astype(float, copy=False)  # (..., N)
+    # Target pressure is already sorted ascending by the caller
+    log_p_tgt = np.log(p_tgt)  # (P,)
+    log_pres = np.log(np.maximum(pres, 1e-10))  # (..., N)
+
+    prefix = data.shape[:-1]
+    N = data.shape[-1]
+    P = len(p_tgt)
+    M = int(np.prod(prefix)) if prefix else 1
+
+    flat_lp = log_pres.reshape(M, N)  # (M, N)
+    flat_d = data.reshape(M, N)  # (M, N)
+
+    # Sort every column ascending in log-pressure
+    sort_idx = np.argsort(flat_lp, axis=1)
+    flat_lp_s = np.take_along_axis(flat_lp, sort_idx, axis=1)  # (M, N) ascending
+    flat_d_s = np.take_along_axis(flat_d, sort_idx, axis=1)  # (M, N)
+
+    m_idx = np.arange(M)
+    out = np.empty((M, P), dtype=float)
+
+    for i, lp_val in enumerate(log_p_tgt):
+        # Count how many sorted levels are <= lp_val per column  → bracket index
+        j = (flat_lp_s <= lp_val).sum(axis=1)  # (M,)
+        j_above = np.clip(j, 1, N - 1)
+        j_below = j_above - 1
+
+        x0 = flat_lp_s[m_idx, j_below]
+        x1 = flat_lp_s[m_idx, j_above]
+        y0 = flat_d_s[m_idx, j_below]
+        y1 = flat_d_s[m_idx, j_above]
+
+        dx = x1 - x0
+        # Allow linear extrapolation for points outside the pressure column
+        # (e.g. subterranean) to prevent sharp NaN gradients near the surface.
+        frac = np.where(np.abs(dx) > 1e-30, (lp_val - x0) / dx, 0.5)
+        out[:, i] = y0 + frac * (y1 - y0)
+
+    out = out.reshape(prefix + (P,))
+    return np.moveaxis(out, -1, lev_axis)
+
+
+def _interp_to_pressure_levels(
+        ds: xr.Dataset,
+        lev_name: str,
+        pres_key: str = 'pres',
+        p_levels: np.ndarray | None = None,
+) -> xr.Dataset:
+    """Remap *ds* from model levels to constant isobaric levels.
+
+    Uses the 4-D pressure field *pres_key* (Pa) in *ds* to perform
+    log-linear vertical interpolation via :func:`xr.apply_ufunc`.
+    xarray aligns non-core dimensions automatically, so variables whose
+    non-level dimensions differ from *pres_key* (e.g. coordinate bounds)
+    are forwarded unchanged rather than causing a reshape error.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+    lev_name : str
+        Name of the model-level dimension.
+    pres_key : str
+        Name of the pressure variable in *ds* (default ``'pres'``).
+    p_levels : ndarray, optional
+        Target pressure levels in Pa.  Defaults to :data:`_STD_PRES_LEVELS`
+        filtered to the pressure range present in *ds*.
+
+    Returns
+    -------
+    xr.Dataset
+        On a ``plev`` dimension with ``standard_name='air_pressure'``.
+    """
+    pres_da = ds[pres_key]
+    n_lev = ds.sizes[lev_name]
+
+    # Default: standard levels within the model pressure range
+    if p_levels is None:
+        p_min = float(pres_da.min())
+        p_max = float(pres_da.max())
+        p_levels = _STD_PRES_LEVELS[
+            (_STD_PRES_LEVELS >= p_min * 0.5) & (_STD_PRES_LEVELS <= p_max * 1.1)
+            ]
+        if len(p_levels) == 0:
+            p_levels = np.geomspace(p_max, p_min, n_lev)
+
+    p_levels = np.sort(np.asarray(p_levels, dtype=float))  # ascending
+    P = len(p_levels)
+
+    logger.info(
+        f"Interpolating {n_lev} model levels -> {P} isobaric levels "
+        f"[{p_levels[0] / 100:.1f}-{p_levels[-1] / 100:.1f} hPa] using '{pres_key}'."
+    )
+
+    plev_attrs = {
+        'standard_name': 'air_pressure',
+        'long_name': 'Pressure',
+        'units': 'Pa',
+        'axis': 'Z',
+        'positive': 'down',
+    }
+    plev_coord = xr.DataArray(p_levels, dims=['plev'], attrs=plev_attrs)
+
+    # Kernel called by apply_ufunc: level dim is already last (moved by xarray).
+    def _kernel(data_nd, pres_nd):
+        return _log_interp_vertical(data_nd, pres_nd, p_levels, lev_axis=-1)
+
+    # Non-level dims of the pressure variable - used to filter interpolatable vars.
+    pres_non_lev = set(pres_da.dims) - {lev_name}
+
+    new_vars: dict = {}
+    for name, da in ds.data_vars.items():
+        # Skip non-level variables.
+        if lev_name not in da.dims:
+            if lev_name in da.coords:
+                da = da.drop_vars(lev_name)
+            new_vars[name] = da
+            continue
+
+        if name == pres_key:
+            # Log-linear interpolation for P vs log(P) produces artifacts.
+            # We explicitly skip interpolating it and will set it exactly to plev later.
+            continue
+
+        # Drop variables whose non-level dims are incompatible with pres_da
+        # (e.g. coordinate bounds like height_bnds with a 'bnds=2' dimension).
+        da_non_lev = set(da.dims) - {lev_name}
+        if not da_non_lev.issubset(pres_non_lev | {'time'}):
+            logger.debug(
+                f"Dropping '{name}': non-level dims {da_non_lev} not "
+                f"compatible with pressure dims {pres_non_lev}."
+            )
+            continue  # omit from output entirely
+
+        interp_da = xr.apply_ufunc(
+            _kernel,
+            da,
+            pres_da,
+            input_core_dims=[[lev_name], [lev_name]],
+            output_core_dims=[['plev']],
+            dask='parallelized',
+            output_dtypes=[float],
+            dask_gufunc_kwargs={'output_sizes': {'plev': P}, 'allow_rechunk': True},
+        )
+        interp_da = interp_da.assign_coords(plev=plev_coord)
+        interp_da.attrs.update(da.attrs)
+        new_vars[name] = interp_da
+
+    out = xr.Dataset(new_vars, attrs=ds.attrs)
+    out = out.assign_coords(plev=plev_coord)
+
+    if pres_key in ds.data_vars:
+        # Re-create pressure variable perfectly matching plev.
+        # This replaces the mathematically inaccurate log-linear interpolation 
+        # of P vs log(P) with the exact definition of the isobaric surface.
+        out[pres_key] = out['plev']
+
+    # Final safety: remove any residual reference to the old level coordinate.
+    if lev_name in out.coords and lev_name != 'plev':
+        out = out.drop_vars(lev_name)
+    logger.debug(
+        f"[_interp_to_pressure_levels] output dims={dict(out.sizes)} "
+        f"coords={list(out.coords)} "
+        f"data_vars={list(out.data_vars)}"
+    )
+    return out
+
+
+def _preprocess_vertical(ds: xr.Dataset) -> xr.Dataset:
+    """Ensure the dataset carries a usable vertical coordinate before EP flux.
+
+    Decision tree
+    -------------
+    1. Found a real height coordinate (metres via :func:`_is_z`) → no-op.
+    2. Found a pressure dim/coord already               → no-op.
+    3. Found a 4-D pressure *variable* (``pres`` / ``pressure``):
+       → interpolate all fields to :data:`_STD_PRES_LEVELS` via
+       :func:`_interp_to_pressure_levels`.
+    4. Nothing useful found → warn and return unchanged.
+    """
+    coord = _find_coordinate(ds, 'level', raise_notfound=False)
+
+    # Case 1: real height coordinate — but guard against integer model-level
+    # indices that carry height-like CF attributes (e.g. ICON sets axis='Z'
+    # on its 1-based 'height' dimension even though values are 1, 2, … 90).
+    if coord is not None and _is_z(coord.name, ds.coords) and not _is_level_index(coord):
+        return ds
+
+    # Case 2: pressure already a dim/coord (by name or CF attributes)
+    for pname in ('pres', 'pres_zm', 'plev', 'pressure'):
+        if pname in ds.coords or pname in ds.dims:
+            return ds
+    # Also check by CF attributes (e.g. 'level' with standard_name='air_pressure')
+    if coord is not None and _is_pressure_coord(coord.name, ds):
+        return ds
+
+    # Case 3: 4-D pressure variable available → interpolate
+    pres_key = next((p for p in ('pres', 'pressure') if p in ds.data_vars), None)
+    if pres_key is not None:
+        # Determine model-level dim: the dim of pres that isn't time/spatial
+        spatial_like = {'time', 'lat', 'lon', 'latitude', 'longitude',
+                        'ncells', 'cells', 'cell', 'ncell'}
+        lev_name = (
+            coord.name if coord is not None
+            else next(
+                (d for d in ds[pres_key].dims if d.lower() not in spatial_like),
+                None,
+            )
+        )
+        if lev_name is not None:
+            return _interp_to_pressure_levels(ds, lev_name, pres_key=pres_key)
+        logger.warning("Could not identify model-level dimension for pressure interpolation.")
+        return ds
+
+    # Case 4: nothing useful
+    logger.warning(
+        "No height-in-metres coordinate and no pressure variable found. "
+        "EP flux will be computed on raw model-level coordinates."
+    )
+    return ds
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _find_alt_name(ds: xr.Dataset | xr.DataArray) -> str:
+    """Return the name of the vertical coordinate using CF-convention inference.
+
+    Strategy
+    --------
+    1. Ask :func:`~healicon.cf_coords._find_coordinate` for a candidate.
+    2. Validate it with :func:`~healicon.cf_coords._is_z`: the coordinate must
+       carry meter-like units (CF height/altitude).  Plain integer model-level
+       indices (e.g. ICON ``height`` = 1 … 90) fail this test.
+    3. If the candidate is not real height in metres, search for a pressure
+       coordinate (``pres``, ``pres_zm``, ``plev``, ``pressure``).
+    4. If nothing better is found, fall back to the original candidate.
+    """
+    if isinstance(ds, xr.DataArray):
+        ds = ds.to_dataset(name='_tmp')
+
+    coord = _find_coordinate(ds, 'level', raise_notfound=False)
+
+    # Happy path: found a real height coordinate (metres).
+    if coord is not None and _is_z(coord.name, ds.coords):
+        return str(coord.name)
+
+    # Candidate is a model-level index (or absent) → prefer pressure.
+    # First: check if the candidate itself is a pressure coord (CF attributes).
+    if coord is not None and _is_pressure_coord(coord.name, ds):
+        logger.debug(
+            f"Vertical coord '{coord.name}' identified as pressure via CF attributes."
+        )
+        return str(coord.name)
+
+    # Second: search by well-known pressure coordinate names.
+    for pres_name in ('pres', 'pres_zm', 'plev', 'pressure'):
+        if pres_name in ds.coords or pres_name in ds.dims:
+            logger.debug(
+                f"Vertical coord '{getattr(coord, 'name', None)}' is not height "
+                f"in metres; using pressure coordinate '{pres_name}'."
+            )
+            return pres_name
+
+    # Third: scan ALL coordinates for pressure-like CF attributes.
+    for cname in ds.coords:
+        if cname in ds.dims and _is_pressure_coord(cname, ds):
+            logger.debug(f"Found pressure coordinate '{cname}' via CF scan.")
+            return cname
+
+    # Last resort: use whatever _find_coordinate found (or raise).
+    if coord is not None:
+        logger.warning(
+            f"Vertical coord '{coord.name}' is not height in metres and no "
+            "pressure coordinate found; using it as-is."
+        )
+        return str(coord.name)
+
+    raise ValueError(
+        "No vertical coordinate found. "
+        f"Available dims: {list(ds.dims)}, coords: {list(ds.coords)}"
+    )
+
 
 def _coriolis(lat_rad: xr.DataArray) -> xr.DataArray:
     """Coriolis parameter f = 2Ω sinφ."""
     return 2.0 * _OMEGA * np.sin(lat_rad)
 
 
-def _lat_rad(ds_zm: xr.Dataset) -> xr.DataArray:
-    """Return latitude in radians from the 'lat' coordinate."""
-    return np.deg2rad(ds_zm['lat'])
+def _is_level_index(coord: xr.DataArray) -> bool:
+    """Return True if coord looks like integer model-level indices (not metres)."""
+    vals = np.asarray(coord.values, dtype=float)
+    if vals.max() > 1000:
+        return False
+    return bool(np.all(np.abs(vals - np.round(vals)) < 0.01) and vals.max() <= 500)
 
 
 def _resolve_scale_height(ds_zm: xr.Dataset) -> xr.DataArray:
@@ -76,7 +579,7 @@ def _resolve_scale_height(ds_zm: xr.Dataset) -> xr.DataArray:
 
     Accepts variable names 'temp' or 'temp_zm', 'pres' or 'pres_zm'.
     """
-    alt = ds_zm['alt'] if 'alt' in ds_zm.coords else ds_zm['altitude']
+    alt_name = _find_alt_name(ds_zm)
     temp_key = 'temp' if 'temp' in ds_zm else ('temp_zm' if 'temp_zm' in ds_zm else None)
     pres_key = 'pres' if 'pres' in ds_zm else ('pres_zm' if 'pres_zm' in ds_zm else None)
 
@@ -89,13 +592,13 @@ def _resolve_scale_height(ds_zm: xr.Dataset) -> xr.DataArray:
 
     if pres_key is not None:
         p_bar = ds_zm[pres_key].mean('lat') if 'lat' in ds_zm[pres_key].dims else ds_zm[pres_key]
-        z_vals = alt.values.astype(float)
+        z_vals = ds_zm[alt_name].values.astype(float)
         log_p = np.log(np.maximum(p_bar.values.astype(float), 1e-30))
         log_p_1d = log_p.reshape(-1, len(z_vals)).mean(axis=0)
         coeffs = np.polyfit(z_vals, log_p_1d, 1)
         H_const = float(-1.0 / coeffs[0]) if coeffs[0] != 0 else 7000.0
         H_const = max(H_const, 1000.0)
-        logger.debug(f"Scale height H fitted from log(p̄) vs z: H = {H_const/1e3:.2f} km")
+        logger.debug(f"Scale height H fitted from log(p̄) vs z: H = {H_const / 1e3:.2f} km")
         return xr.DataArray(H_const, attrs={'long_name': 'Scale height', 'units': 'm'})
 
     logger.warning("Neither temp nor pres available; using H = 7 km.")
@@ -112,9 +615,22 @@ def _resolve_density(ds_zm: xr.Dataset, H: xr.DataArray) -> xr.DataArray:
 
     Accepts variable names 'temp'/'temp_zm', 'pres'/'pres_zm'.
     """
-    alt = ds_zm['alt'] if 'alt' in ds_zm.coords else ds_zm['altitude']
+    alt_name = _find_alt_name(ds_zm)
+    alt = ds_zm[alt_name]
     temp_key = 'temp' if 'temp' in ds_zm else ('temp_zm' if 'temp_zm' in ds_zm else None)
     pres_key = 'pres' if 'pres' in ds_zm else ('pres_zm' if 'pres_zm' in ds_zm else None)
+
+    # Derive pressure from theta + temp if both exist but pres does not:
+    # p = P0 * (T / theta)^(1/kappa)
+    if pres_key is None and temp_key is not None:
+        theta_key = 'theta' if 'theta' in ds_zm else ('theta_zm' if 'theta_zm' in ds_zm else None)
+        if theta_key is not None:
+            logger.info("Density: deriving p̄ from θ̄ and T̄ via p = P₀·(T/θ)^(1/κ).")
+            ratio = ds_zm[temp_key] / ds_zm[theta_key]
+            p_derived = _P0 * ratio ** (1.0 / _KAPPA)
+            rho = p_derived / (_RD * ds_zm[temp_key])
+            rho.attrs = {'long_name': 'Reference density (from θ and T)', 'units': 'kg m-3'}
+            return rho
 
     if pres_key is not None and temp_key is not None:
         logger.info("Density: using ρ₀ = p̄/(Rd T̄) (exact ideal gas).")
@@ -124,9 +640,10 @@ def _resolve_density(ds_zm: xr.Dataset, H: xr.DataArray) -> xr.DataArray:
 
     if temp_key is not None:
         logger.info("Density: reconstructing p̄ from hydrostatic integration.")
-        T_bar = ds_zm[temp_key].sortby('alt')
-        z = T_bar['alt'].values.astype(float)
-        T_np = T_bar.values.astype(float)
+        T_bar = ds_zm[temp_key].sortby(alt_name)
+        alt_ax = T_bar.dims.index(alt_name)
+        z = T_bar[alt_name].values.astype(float)
+        T_np = np.moveaxis(T_bar.values.astype(float), alt_ax, -1)  # (..., n_alt)
         integrand = _G / (_RD * T_np)
         dz = np.diff(z)
         n_alt = len(z)
@@ -135,73 +652,137 @@ def _resolve_density(ds_zm: xr.Dataset, H: xr.DataArray) -> xr.DataArray:
             trap = 0.5 * (integrand[..., i] + integrand[..., i + 1]) * dz[i]
             cum_int[..., i] = cum_int[..., i + 1] + trap
         p_toa = 1.0
-        p_bar_np = p_toa * np.exp(cum_int)
+        p_bar_np = np.moveaxis(p_toa * np.exp(cum_int), -1, alt_ax)  # restore axis
         p_bar = xr.DataArray(p_bar_np, coords=T_bar.coords, dims=T_bar.dims)
         rho = p_bar / (_RD * T_bar)
         rho.attrs = {'long_name': 'Reference density (hydrostatic)', 'units': 'kg m-3'}
         return rho
 
-    logger.warning("Density: neither pres nor temp — using exponential profile ρ₀=ρ_surf·exp(−z/H).")
+    logger.warning(
+        "Density: neither pres nor temp — using exponential profile ρ₀=ρ_surf·exp(−z/H).")
     rho_surf = 1.225
     H_vals = H.values if hasattr(H, 'values') else float(H)
     z_vals = alt.values.astype(float)
     rho_np = rho_surf * np.exp(-z_vals / H_vals)
-    rho = xr.DataArray(rho_np, coords={'alt': alt}, dims=['alt'],
-                        attrs={'long_name': 'Reference density (exponential)', 'units': 'kg m-3'})
+    rho = xr.DataArray(rho_np, coords={alt_name: alt}, dims=[alt_name],
+                       attrs={'long_name': 'Reference density (exponential)', 'units': 'kg m-3'})
     return rho
+
+
+def _align_w_to_full_levels(ds: xr.Dataset) -> xr.Dataset:
+    """Interpolate staggered vertical wind w to the full model levels.
+
+    ICON stores w on half-levels (e.g. ``height_2`` with n+1 levels) while u, v,
+    temp are on full levels (``height`` with n levels).  This function detects that
+    pattern and interpolates w to the full-level coordinate so the dataset is
+    self-consistent for eddy-flux computation.
+    """
+    if 'w' not in ds:
+        return ds
+
+    try:
+        alt_name = _find_alt_name(ds)
+    except ValueError:
+        return ds  # no vertical coordinate found — nothing to do
+
+    w_dims = ds['w'].dims
+    # Detect the half-level dimension: same base name with _2 suffix or size = n+1
+    half_dim = None
+    full_size = ds.sizes.get(alt_name, None)
+    for dim in w_dims:
+        if dim == alt_name:
+            break  # w already on full levels
+        if full_size and ds.sizes.get(dim, 0) == full_size + 1:
+            half_dim = dim
+            break
+        if dim.endswith('_2') or 'half' in dim or 'bnds' in dim:
+            half_dim = dim
+            break
+
+    if half_dim is None:
+        return ds
+
+    if ds.sizes.get(half_dim) == full_size + 1:
+        logger.info(f"Destaggering w from '{half_dim}' to full levels '{alt_name}'.")
+        w_data = ds['w'].data
+        axis = w_dims.index(half_dim)
+        s_lower = [slice(None)] * ds['w'].ndim
+        s_upper = [slice(None)] * ds['w'].ndim
+        s_lower[axis] = slice(1, None)
+        s_upper[axis] = slice(0, -1)
+        w_interp_data = 0.5 * (w_data[tuple(s_lower)] + w_data[tuple(s_upper)])
+
+        new_dims = [d if d != half_dim else alt_name for d in w_dims]
+        new_coords = {k: v for k, v in ds['w'].coords.items() if k != half_dim}
+        if alt_name in ds.coords:
+            new_coords[alt_name] = ds[alt_name]
+
+        w_interp = xr.DataArray(w_interp_data, dims=new_dims, coords=new_coords)
+        return ds.assign({'w': w_interp})
+
+    if half_dim in ds.coords and alt_name in ds.coords:
+        logger.info(f"Interpolating w from '{half_dim}' to full levels '{alt_name}'.")
+        w_interp = ds['w'].interp({half_dim: ds[alt_name].values},
+                                  method='linear',
+                                  kwargs={'fill_value': 'extrapolate'})
+        if half_dim in w_interp.dims and half_dim != alt_name:
+            w_interp = w_interp.rename({half_dim: alt_name})
+        return ds.assign({'w': w_interp})
+
+    return ds
 
 
 # ── Stage 1: Eddy covariances ─────────────────────────────────────────────────
 
-def compute_eddy_fluxes(ds: xr.Dataset) -> xr.Dataset:
+def compute_eddy_fluxes(ds: xr.Dataset, preprocess: bool = False) -> xr.Dataset:
     """Compute zonal-mean eddy covariances from a HEALPix dataset.
 
     Parameters
     ----------
     ds : xr.Dataset
-        HEALPix dataset.  Must contain ``u`` and ``v``.  ``temp`` and ``pres``
-        are strongly recommended.  ``w`` enables full TEM computation.
+        HEALPix dataset. Must contain ``u`` and ``v``. ``temp``/``pres`` are
+        strongly recommended; ``w`` enables the full TEM vertical flux.
+    preprocess : bool, default False
+        Whether to run :func:`_preprocess_vertical` here. Default False because
+        the driver :func:`eliassen_palm` now owns that single decision. Set True
+        only if you call this function standalone without the driver.
 
     Returns
     -------
-    xr.Dataset
-        Zonal-mean dataset with variables:
-        ``u_zm``, ``v_zm``, ``theta_zm`` (if temp present),
-        ``upvp_zm`` ([u′v′]),
-        ``vptp_zm`` ([v′θ′], if temp present),
-        ``upwp_zm`` ([u′w′], if w present),
-        ``pres_zm``, ``temp_zm`` (if available).
+    xr.Dataset with ``u_zm``, ``v_zm``, ``theta_zm``, ``upvp_zm``, ``vptp_zm``,
+    ``upwp_zm``, ``pres_zm``, ``temp_zm`` (subject to input availability),
+    all on the vertical coordinate already attached to ``ds``.
     """
-    required = [v for v in ('u', 'v') if v not in ds]
-    if required:
-        raise ValueError(f"Dataset missing required variables: {required}")
+    # _parse_dataset guarantees canonical names (u, v, theta, temp, pres, w).
+    # Vertical-coordinate preprocessing is owned by the driver (eliassen_palm).
+    # Only run it here if explicitly asked (standalone use).
+    if preprocess:
+        ds = _parse_dataset(ds)
+        ds = _align_w_to_full_levels(ds)
+        ds = _preprocess_vertical(ds)
 
-    # ── Zonal means ────────────────────────────────────────────────────────────
+    for v in ('u', 'v'):
+        if v not in ds:
+            raise ValueError(f"Dataset missing required variable '{v}' "
+                             f"(after parsing). Available: {list(ds.data_vars)}")
+    if 'theta' not in ds:
+        raise ValueError("Dataset missing 'theta' after parsing. "
+                         "Run _parse_dataset or eliassen_palm as the entry point.")
+
+    # ── Zonal means ──────────────────────────────────────────────────────────
     logger.info("Computing zonal means for EP flux eddy covariances.")
     ds_zm = _zonal_mean(ds)
 
-    # ── Potential temperature θ on HEALPix pixels ────────────────────────────
-    has_temp = 'temp' in ds and 'temp' in ds_zm
+    has_temp = 'temp' in ds
     has_w = 'w' in ds
     has_pres = 'pres' in ds
 
-    if has_temp and has_pres:
-        theta = ds['temp'] * (_P0 / ds['pres']) ** _KAPPA
-        theta_zm = ds_zm['temp'] * (_P0 / ds_zm['pres']) ** _KAPPA
-        theta.attrs = {'long_name': 'Potential temperature', 'units': 'K'}
-        theta_zm.attrs = {'long_name': 'Zonal-mean potential temperature', 'units': 'K'}
-    elif has_temp:
-        # Approximate θ ≈ T if no pressure available
-        logger.warning("pres not available; approximating θ ≈ T.")
-        theta = ds['temp']
-        theta_zm = ds_zm['temp']
-    else:
-        theta = None
-        theta_zm = None
+    # θ is guaranteed present by _parse_dataset
+    theta = ds['theta']
+    theta_zm = _zonal_mean(xr.Dataset({'theta': theta}))['theta']
+    theta_zm.attrs = {'long_name': 'Zonal-mean potential temperature', 'units': 'K'}
 
     # ── Broadcast zonal means to HEALPix pixels via healpy ring look-up ──────
-    # The zonal_mean output has a 'lat' dimension that corresponds to HEALPix rings.
-    # We need to map each pixel back to its ring latitude.
     import healpy as hp
     cell_dim = get_cells_dim(ds)
     npix = ds.sizes[cell_dim]
@@ -209,40 +790,34 @@ def compute_eddy_fluxes(ds: xr.Dataset) -> xr.Dataset:
 
     from ..grid import get_healpix_order
     is_nested = get_healpix_order(ds) == 'nested'
-    theta_ring, phi_ring = hp.pix2ang(nside, np.arange(npix), nest=is_nested)
-    lats_pixels = 90.0 - np.rad2deg(theta_ring)  # (npix,) in degrees
-    lats_zm = ds_zm['lat'].values  # ring latitudes
+    theta_ring, _phi_ring = hp.pix2ang(nside, np.arange(npix), nest=is_nested)
+    lats_pixels = 90.0 - np.rad2deg(theta_ring)
+    lats_zm = ds_zm['lat'].values
 
-    # For each pixel find the nearest ring index
     ring_idx = np.searchsorted(np.sort(lats_zm), lats_pixels)
     ring_idx = np.clip(ring_idx, 0, len(lats_zm) - 1)
-    # Use the sorted index map — lats_zm may be in any order
     sorted_idx = np.argsort(lats_zm)
     ring_idx = sorted_idx[ring_idx]
 
     def _broadcast_to_pixels(da_zm):
-        """Take a (…, lat) DataArray from zm and return (…, cells) by pixel mapping."""
-        vals = da_zm.values  # shape: (... × n_lat)
-        # Move lat axis to last position
+        """(…, lat) zonal-mean DataArray -> (…, cells) by ring/pixel mapping."""
+        vals = da_zm.values
         lat_ax = da_zm.dims.index('lat')
-        vals = np.moveaxis(vals, lat_ax, -1)   # (..., n_lat)
-        out = vals[..., ring_idx]              # (..., npix)
+        vals = np.moveaxis(vals, lat_ax, -1)
+        pxl = vals[..., ring_idx]
         new_dims = [d if d != 'lat' else cell_dim for d in da_zm.dims]
         new_coords = {k: v for k, v in da_zm.coords.items() if k != 'lat'}
         new_coords[cell_dim] = np.arange(npix)
-        return xr.DataArray(out, dims=new_dims, coords=new_coords)
+        return xr.DataArray(pxl, dims=new_dims, coords=new_coords)
 
     u_zm_px = _broadcast_to_pixels(ds_zm['u'])
     v_zm_px = _broadcast_to_pixels(ds_zm['v'])
 
-    # ── Perturbations ─────────────────────────────────────────────────────────
     u_prime = ds['u'] - u_zm_px
     v_prime = ds['v'] - v_zm_px
 
-    # ── Eddy covariances → zonal means ────────────────────────────────────────
-    logger.info("Computing eddy covariances [u′v′] and [v′θ′].")
-    upvp_ds = _zonal_mean(xr.Dataset({'upvp': u_prime * v_prime}))
-    upvp_zm = upvp_ds['upvp']
+    logger.info("Computing eddy covariances [u'v'] and [v'theta'].")
+    upvp_zm = _zonal_mean(xr.Dataset({'upvp': u_prime * v_prime}))['upvp']
     upvp_zm.attrs = {'long_name': "Zonal-mean eddy momentum flux [u'v']", 'units': 'm2 s-2'}
 
     out = xr.Dataset()
@@ -250,17 +825,17 @@ def compute_eddy_fluxes(ds: xr.Dataset) -> xr.Dataset:
     out['v_zm'] = ds_zm['v']
     out['upvp_zm'] = upvp_zm
 
+    # θ is always available
+    out['theta_zm'] = theta_zm
+    theta_zm_px = _broadcast_to_pixels(theta_zm)
+    theta_prime = theta - theta_zm_px
+    vptp_zm = _zonal_mean(xr.Dataset({'vptp': v_prime * theta_prime}))['vptp']
+    vptp_zm.attrs = {'long_name': "Zonal-mean eddy heat flux [v'theta']",
+                     'units': 'K m s-1'}
+    out['vptp_zm'] = vptp_zm
+
     if has_temp:
         out['temp_zm'] = ds_zm['temp']
-        theta_zm_arr = theta_zm if theta_zm is not None else ds_zm['temp']
-        out['theta_zm'] = theta_zm_arr
-
-        theta_zm_px = _broadcast_to_pixels(theta_zm_arr)
-        theta_prime = theta - theta_zm_px
-        vptp_ds = _zonal_mean(xr.Dataset({'vptp': v_prime * theta_prime}))
-        vptp_zm = vptp_ds['vptp']
-        vptp_zm.attrs = {'long_name': "Zonal-mean eddy heat flux [v'θ']", 'units': 'K m s-1'}
-        out['vptp_zm'] = vptp_zm
 
     if has_pres:
         out['pres_zm'] = ds_zm['pres']
@@ -268,8 +843,7 @@ def compute_eddy_fluxes(ds: xr.Dataset) -> xr.Dataset:
     if has_w:
         w_zm_px = _broadcast_to_pixels(ds_zm['w'])
         w_prime = ds['w'] - w_zm_px
-        upwp_ds = _zonal_mean(xr.Dataset({'upwp': u_prime * w_prime}))
-        upwp_zm = upwp_ds['upwp']
+        upwp_zm = _zonal_mean(xr.Dataset({'upwp': u_prime * w_prime}))['upwp']
         upwp_zm.attrs = {'long_name': "Zonal-mean eddy vertical flux [u'w']", 'units': 'm2 s-2'}
         out['upwp_zm'] = upwp_zm
 
@@ -279,39 +853,64 @@ def compute_eddy_fluxes(ds: xr.Dataset) -> xr.Dataset:
 
 # ── Stage 2-3: EP flux components ────────────────────────────────────────────
 
-def compute_ep_flux(
-        eddy_ds: xr.Dataset,
-        mode: Literal['auto', 'full', 'qg'] = 'auto',
-) -> xr.Dataset:
-    """Compute EP flux components F^(φ) and F^(z).
+def _is_pressure_coord(alt_name, ds):
+    """True if the vertical coordinate `alt_name` is a pressure coordinate."""
+    if alt_name in ('plev', 'pres', 'pres_zm', 'pressure'):
+        return True
+    coord = ds[alt_name] if alt_name in ds.coords else None
+    if coord is not None:
+        units = str(coord.attrs.get('units', '')).lower()
+        if units in ('pa', 'hpa', 'mb', 'mbar', 'millibar', 'hectopascal'):
+            return True
+        if str(coord.attrs.get('standard_name', '')).lower() == 'air_pressure':
+            return True
+    return False
 
-    Parameters
-    ----------
-    eddy_ds : xr.Dataset
-        Output of :func:`compute_eddy_fluxes`.
-    mode : {'auto', 'full', 'qg'}
-        ``'auto'`` uses full TEM when ``upwp_zm`` is present, else falls back
-        to QG.  ``'full'`` raises if ``upwp_zm`` is missing.
 
-    Returns
-    -------
-    xr.Dataset
-        Contains ``F_phi``, ``F_z`` (dims: lat × alt [× time]),
-        ``rho0``, ``theta_zm_z``, and the mode used.
+def _diff_safe(da, dim):
+    """Safely compute 2nd-order finite differences, even on chunked Dask arrays.
+
+    Also propagates the input NaN mask onto the output so that
+    ``np.gradient`` does not create spurious large values at NaN boundaries.
     """
+    nan_mask = da.isnull()
+    if da.chunks is not None:
+        da = da.chunk({dim: -1})
+    result = da.differentiate(dim, edge_order=2)
+    # Re-apply NaN mask: any point that was NaN in the input, or whose
+    # immediate neighbour along `dim` was NaN, should remain NaN.
+    # shift() fills with NaN (float), so convert back to bool with fillna.
+    shifted_fwd = nan_mask.shift({dim: 1}).fillna(False).astype(bool)
+    shifted_bwd = nan_mask.shift({dim: -1}).fillna(False).astype(bool)
+    expanded_mask = nan_mask | shifted_fwd | shifted_bwd
+    return result.where(~expanded_mask)
+
+
+def _stability(theta_bar, alt_name):
+    """d(theta_bar)/d(coord) with a SIGN-PRESERVING floor (avoids flipping the
+    sign of F where the gradient is near zero)."""
+    tz = _diff_safe(theta_bar, alt_name)
+    eps = 1e-10
+    tz_floored = xr.where(np.abs(tz) > eps, tz, eps * xr.where(tz >= 0, 1.0, -1.0))
+    return tz_floored.where(tz.notnull())
+
+
+def compute_ep_flux(eddy_ds, mode="auto"):
+    """EP flux components, branching on the vertical coordinate type."""
     has_upwp = 'upwp_zm' in eddy_ds
     if mode == 'full' and not has_upwp:
-        raise ValueError("mode='full' requires upwp_zm (w in input dataset).")
+        raise ValueError("mode='full' requires 'upwp_zm' (needs w in the input).")
     use_full = has_upwp if mode == 'auto' else (mode == 'full')
     mode_used = 'full' if use_full else 'qg'
-    logger.info(f"Computing EP flux in {mode_used.upper()} mode.")
 
-    alt_name = 'alt' if 'alt' in eddy_ds.coords else 'altitude'
+    alt_name = _find_alt_name(eddy_ds)
+    is_pres = _is_pressure_coord(alt_name, eddy_ds)
+    coord_kind = 'pressure' if is_pres else 'height'
+    logger.info(f"Computing EP flux ({mode_used}, {coord_kind} coordinate).")
 
-    H = _resolve_scale_height(eddy_ds)
-    rho0 = _resolve_density(eddy_ds, H)
+    rho0 = _resolve_density(eddy_ds, _resolve_scale_height(eddy_ds))
 
-    lat_rad = np.deg2rad(eddy_ds['lat'])       # (lat,)
+    lat_rad = np.deg2rad(eddy_ds['lat'])
     cos_phi = np.cos(lat_rad)
     f = _coriolis(lat_rad)
 
@@ -319,87 +918,157 @@ def compute_ep_flux(
     has_theta = 'theta_zm' in eddy_ds
 
     if has_theta:
-        theta_bar = eddy_ds['theta_zm']
-        # ∂θ̄/∂z; avoid division by zero at the top
-        theta_z = theta_bar.differentiate(alt_name)  # K m⁻¹
-        theta_z = theta_z.where(np.abs(theta_z) > 1e-10, other=1e-10)
+        theta_s = _stability(eddy_ds['theta_zm'], alt_name)  # d(theta)/dz or /dp
         vptp = eddy_ds.get('vptp_zm', xr.zeros_like(upvp))
     else:
-        logger.warning("theta_zm not available; setting [v′θ′] = 0.")
-        theta_z = xr.DataArray(1.0)      # placeholder — terms using it will vanish
+        logger.warning("theta_zm not available; setting [v'theta'] = 0.")
+        theta_s = xr.DataArray(1.0)
         vptp = xr.zeros_like(upvp)
 
     if use_full:
         u_bar = eddy_ds['u_zm']
-        u_z = u_bar.differentiate(alt_name)   # m s⁻¹ m⁻¹
-        upwp = eddy_ds['upwp_zm']
+        u_shear = _diff_safe(u_bar, alt_name)  # du_bar/dz or /dp
 
-        F_phi = rho0 * _A * cos_phi * (f * vptp / theta_z - upvp)
-        F_z = rho0 * _A * cos_phi * (vptp * u_z / theta_z - upwp)
+        # absolute vorticity factor f_hat = f + zeta_bar (coordinate-independent)
+        ubar_cos = u_bar * cos_phi
+        dubar_cos_dphi = _diff_safe(ubar_cos, 'lat') * (180.0 / np.pi)
+        f_hat = f - dubar_cos_dphi / (_A * cos_phi)
+
+        if is_pres:
+            # isobaric: no rho0 prefactor; vertical eddy flux is [u'omega]
+            upwp = eddy_ds['upwp_zm']
+            upomega = -rho0 * _G * upwp  # w -> omega (hydrostatic)
+            F_phi = _A * cos_phi * (u_shear * vptp / theta_s - upvp)
+            F_vert = _A * cos_phi * (f_hat * vptp / theta_s - upomega)
+        else:
+            upwp = eddy_ds['upwp_zm']
+            F_phi = rho0 * _A * cos_phi * (u_shear * vptp / theta_s - upvp)
+            F_vert = rho0 * _A * cos_phi * (f_hat * vptp / theta_s - upwp)
     else:
-        F_phi = -rho0 * _A * cos_phi * upvp
-        F_z = rho0 * _A * cos_phi * (f * vptp / theta_z)
+        if is_pres:
+            F_phi = -_A * cos_phi * upvp
+            F_vert = _A * cos_phi * (f * vptp / theta_s)
+        else:
+            F_phi = -rho0 * _A * cos_phi * upvp
+            F_vert = rho0 * _A * cos_phi * (f * vptp / theta_s)
 
-    F_phi.attrs = {'long_name': 'EP flux meridional component F^(phi)',
-                   'units': 'kg s-2'}
-    F_z.attrs = {'long_name': 'EP flux vertical component F^(z)',
-                 'units': 'kg m-1 s-2'}
+    F_phi.attrs = {'long_name': 'EP flux, meridional component',
+                   'units': 'm3 s-2' if not is_pres else 'm2 Pa s-2'}
+    F_vert.attrs = {'long_name': f'EP flux, vertical component ({coord_kind})',
+                    'units': 'm3 s-2' if not is_pres else 'm2 Pa s-2'}
 
-    out = xr.Dataset({'F_phi': F_phi, 'F_z': F_z, 'rho0': rho0})
-    if has_theta:
-        out['theta_zm'] = eddy_ds['theta_zm']
-        out['theta_zm_z'] = theta_z
+    out = xr.Dataset({'F_phi': F_phi, 'F_z': F_vert, 'rho0': rho0})
     out.attrs['ep_flux_mode'] = mode_used
+    out.attrs['ep_flux_coord'] = coord_kind  # consumed by the divergence
     return out
 
 
-# ── Stage 4: Divergence ───────────────────────────────────────────────────────
-
-def compute_ep_divergence(ep_ds: xr.Dataset) -> xr.Dataset:
-    """Compute ∇·F and the EP-flux-induced zonal-mean acceleration.
+def compute_ep_divergence(ep_ds, valid_pressure_min_pa=1e-1,
+                          valid_height_max_m=1.2e5, mask_invalid=False):
+    """div.F and the EP-flux zonal acceleration, branching on coordinate type.
 
     Parameters
     ----------
-    ep_ds : xr.Dataset
-        Output of :func:`compute_ep_flux`.  Must contain ``F_phi`` and ``F_z``.
-
-    Returns
-    -------
-    xr.Dataset
-        Adds ``div_F`` (W m⁻³ equivalent) and ``a_EP`` (m s⁻¹ day⁻¹).
+    valid_pressure_min_pa, valid_height_max_m : float
+        Documented validity floor (recorded in a_EP.attrs). Above ~100-120 km
+        molecular diffusion / ion drag dominate and the EP framework loses
+        meaning -- independent of coordinate choice.
+    mask_invalid : bool
+        If True, NaN out a_EP beyond the validity floor. Default False: the
+        computation stays honest and the plotting layer decides what to hide.
     """
-    alt_name = 'alt' if 'alt' in ep_ds.coords else 'altitude'
+    alt_name = _find_alt_name(ep_ds)
+    is_pres = (ep_ds.attrs.get('ep_flux_coord', None) == 'pressure') \
+              or _is_pressure_coord(alt_name, ep_ds)
+
     lat_rad = np.deg2rad(ep_ds['lat'])
     cos_phi = np.cos(lat_rad)
+    F_phi, F_z, rho0 = ep_ds['F_phi'], ep_ds['F_z'], ep_ds['rho0']
 
-    F_phi = ep_ds['F_phi']
-    F_z = ep_ds['F_z']
-    rho0 = ep_ds['rho0']
+    # Compute divergence of EP flux
+    dFphi_cos_dphi = _diff_safe(F_phi * cos_phi, 'lat') * (180.0 / np.pi)
+    dFz_dvert = _diff_safe(F_z, alt_name)  # d/dp or d/dz
+    div_F = (1.0 / (_A * cos_phi)) * dFphi_cos_dphi + dFz_dvert
 
-    # ∂(F^(φ) cosφ)/∂φ  in spherical coords (φ in radians)
-    Fphi_cos = F_phi * cos_phi
-    # DataArray.differentiate works on a coordinate; we use lat (degrees) and
-    # convert the derivative: d/dφ = (180/π) · d/d(lat_deg)
-    dFphi_cos_dphi = Fphi_cos.differentiate('lat') * (180.0 / np.pi)
+    # acceleration: divide by (rho0 a cosphi) in height, (a cosphi) in pressure
+    denom = (_A * cos_phi) if is_pres else (rho0 * _A * cos_phi)
+    a_EP = div_F / denom * _SECS_PER_DAY
 
-    # ∂F^(z)/∂z
-    dFz_dz = F_z.differentiate(alt_name)
+    # Suppress boundary-layer/topographic edge artifacts where QG theory breaks down.
+    # We expand the subterranean NaN mask by 1 grid point to shave off the jagged rim.
+    nan_mask = a_EP.isnull()
+    edge_mask = (
+        nan_mask.shift({alt_name: 1}).fillna(False).astype(bool) |
+        nan_mask.shift({alt_name: -1}).fillna(False).astype(bool)
+    )
+    if 'lat' in nan_mask.dims:
+        edge_mask = edge_mask | (
+            nan_mask.shift({'lat': 1}).fillna(False).astype(bool) |
+            nan_mask.shift({'lat': -1}).fillna(False).astype(bool)
+        )
+    a_EP = a_EP.where(~edge_mask)
 
-    # ∇·F
-    div_F = (1.0 / (_A * cos_phi)) * dFphi_cos_dphi + dFz_dz
-    div_F.attrs = {'long_name': 'EP flux divergence ∇·F',
-                   'units': 'kg m-1 s-2 m-1'}
+    div_F.attrs = {'long_name': 'EP flux divergence',
+                   'ep_flux_coord': 'pressure' if is_pres else 'height'}
+    a_EP.attrs = {
+        'long_name': 'EP-flux wave forcing on zonal-mean wind',
+        'units': 'm s-1 day-1',
+        'valid_pressure_min_pa': valid_pressure_min_pa,
+        'valid_height_max_m': valid_height_max_m,
+        'validity_note': ('EP-flux framework degrades above ~100-120 km '
+                          '(molecular diffusion, ion drag); interpret with care.'),
+    }
 
-    # Zonal-mean acceleration a_EP = ∇·F / (ρ₀ a cosφ)  in m s⁻² → m s⁻¹ day⁻¹
-    a_EP = div_F / (rho0 * _A * cos_phi) * _SECS_PER_DAY
-    a_EP.attrs = {'long_name': 'EP-flux wave forcing on zonal-mean wind',
-                  'units': 'm s-1 day-1'}
+    if mask_invalid and alt_name in a_EP.coords:
+        coord = a_EP[alt_name]
+        if is_pres:
+            a_EP = a_EP.where(coord >= valid_pressure_min_pa)
+        else:
+            a_EP = a_EP.where(coord <= valid_height_max_m)
 
     out = ep_ds.copy()
     out['div_F'] = div_F
     out['a_EP'] = a_EP
-    out.attrs = append_history(ep_ds.attrs, "Computed Eliassen-Palm flux divergence ∇·F.")
+    out.attrs = append_history(
+        ep_ds.attrs, f"Computed EP flux divergence ({'pressure' if is_pres else 'height'}).")
     return out
+
+
+# ── Output helpers ────────────────────────────────────────────────────────────
+
+def _reorder_output_dims(ds: xr.Dataset) -> xr.Dataset:
+    """Transpose all output variables to a canonical dimension order.
+
+    Preferred order: ``time → level/height/pres → lat → <remaining>``.
+    Dimensions absent from a particular variable are simply skipped.
+    """
+    try:
+        alt_name = _find_alt_name(ds)
+    except ValueError:
+        alt_name = None
+
+    # Build the preferred leading-dim sequence.
+    priority: list[str] = []
+    if 'time' in ds.dims:
+        priority.append('time')
+    if alt_name and alt_name in ds.dims:
+        priority.append(alt_name)
+    if 'lat' in ds.dims:
+        priority.append('lat')
+
+    if not priority:
+        return ds
+
+    new_vars: dict[str, xr.DataArray] = {}
+    for vname, da in ds.data_vars.items():
+        leading = [d for d in priority if d in da.dims]
+        trailing = [d for d in da.dims if d not in priority]
+        new_order = leading + trailing
+        if list(da.dims) != new_order:
+            da = da.transpose(*new_order)
+        new_vars[vname] = da
+
+    return ds.assign(new_vars)
 
 
 # ── Top-level convenience wrapper ─────────────────────────────────────────────
@@ -408,36 +1077,50 @@ def eliassen_palm(
         ds: xr.Dataset,
         mode: Literal['auto', 'full', 'qg'] = 'auto',
         time_mean: bool = False,
+        vertical: Literal['auto', 'native'] = 'auto',
 ) -> xr.Dataset:
-    """Full EP-flux pipeline: HEALPix dataset → F, ∇·F, and acceleration.
+    """Full EP-flux pipeline: HEALPix dataset -> F, div.F, acceleration.
 
     Parameters
     ----------
-    ds : xr.Dataset
-        Input HEALPix dataset.  Must contain at minimum ``u`` and ``v``.
-        ``temp`` and ``pres`` are strongly recommended; ``w`` enables full TEM.
-    mode : {'auto', 'full', 'qg'}
-        Passed to :func:`compute_ep_flux`.
-    time_mean : bool
-        If True, average over the time dimension before returning.
-
-    Returns
-    -------
-    xr.Dataset
-        Zonal-mean dataset with ``F_phi``, ``F_z``, ``div_F``, ``a_EP`` and
-        diagnostic fields.
+    vertical : {'auto', 'native'}
+        'auto'   : run _preprocess_vertical (may interpolate to pressure levels
+                   when the input has only a generalized-height index + a 4-D
+                   pressure field).
+        'native' : skip preprocessing entirely and compute on whatever vertical
+                   coordinate is already attached (use this for HL output whose
+                   coordinate is already height-in-metres -- guarantees NO
+                   interpolation).
     """
-    eddy_ds = compute_eddy_fluxes(ds)
-    ep_ds = compute_ep_flux(eddy_ds, mode=mode)
-    out = compute_ep_divergence(ep_ds)
+    # ---- Validate & normalise variable names FIRST -------------------------
+    ds = _parse_dataset(ds)
+
+    # ---- Align staggered w -------------------------------------------------
+    ds = _align_w_to_full_levels(ds)
+
+    # ---- ONE coordinate decision, here, visible in the log -----------------
+    if vertical == 'native':
+        logger.info("vertical='native': skipping _preprocess_vertical (no interpolation).")
+    else:
+        ds = _preprocess_vertical(ds)
+
+    alt_name = _find_alt_name(ds)
+    coord_kind = 'pressure' if _is_pressure_coord(alt_name, ds) else 'height'
+    logger.info(f"EP flux vertical coordinate: '{alt_name}' ({coord_kind}).")
+
+    # ---- stages inherit the coordinate; none of them re-decide -------------
+    eddy_ds = compute_eddy_fluxes(ds)  # canonical names guaranteed by _parse_dataset
+    ep_ds = compute_ep_flux(eddy_ds, mode=mode)  # branches on coord_kind
+    out = compute_ep_divergence(ep_ds)  # branches on coord_kind
 
     if time_mean and 'time' in out.dims:
         logger.info("Averaging EP flux output over time.")
         out = out.mean(dim='time', keep_attrs=True)
 
+    out = _reorder_output_dims(out)
     out.attrs = append_history(
         ds.attrs,
-        f"Computed Eliassen-Palm flux (mode={ep_ds.attrs.get('ep_flux_mode', mode)}) "
-        f"using HealICON.",
+        f"Computed Eliassen-Palm flux (mode={ep_ds.attrs.get('ep_flux_mode', mode)}, "
+        f"coord={coord_kind}) using HealICON.",
     )
     return out

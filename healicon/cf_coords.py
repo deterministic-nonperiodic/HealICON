@@ -87,17 +87,41 @@ def _cf_guess(ds: xr.Dataset, target: str) -> str | None:
     """
     Very light CF-based guess for a logical variable name.
 
-    Looks at ``standard_name`` and common units to suggest a candidate
-    when a configured variable is missing. Advisory only.
+    Looks at ``standard_name`` first (reliable), then falls back to common
+    units only when a ``standard_name`` is absent.  This avoids false positives
+    where e.g. temperature and theta share the same unit (K).
     """
     rule = _CF_VARS_LOOKUP.get(target)
     if rule is None:
         return None
+
+    # Pass 1: standard_name match (most reliable)
     for name, da in ds.data_vars.items():
         std = str(da.attrs.get("standard_name", "")).strip()
-        units = str(da.attrs.get("units", "")).strip()
-        if std in rule["standard_names"] or any(u in units for u in rule["units"]):
+        if std and std in rule["standard_names"]:
             return name
+
+    # Pass 2: units-only match — but only for variables that have NO
+    # standard_name, to avoid misidentifying a variable whose standard_name
+    # belongs to a *different* physical quantity.
+    # Additionally, check long_name to break ties: if long_name clearly
+    # refers to a different physical quantity, skip the match.
+    _CONFLICTING_LONG_NAMES: dict[str, set[str]] = {
+        'theta': {'temperature', 'temp'},       # if long_name says "temperature", it's not theta
+        'temperature': {'potential temperature', 'theta'},  # vice versa
+    }
+    conflicts = _CONFLICTING_LONG_NAMES.get(target, set())
+    for name, da in ds.data_vars.items():
+        std = str(da.attrs.get("standard_name", "")).strip()
+        if std:
+            continue
+        units = str(da.attrs.get("units", "")).strip()
+        if units and any(u == units for u in rule["units"]):
+            long_name = str(da.attrs.get("long_name", "")).lower()
+            if long_name and any(c in long_name for c in conflicts):
+                continue
+            return name
+
     return None
 
 
@@ -141,8 +165,8 @@ def _find_coordinate(ds: xr.Dataset, name: str,
     # Used as a last-resort name-pattern fallback when CF attributes are
     # absent or incomplete (e.g. after a NetCDF round-trip strips axis/units).
     _LEVEL_NAME_PATTERNS = (
-        'altitude', 'height', 'depth', 'z_mc', 'z_ifc', 'zlev',
-        'lev', 'level', 'plev', 'pressure',
+        'altitude', 'alt', 'height', 'depth', 'z_mc', 'z_ifc', 'zlev',
+        'lev', 'level', 'z', 'plev', 'pressure',
     )
 
     # Build predicate function based on available criteria

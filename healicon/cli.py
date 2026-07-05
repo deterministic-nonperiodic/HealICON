@@ -689,7 +689,7 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim,
 @cli.command()
 @click.argument('ifile')
 @click.option('--type', 'plot_type',
-              type=click.Choice(['tides', 'section', 'map', 'spectrum', 'ep-flux']),
+              type=click.Choice(['tides', 'section', 'map', 'spectrum', 'ep-flux', 'epflux']),
               required=True,
               help='Type of plot to generate.')
 @click.option('--var', 'var_name', default=None,
@@ -739,7 +739,7 @@ def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, out_dir, prefi
         if var_name is None:
             raise click.UsageError("Must specify --var for map plots.")
         plot_map(ds, var_name=var_name, target_height=target_height, out_dir=out_dir, prefix=prefix)
-    elif plot_type == 'ep-flux':
+    elif plot_type in ('ep-flux', 'epflux'):
         from .visualize import plot_ep_flux
         plot_ep_flux(ds, out_dir=out_dir, prefix=prefix)
     elif plot_type == 'spectrum':
@@ -752,7 +752,8 @@ def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, out_dir, prefi
 @cli.command('ep-flux')
 @click.argument('ifile', type=click.Path(exists=True))
 @click.argument('ofile')
-@click.option('--mode', type=click.Choice(['auto', 'full', 'qg']), default='auto', show_default=True,
+@click.option('--mode', type=click.Choice(['auto', 'full', 'qg']), default='auto',
+              show_default=True,
               help='EP flux mode: full TEM, QG approximation, or auto (full when w is present).')
 @click.option('--time-mean', is_flag=True, default=False,
               help='Average over the time dimension before saving.')
@@ -773,7 +774,29 @@ def ep_flux_cmd(ifile, ofile, mode, time_mean):
     logger.info(f"Computing Eliassen-Palm flux (mode={mode}) ...")
     out_ds = eliassen_palm(ds, mode=mode, time_mean=time_mean)
     write_dataset(out_ds, ofile)
-    logger.info(f"EP flux saved to {ofile}.")
+    logger.info(f"EP flux saved to {ofile}")
+
+
+@cli.command('epflux')
+@click.argument('ifile', type=click.Path(exists=True))
+@click.argument('ofile')
+@click.option('--mode', type=click.Choice(['auto', 'full', 'qg']), default='auto',
+              show_default=True,
+              help='EP flux mode: full TEM, QG approximation, or auto.')
+@click.option('--time-mean', is_flag=True, default=False,
+              help='Average over the time dimension before saving.')
+@profile_command
+def epflux_cmd(ifile, ofile, mode, time_mean):
+    """
+    Alias for ep-flux. Compute Eliassen-Palm flux (F, nabla.F) and wave-induced acceleration.
+    """
+    _check_io_safety(ifile, ofile)
+    from .analysis.ep_flux import eliassen_palm
+    ds = _load_and_ensure_healpix(ifile)
+    logger.info(f"Computing Eliassen-Palm flux (mode={mode}) ...")
+    out_ds = eliassen_palm(ds, mode=mode, time_mean=time_mean)
+    write_dataset(out_ds, ofile)
+    logger.info(f"EP flux saved to {ofile}")
 
 
 if __name__ == '__main__':

@@ -73,26 +73,28 @@ def _resolve_scale_height(ds_zm: xr.Dataset) -> xr.DataArray:
     1. Compute H = Rd T̄ / g from the zonal-mean temperature.
     2. Fit H as a constant via linear regression of log(p̄) vs z.
     3. Return 7 km as a hard-coded fallback.
+
+    Accepts variable names 'temp' or 'temp_zm', 'pres' or 'pres_zm'.
     """
     alt = ds_zm['alt'] if 'alt' in ds_zm.coords else ds_zm['altitude']
+    temp_key = 'temp' if 'temp' in ds_zm else ('temp_zm' if 'temp_zm' in ds_zm else None)
+    pres_key = 'pres' if 'pres' in ds_zm else ('pres_zm' if 'pres_zm' in ds_zm else None)
 
-    if 'temp' in ds_zm:
-        T_bar = ds_zm['temp']  # (lat, alt) or (time, lat, alt)
+    if temp_key is not None:
+        T_bar = ds_zm[temp_key]
         H = (_RD * T_bar) / _G
         H.attrs = {'long_name': 'Scale height', 'units': 'm'}
         logger.debug("Scale height H computed from T̄ = Rd T̄/g.")
         return H
 
-    if 'pres' in ds_zm:
-        # Fit H from log(p̄) vs z using the zonal-mean pressure profile
-        p_bar = ds_zm['pres'].mean('lat') if 'lat' in ds_zm['pres'].dims else ds_zm['pres']
+    if pres_key is not None:
+        p_bar = ds_zm[pres_key].mean('lat') if 'lat' in ds_zm[pres_key].dims else ds_zm[pres_key]
         z_vals = alt.values.astype(float)
-        log_p = np.log(p_bar.values.astype(float))
-        # Fit per time step if needed; otherwise treat as 1D
+        log_p = np.log(np.maximum(p_bar.values.astype(float), 1e-30))
         log_p_1d = log_p.reshape(-1, len(z_vals)).mean(axis=0)
-        coeffs = np.polyfit(z_vals, log_p_1d, 1)   # slope = −1/H
+        coeffs = np.polyfit(z_vals, log_p_1d, 1)
         H_const = float(-1.0 / coeffs[0]) if coeffs[0] != 0 else 7000.0
-        H_const = max(H_const, 1000.0)  # sanity floor 1 km
+        H_const = max(H_const, 1000.0)
         logger.debug(f"Scale height H fitted from log(p̄) vs z: H = {H_const/1e3:.2f} km")
         return xr.DataArray(H_const, attrs={'long_name': 'Scale height', 'units': 'm'})
 
@@ -104,54 +106,43 @@ def _resolve_density(ds_zm: xr.Dataset, H: xr.DataArray) -> xr.DataArray:
     """Return ρ₀(z, φ) in kg m⁻³.
 
     Priority:
-    1. pres present         → ρ₀ = p̄ / (Rd T̄)
-    2. temp only, no pres   → hydrostatic integration to get p̄, then ρ₀ = p̄/(Rd T̄)
-    3. neither              → exponential ρ_surf exp(−z/H)
+    1. pres + temp present   → ρ₀ = p̄ / (Rd T̄)
+    2. temp only, no pres    → hydrostatic integration to get p̄, then ρ₀ = p̄/(Rd T̄)
+    3. neither               → exponential ρ_surf exp(−z/H)
+
+    Accepts variable names 'temp'/'temp_zm', 'pres'/'pres_zm'.
     """
     alt = ds_zm['alt'] if 'alt' in ds_zm.coords else ds_zm['altitude']
+    temp_key = 'temp' if 'temp' in ds_zm else ('temp_zm' if 'temp_zm' in ds_zm else None)
+    pres_key = 'pres' if 'pres' in ds_zm else ('pres_zm' if 'pres_zm' in ds_zm else None)
 
-    if 'pres' in ds_zm and 'temp' in ds_zm:
+    if pres_key is not None and temp_key is not None:
         logger.info("Density: using ρ₀ = p̄/(Rd T̄) (exact ideal gas).")
-        rho = ds_zm['pres'] / (_RD * ds_zm['temp'])
+        rho = ds_zm[pres_key] / (_RD * ds_zm[temp_key])
         rho.attrs = {'long_name': 'Reference density', 'units': 'kg m-3'}
         return rho
 
-    if 'temp' in ds_zm:
+    if temp_key is not None:
         logger.info("Density: reconstructing p̄ from hydrostatic integration.")
-        T_bar = ds_zm['temp']   # (... lat, alt) with alt in metres
-        # Sort altitude ascending for integration
-        T_bar = T_bar.sortby('alt')
+        T_bar = ds_zm[temp_key].sortby('alt')
         z = T_bar['alt'].values.astype(float)
-
-        # Integrate from TOA downward: p(z) = p_toa exp(∫_{z}^{z_top} g/(Rd T) dz)
-        # Discretise with trapezoid rule
-        T_np = T_bar.values.astype(float)   # shape (..., n_alt)
-        integrand = _G / (_RD * T_np)       # 1/H(z)
-
-        dz = np.diff(z)                      # (n_alt-1,)
-        # cumulative integral from top (index 0 in sorted-ascending is bottom)
-        # We integrate from top (TOA) downward to get p at each level.
-        # p(z_i) = p_TOA * exp( integral_{z_i}^{z_TOA} g/(Rd T) dz )
-        # = p_TOA * exp( sum_{j=i}^{N-2} 0.5*(integrand[j]+integrand[j+1])*dz[j] )
+        T_np = T_bar.values.astype(float)
+        integrand = _G / (_RD * T_np)
+        dz = np.diff(z)
         n_alt = len(z)
-        # Build the cumulative sum from the top
         cum_int = np.zeros_like(T_np)
         for i in range(n_alt - 2, -1, -1):
             trap = 0.5 * (integrand[..., i] + integrand[..., i + 1]) * dz[i]
             cum_int[..., i] = cum_int[..., i + 1] + trap
-
-        # Assume p_TOA = 1 Pa (any reference — we only need shape for ρ₀)
         p_toa = 1.0
         p_bar_np = p_toa * np.exp(cum_int)
         p_bar = xr.DataArray(p_bar_np, coords=T_bar.coords, dims=T_bar.dims)
-
         rho = p_bar / (_RD * T_bar)
         rho.attrs = {'long_name': 'Reference density (hydrostatic)', 'units': 'kg m-3'}
         return rho
 
-    # Fallback: exponential profile
     logger.warning("Density: neither pres nor temp — using exponential profile ρ₀=ρ_surf·exp(−z/H).")
-    rho_surf = 1.225  # kg m⁻³ at sea level (ISA)
+    rho_surf = 1.225
     H_vals = H.values if hasattr(H, 'values') else float(H)
     z_vals = alt.values.astype(float)
     rho_np = rho_surf * np.exp(-z_vals / H_vals)

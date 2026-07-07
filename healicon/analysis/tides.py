@@ -654,7 +654,7 @@ def _wavelet_fourier_analysis_block(
                     key=lambda s: abs(period_lookup[(direction, s)] - mode['period_h']),
                 )
                 for comp in (('amp_sym', 'amp_asy', 'pha_sym', 'pha_asy') if decompose_sym_asy
-                             else ('amp_total', 'pha_total')):
+                else ('amp_total', 'pha_total')):
                     if decompose_sym_asy:
                         sa = comp.split('_')[1]
                         arr = ds_w[f"{comp}_{direction}_{best_p_str}"].values
@@ -884,7 +884,7 @@ def _iterate_tidal_analysis(
             out_ds = out_ds.assign_coords(aux_coords)
 
     # ── Adaptive scheduler recommendation ────────────────────────────────
-    # Block peak = 8 output maps × n_periods × n_zwn_groups × n_time × n_cell × 8 B.
+    # Block peak = 8 output maps x n_periods x n_zwn_groups x n_time x n_cell x 8 B.
     n_periods_out = len(periods_hours)
     n_zwn_groups = len(zwn_mode_groups)
     bytes_per_block = (
@@ -1013,7 +1013,7 @@ def compute_wavelet_tidal_analysis(
         }
     elif method == 'fourier':
         # Pre-compute ring Fourier coefficients (Ck, Sk) for ALL levels.
-        # Memory cost: n_zwn × n_time × n_extra × n_rings × 16 bytes ≈ trivial
+        # Memory cost: n_zwn x n_time x n_extra x n_rings x 16 bytes ≈ trivial
         # compared to pixel data.  Allows each map_blocks block to run the
         # CWT + assign_to_cells without loading any pixel data.
         zwn_list = list({mode['zwn'] for mode in modes})

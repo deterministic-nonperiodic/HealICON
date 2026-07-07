@@ -14,7 +14,6 @@ from ._common import (
 def _filter_block(data_block, fwhm_rad, lmax, is_nested):
     orig_shape = data_block.shape
     npix = orig_shape[-1]
-    # Cache nside once per block rather than re-computing per iteration
     nside = hp.npix2nside(npix)
     data_2d = data_block.reshape(-1, npix)
     order_str = 'nested' if is_nested else 'ring'
@@ -69,7 +68,6 @@ def filter_spatial(ds: xr.Dataset, fwhm_deg: float = None, lmax: int = None,
     if n_specified != 1:
         raise ValueError("Must specify exactly one of: fwhm_deg, lmax, or wavelength_km.")
 
-    # Convert wavelength_km → lmax so the rest of the code is unchanged
     if wavelength_km is not None:
         lmax = int(wavelength_to_degree(wavelength_km))
         logger.info(

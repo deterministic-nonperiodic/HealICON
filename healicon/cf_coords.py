@@ -286,7 +286,6 @@ def _find_coordinate(ds: xr.Dataset, name: str,
     Search order: exact name match, then CF standard_name / axis / units.
     Returns None when *raise_notfound* is False and nothing is found.
     """
-    # Try exact name match first
     if name in ds.variables:
         return ds[name]
 
@@ -304,17 +303,14 @@ def _find_coordinate(ds: xr.Dataset, name: str,
         'lev', 'level', 'z', 'plev', 'pressure',
     )
 
-    # Build predicate function based on available criteria
     def matches_criteria(c: xr.DataArray) -> bool:
         if name in ('lat', 'lon'):
             return _is_geographic(c, name)
 
-        # Check name
         if 'names' in criteria and c.name in criteria['names']:
             return True
 
-        # Check standard_name attribute
-        # NOTE: criteria['standard_name'] may be a str, tuple, or set.
+        # criteria['standard_name'] may be a str, tuple, or set
         if 'standard_name' in criteria:
             std_name = c.attrs.get('standard_name', '').strip().lower()
             if std_name:
@@ -326,7 +322,6 @@ def _find_coordinate(ds: xr.Dataset, name: str,
                     if std_name in expected:
                         return True
 
-        # Check axis attribute
         if 'axis' in criteria:
             axis = c.attrs.get('axis', '').strip().upper()
             if axis:
@@ -338,13 +333,11 @@ def _find_coordinate(ds: xr.Dataset, name: str,
                     if axis in expected:
                         return True
 
-        # Check units hints
         if 'units_hints' in criteria:
             units = c.attrs.get('units', '').strip().lower()
             if units and any(hint in units for hint in criteria['units_hints']):
                 return True
 
-        # Check units (for level coordinate)
         if 'units' in criteria:
             units = c.attrs.get('units', '').strip().lower()
             expected = criteria['units']
@@ -365,7 +358,6 @@ def _find_coordinate(ds: xr.Dataset, name: str,
 
         return False
 
-    # Search through all variables, not just coordinates
     candidates = [ds[var_name] for var_name in ds.variables if matches_criteria(ds[var_name])]
 
     if check_duplicates and len(candidates) > 1:
@@ -414,7 +406,6 @@ def _coord_is_degrees(
     """
     units = _get_units_str(coord)
 
-    # Explicit units
     if "radian" in units:
         return False
     if units == "deg" or units.startswith("degree") or units.startswith("degrees"):
@@ -461,12 +452,10 @@ def _is_z(cname: str, coords: Union[xr.Dataset, xr.DataArray, Any]) -> bool:
     standard_name = (coord.attrs.get("standard_name", "") or "").strip().lower()
     axis = (coord.attrs.get("axis", "") or "").strip().upper()
 
-    # Exclude pressure coordinates explicitly
     pressure_units = ('pa', 'hpa', 'mb', 'millibar', 'bar')
     pressure_names = ('plev', 'pressure', 'pres', 'isobaric')
     pressure_std_names = ('air_pressure', 'atmosphere_ln_pressure_coordinate')
 
-    # If it's clearly a pressure coordinate, return False
     if any(unit in units for unit in pressure_units):
         return False
     if any(pname in name for pname in pressure_names):
@@ -474,24 +463,20 @@ def _is_z(cname: str, coords: Union[xr.Dataset, xr.DataArray, Any]) -> bool:
     if standard_name in pressure_std_names:
         return False
 
-    # Check for height-based coordinates
-    # Check axis='Z' with meter units (most reliable)
+    # axis='Z' + metre units (most reliable)
     meter_units = ('m', 'meter', 'meters', 'metre', 'metres', 'gpm')
     if axis == "Z" and any(unit in units for unit in meter_units):
         return True
 
-    # Check standard_name (CF-compliant, height-based only)
     if standard_name in _CF_COORDS_LOOKUP['level']['standard_name']:
         return True
 
-    # Check name patterns (height-related only)
     height_name_patterns = ('z', 'height', 'altitude', 'depth', 'zlev', 'z_')
     if any(pattern in name for pattern in height_name_patterns):
         # Verify it has meter units to avoid false positives
         if any(unit in units for unit in meter_units):
             return True
 
-    # Check for generic 'lev' or 'level' with meter units
     if ('lev' in name or 'level' in name) and any(unit in units for unit in meter_units):
         return True
 
@@ -517,27 +502,20 @@ def _is_geographic(coord: xr.DataArray, coord_type: str) -> bool:
     standard_name = str(coord.attrs.get("standard_name", "")).lower()
     axis = str(coord.attrs.get("axis", "")).upper()
 
-    # Check axis (most reliable for CF compliance)
     expected_axis = lookup.get("axis")
     if axis and axis == expected_axis:
-        # Verify units are degree-like or radian-like to avoid false positives
         if any(hint in units for hint in ('degree', 'deg', 'rad', 'radian')):
             return True
 
-    # Check standard_name (CF-compliant)
     expected_std = lookup.get("standard_name")
     if standard_name:
         if standard_name == expected_std:
             return True
         elif ("longitude" in standard_name and coord_type == "lat") or \
                 ("latitude" in standard_name and coord_type == "lon"):
-            # If it explicitly claims to be the other geographic coordinate, reject it immediately
             return False
 
-    # Check name patterns
     name_ok = any(name == n or name.endswith(n) for n in lookup.get("names", ()))
-
-    # Check units with direction-specific validation
     units_hints = lookup.get("units_hints", ())
     units_ok = any(hint in units for hint in units_hints)
 
@@ -547,28 +525,25 @@ def _is_geographic(coord: xr.DataArray, coord_type: str) -> bool:
         return False
     if coord_type == "lon":
         if "north" in units or "degree_north" in units:
-            return False  # This is latitude, not longitude
+            return False
         if units_ok or name_ok:
-            # Additional check: longitude values should be in reasonable range
             if coord.size > 0:
                 vals = coord.values
                 vals = vals[np.isfinite(vals)]
                 if vals.size > 0:
-                    # Longitude typically in [-180, 360] range
-                    if np.abs(vals).max() > 400:
+                    if np.abs(vals).max() > 400:  # longitude in [-180, 360]
                         return False
             return True
 
     if coord_type == "lat":
         if "east" in units or "degree_east" in units:
-            return False  # This is longitude, not latitude
+            return False
         if units_ok or name_ok:
-            # Additional check: latitude values should be in [-90, 90]
             if coord.size > 0:
                 vals = coord.values
                 vals = vals[np.isfinite(vals)]
                 if vals.size > 0:
-                    if np.abs(vals).max() > 90.5:  # Small tolerance
+                    if np.abs(vals).max() > 90.5:
                         return False
             return True
 
@@ -577,14 +552,10 @@ def _is_geographic(coord: xr.DataArray, coord_type: str) -> bool:
 
 def is_geographic_grid(coord_x: xr.DataArray, coord_y: xr.DataArray) -> bool:
     """True if *coord_x* is longitude-like and *coord_y* is latitude-like."""
-    # Check if the X coordinate is Longitude-like
-    is_x_lon = _is_geographic(coord_x, "lon")
-
-    # Check if the Y coordinate is Latitude-like
-    is_y_lat = _is_geographic(coord_y, "lat")
-
-    # The grid is geographic if and only if both components are identified
-    return np.logical_and(is_x_lon, is_y_lat)
+    return np.logical_and(
+        _is_geographic(coord_x, "lon"),
+        _is_geographic(coord_y, "lat"),
+    )
 
 
 def _is_global_longitude(x_coord: xr.DataArray) -> bool:
@@ -608,16 +579,13 @@ def _is_global_longitude(x_coord: xr.DataArray) -> bool:
     lon = x_coord.values
     lon = _normalize_deg(lon[np.isfinite(lon)])
 
-    # Sort unique longitudes (avoid duplicate endpoints like 0 and 360)
     lon = np.unique(np.sort(lon))
     if lon.size < 2:
         return False
 
-    # Estimate a representative spacing (median nearest-neighbor gap on the circle)
     diffs = np.diff(lon)
     wrap_gap = (lon[0] + 360.0) - lon[-1]
     all_gaps = np.concatenate([diffs, [wrap_gap]])
-    # If there are large holes, the largest gap will reflect that.
     max_gap = float(np.max(all_gaps))
 
     # Tolerance: allow a few grid spacings worth of slack (handles uneven grids)
@@ -641,52 +609,43 @@ def get_spatial_dims(obj: Union[xr.Dataset, xr.DataArray]) -> Tuple[str, str]:
     ds = obj if isinstance(obj, xr.Dataset) else obj.to_dataset(name="_tmp")
     dims = set(ds.dims)
 
-    # Case A: Try to find CF-compliant lat/lon as 1-D dimensions
+    # Case A: CF-compliant lat/lon as 1-D dimensions
     try:
         lat_coord = _find_coordinate(ds, 'lat', raise_notfound=False)
         lon_coord = _find_coordinate(ds, 'lon', raise_notfound=False)
 
         if lat_coord is not None and lon_coord is not None:
-            # Check if they are 1-D dimension coordinates
             if (lat_coord.name in dims and lon_coord.name in dims and
                     lat_coord.ndim == 1 and lon_coord.ndim == 1):
                 return str(lat_coord.name), str(lon_coord.name)
     except ValueError:
         pass
 
-    # Case B: Check for standard lat/lon names as 1-D dims (fallback)
+    # Case B: standard lat/lon names as 1-D dims (fallback)
     if "lat" in dims and "lon" in dims:
         if ds["lat"].ndim == 1 and ds["lon"].ndim == 1:
-            # Verify they look geographic
             if _is_geographic(ds["lat"], "lat") and _is_geographic(ds["lon"], "lon"):
                 return "lat", "lon"
 
-    # Case C: Projected axes with 2-D auxiliary lat/lon(y,x)
+    # Case C: projected y/x with 2-D auxiliary lat/lon
     if {"y", "x"} <= dims:
-        # Check if there are 2-D lat/lon coordinates
         if "lat" in ds.coords and "lon" in ds.coords:
             if ds["lat"].dims == ("y", "x") and ds["lon"].dims == ("y", "x"):
                 return "y", "x"
         # Plain y/x without auxiliary coords
         return "y", "x"
 
-    # Case D: Fallback - use last two dimensions if they look spatial
-    # (not time, not vertical)
+    # Case D: last two non-time, non-vertical dimensions
     if len(ds.dims) >= 2:
-        # Get all dims, filter out known non-spatial dims
         spatial_candidates = []
         for dim in ds.dims:
-            # Skip if it's clearly time
             if str(dim).lower() in ('time', 't', 'date'):
                 continue
-            # Skip if it's clearly vertical
             if _is_z(str(dim), ds.coords):
                 continue
             spatial_candidates.append(dim)
 
-        # If we have at least 2 spatial candidates, use the last two
         if len(spatial_candidates) >= 2:
-            # Convention: last two are (y, x) or (lat, lon)
             return spatial_candidates[-2], spatial_candidates[-1]
 
     raise ValueError(

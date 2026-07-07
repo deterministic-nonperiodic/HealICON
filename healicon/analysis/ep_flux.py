@@ -8,7 +8,7 @@ self-consistent in its vertical derivative and ρ₀ treatment.
   HEIGHT coords (metres) — full primitive-equation TEM:
       Uses the full θ-gradient stream function Ψ (Hardiman et al. / Iwasaki 1989):
 
-      Ψ = a cosφ · (ρ₀[v'θ']·θ_z − ρ₀[w'θ']·(θ_φ/a)) / ((θ_φ/a)² + θ_z²)
+      Ψ = a cosφ · (ρ₀[v'θ']·θ_z - ρ₀[w'θ']·(θ_φ/a)) / ((θ_φ/a)² + θ_z²)
 
       F^(phi) = -rho0 a cosphi [u'v']  +  Ψ · du_bar/dz
       F^(z)   = -rho0 a cosphi [u'w']  +  Ψ · f_hat
@@ -136,7 +136,6 @@ def _parse_dataset(ds: xr.Dataset) -> xr.Dataset:
     xr.Dataset
         Copy with canonical variable names and any derived fields added.
     """
-    # ── 1. Resolve variable names ────────────────────────────────────────────
     var_map: dict[str, str | None] = {
         'u': _find_var(ds, 'u') or ('u' if 'u' in ds else None),
         'v': _find_var(ds, 'v') or ('v' if 'v' in ds else None),
@@ -146,7 +145,6 @@ def _parse_dataset(ds: xr.Dataset) -> xr.Dataset:
         'pres': _find_var(ds, 'pressure'),
     }
 
-    # Required: u and v
     missing = [k for k in ('u', 'v') if var_map[k] is None]
     if missing:
         raise ValueError(
@@ -154,7 +152,6 @@ def _parse_dataset(ds: xr.Dataset) -> xr.Dataset:
             f"Available: {list(ds.data_vars)}"
         )
 
-    # ── 2. Rename to canonical names ─────────────────────────────────────────
     rename = {}
     for canonical, actual in var_map.items():
         if actual is not None and actual != canonical and actual in ds.data_vars:
@@ -166,12 +163,9 @@ def _parse_dataset(ds: xr.Dataset) -> xr.Dataset:
             logger.debug(f"Renaming variables to canonical names: {safe_rename}")
             ds = ds.rename_vars(safe_rename)
 
-    # ── 2.5 Unit Verification & Auto-Conversion ──────────────────────────────
     from ..cf_coords import check_convert_units
-    logger.debug("Validating and auto-converting physical units...")
     ds = check_convert_units(ds)
 
-    # ── 3. Derive θ if not present ───────────────────────────────────────────
     has_theta = 'theta' in ds
     has_temp = 'temp' in ds
     has_pres = 'pres' in ds
@@ -222,7 +216,6 @@ def _parse_dataset(ds: xr.Dataset) -> xr.Dataset:
                 "Provide at least: theta (θ), or temp (T) + pres (p)."
             )
 
-    # ── 4. Derive pressure from θ + T if missing ─────────────────────────────
     if 'pres' not in ds and 'temp' in ds and 'theta' in ds:
         logger.info("Deriving p = P₀·(T/θ)^(1/κ) from 'temp' and 'theta'.")
         ds['pres'] = _P0 * (ds['temp'] / ds['theta']) ** (1.0 / _KAPPA)
@@ -235,7 +228,6 @@ def _parse_dataset(ds: xr.Dataset) -> xr.Dataset:
         f"temp={'temp' in ds}, theta={'theta' in ds}, pres={'pres' in ds}"
     )
 
-    # ── 5. Drop fully-NaN vertical levels ───────────────────────────────────
     try:
         alt_name = _find_alt_name(ds)
     except ValueError:
@@ -441,7 +433,6 @@ def _interp_to_pressure_levels(
         # of P vs log(P) with the exact definition of the isobaric surface.
         out[pres_key] = out['plev']
 
-    # Final safety: remove any residual reference to the old level coordinate.
     if lev_name in out.coords and lev_name != 'plev':
         out = out.drop_vars(lev_name)
     logger.debug(
@@ -621,7 +612,7 @@ def _resolve_density(ds_zm: xr.Dataset, H: xr.DataArray) -> xr.DataArray:
     Priority:
     1. pres + temp present   → ρ₀ = p̄ / (Rd T̄)
     2. temp only, no pres    → hydrostatic integration to get p̄, then ρ₀ = p̄/(Rd T̄)
-    3. neither               → exponential ρ_surf exp(−z/H)
+    3. neither               → exponential ρ_surf exp(-z/H)
 
     Accepts variable names 'temp'/'temp_zm', 'pres'/'pres_zm'.
     """
@@ -669,7 +660,7 @@ def _resolve_density(ds_zm: xr.Dataset, H: xr.DataArray) -> xr.DataArray:
         return rho
 
     logger.warning(
-        "Density: neither pres nor temp — using exponential profile ρ₀=ρ_surf·exp(−z/H).")
+        "Density: neither pres nor temp — using exponential profile ρ₀=ρ_surf·exp(-z/H).")
     rho_surf = 1.225
     H_vals = H.values if hasattr(H, 'values') else float(H)
     z_vals = alt.values.astype(float)
@@ -784,7 +775,7 @@ def compute_eddy_fluxes(
     """Compute zonal-mean eddy covariances from a HEALPix dataset.
 
     Eddy quantities are defined as the departure from the zonal mean:
-    q' = q − [q], where [·] denotes the zonal average over HEALPix rings.
+    q' = q - [q], where [·] denotes the zonal average over HEALPix rings.
 
     Covariances always computed: [u'v'], [v'θ'].
     Computed when *w* is present: [u'w'], [w'θ'].
@@ -966,17 +957,17 @@ def _stability(theta_bar, alt_name):
 
 
 def _theta_stream_function(
-        rho0:      xr.DataArray,
-        vptp:      xr.DataArray,
-        wptp:      xr.DataArray,
+        rho0: xr.DataArray,
+        vptp: xr.DataArray,
+        wptp: xr.DataArray,
         theta_bar: xr.DataArray,
-        alt_name:  str,
-        cos_phi:   xr.DataArray,
-        eps:       float = 1e-30,
+        alt_name: str,
+        cos_phi: xr.DataArray,
+        eps: float = 1e-30,
 ) -> xr.DataArray:
     """TEM mass stream function Ψ [kg s⁻¹] from the full θ-gradient projection.
 
-    Ψ = a cosφ · (ρ₀[v'θ']·θ_z  −  ρ₀[w'θ']·(θ_φ/a)) / ((θ_φ/a)² + θ_z²)
+    Ψ = a cosφ · (ρ₀[v'θ']·θ_z  -  ρ₀[w'θ']·(θ_φ/a)) / ((θ_φ/a)² + θ_z²)
 
     Both gradient components are in K m⁻¹.  In the limit θ_φ → 0 (horizontal
     θ-surfaces):
@@ -986,8 +977,8 @@ def _theta_stream_function(
     The denominator is regularised to *eps* to guard against near-zero
     θ-gradients (isothermal layers, mesopause minimum, polar vortex core).
     """
-    theta_z = _stability(theta_bar, alt_name)                          # dθ̄/dz [K/m]
-    # _diff_safe differentiates w.r.t. lat in degrees; ×(180/π) converts to
+    theta_z = _stability(theta_bar, alt_name)  # dθ̄/dz [K/m]
+    # _diff_safe differentiates w.r.t. lat in degrees; x(180/π) converts to
     # radians, then /a gives the meridional K/m gradient component.
     theta_phi_over_a = _diff_safe(theta_bar, 'lat') * (180.0 / np.pi) / _A  # [K/m]
 
@@ -1007,9 +998,9 @@ def _theta_stream_function(
     except Exception:
         pass
 
-    numer = rho0 * vptp * theta_z - rho0 * wptp * theta_phi_over_a   # [kg K²/(m³ s)]
-    Psi_unscaled = numer / grad_sq                                     # [kg/(m·s)]
-    return _A * cos_phi * Psi_unscaled                                 # [kg/s]
+    numer = rho0 * vptp * theta_z - rho0 * wptp * theta_phi_over_a  # [kg K²/(m³ s)]
+    Psi_unscaled = numer / grad_sq  # [kg/(m·s)]
+    return _A * cos_phi * Psi_unscaled  # [kg/s]
 
 
 def compute_ep_flux(eddy_ds, mode="auto"):
@@ -1018,13 +1009,13 @@ def compute_ep_flux(eddy_ds, mode="auto"):
     Branches on the vertical coordinate detected in *eddy_ds*:
 
     Height coords (mode='full'):
-        F^φ = −ρ₀ a cosφ [u'v'] + Ψ · dū/dz       [kg s⁻²]
-        F^z = −ρ₀ a cosφ [u'w'] + Ψ · f̂            [kg s⁻²]
+        F^φ = -ρ₀ a cosφ [u'v'] + Ψ · dū/dz       [kg s⁻²]
+        F^z = -ρ₀ a cosφ [u'w'] + Ψ · f̂            [kg s⁻²]
         where Ψ is the TEM stream function from :func:`_theta_stream_function`.
 
     Pressure coords (mode='full', Edmon et al. 1980 eq. 3.1):
-        F^φ = a cosφ (ū_p [v'θ']/θ̄_p − [u'v'])    [m³ s⁻²]
-        F^z = a cosφ (f̂   [v'θ']/θ̄_p − [u'ω'])    [Pa m² s⁻²]
+        F^φ = a cosφ (ū_p [v'θ']/θ̄_p - [u'v'])    [m³ s⁻²]
+        F^z = a cosφ (f̂   [v'θ']/θ̄_p - [u'ω'])    [Pa m² s⁻²]
 
     QG limit (mode='qg'): Ψ = 0, f̂ → f.
 
@@ -1083,8 +1074,8 @@ def compute_ep_flux(eddy_ds, mode="auto"):
             Psi = _theta_stream_function(
                 rho0, vptp, wptp, eddy_ds['theta_zm'], alt_name, cos_phi
             )
-            F_phi  = -rho0 * _A * cos_phi * upvp  +  Psi * u_shear
-            F_vert = -rho0 * _A * cos_phi * upwp  +  Psi * f_hat
+            F_phi = -rho0 * _A * cos_phi * upvp + Psi * u_shear
+            F_vert = -rho0 * _A * cos_phi * upwp + Psi * f_hat
     else:
         if is_pres:
             F_phi = -_A * cos_phi * upvp
@@ -1109,11 +1100,11 @@ def compute_ep_flux(eddy_ds, mode="auto"):
             {'long_name': 'TEM mass stream function', 'units': 'kg s-1'})
 
         if 'v_zm' in eddy_ds and 'w_zm' in eddy_ds:
-            dPsi_dz   = _diff_safe(Psi, alt_name)
+            dPsi_dz = _diff_safe(Psi, alt_name)
             # cosφ floor avoids 1/cosφ blow-up at the poles
             cos_phi_safe = xr.where(np.abs(cos_phi) > 1e-6, cos_phi, 1e-6)
             dPsiC_dphi = _diff_safe(Psi * cos_phi, 'lat') * (180.0 / np.pi)
-            v_star = eddy_ds['v_zm'] - dPsi_dz   / (rho0 * _A * cos_phi_safe)
+            v_star = eddy_ds['v_zm'] - dPsi_dz / (rho0 * _A * cos_phi_safe)
             w_star = eddy_ds['w_zm'] + dPsiC_dphi / (rho0 * _A ** 2 * cos_phi_safe)
             out['v_star'] = v_star.assign_attrs(
                 {'long_name': 'TEM residual meridional velocity', 'units': 'm s-1'})
@@ -1156,7 +1147,6 @@ def compute_ep_divergence(ep_ds, valid_pressure_min_pa=1e-1,
     cos_phi = np.cos(lat_rad)
     F_phi, F_z, rho0 = ep_ds['F_phi'], ep_ds['F_z'], ep_ds['rho0']
 
-    # Compute divergence of EP flux
     dFphi_cos_dphi = _diff_safe(F_phi * cos_phi, 'lat') * (180.0 / np.pi)
     dFz_dvert = _diff_safe(F_z, alt_name)  # d/dp or d/dz
     div_F = (1.0 / (_A * cos_phi)) * dFphi_cos_dphi + dFz_dvert
@@ -1169,13 +1159,13 @@ def compute_ep_divergence(ep_ds, valid_pressure_min_pa=1e-1,
     # We expand the subterranean NaN mask by 1 grid point to shave off the jagged rim.
     nan_mask = a_EP.isnull()
     edge_mask = (
-        nan_mask.shift({alt_name: 1}).fillna(False).astype(bool) |
-        nan_mask.shift({alt_name: -1}).fillna(False).astype(bool)
+            nan_mask.shift({alt_name: 1}).fillna(False).astype(bool) |
+            nan_mask.shift({alt_name: -1}).fillna(False).astype(bool)
     )
     if 'lat' in nan_mask.dims:
         edge_mask = edge_mask | (
-            nan_mask.shift({'lat': 1}).fillna(False).astype(bool) |
-            nan_mask.shift({'lat': -1}).fillna(False).astype(bool)
+                nan_mask.shift({'lat': 1}).fillna(False).astype(bool) |
+                nan_mask.shift({'lat': -1}).fillna(False).astype(bool)
         )
     a_EP = a_EP.where(~edge_mask)
 
@@ -1222,7 +1212,6 @@ def _reorder_output_dims(ds: xr.Dataset) -> xr.Dataset:
     except ValueError:
         alt_name = None
 
-    # Build the preferred leading-dim sequence.
     priority: list[str] = []
     if 'time' in ds.dims:
         priority.append('time')
@@ -1289,13 +1278,8 @@ def eliassen_palm(
         Contains: F_phi, F_z, rho0, div_F, a_EP, u_zm.
         Height-coord full-TEM also adds: Psi, v_star, w_star.
     """
-    # ---- Validate & normalise variable names FIRST -------------------------
     ds = _parse_dataset(ds)
-
-    # ---- Align staggered w -------------------------------------------------
     ds = _align_w_to_full_levels(ds)
-
-    # ---- ONE coordinate decision, here, visible in the log -----------------
     if vertical == 'native':
         logger.info("vertical='native': skipping _preprocess_vertical (no interpolation).")
     else:
@@ -1305,10 +1289,9 @@ def eliassen_palm(
     coord_kind = 'pressure' if _is_pressure_coord(alt_name, ds) else 'height'
     logger.info(f"EP flux vertical coordinate: '{alt_name}' ({coord_kind}).")
 
-    # ---- stages inherit the coordinate; none of them re-decide -------------
-    eddy_ds = compute_eddy_fluxes(ds, lmax=lmax)  # canonical names guaranteed by _parse_dataset
-    ep_ds = compute_ep_flux(eddy_ds, mode=mode)  # branches on coord_kind
-    out = compute_ep_divergence(ep_ds)  # branches on coord_kind
+    eddy_ds = compute_eddy_fluxes(ds, lmax=lmax)
+    ep_ds = compute_ep_flux(eddy_ds, mode=mode)
+    out = compute_ep_divergence(ep_ds)
 
     if time_mean and 'time' in out.dims:
         logger.info("Averaging EP flux output over time.")

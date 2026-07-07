@@ -117,7 +117,7 @@ def _ep_scale_jucker(F_phi, F_z, lat, alt, alt_name, rho0, is_pres):
         ep1 = fp / (geom * r_val)          # [m²/s²]
         ep2 = fz / (geom * r_val)          # [m²/s²]
         Fphi  = cos2_2d * _A_EARTH**2 * ep1   # [m⁴/s²]
-        Fvert = cos2_2d * _A_EARTH**3 * ep2   # [m⁵/s²]  (→ m⁴·in/s² after ×in/m)
+        Fvert = cos2_2d * _A_EARTH**3 * ep2   # [m⁵/s²]  (→ m⁴·in/s² after xin/m)
 
     return Fphi, Fvert
 
@@ -294,18 +294,17 @@ def plot_ep_flux(ds, out_dir=".", prefix="ep_flux",
     """
     set_publication_style()
 
-    # --- compute or time-average the EP diagnostics ---
     if 'a_EP' not in ds:
         logger.info("EP flux not pre-computed - running pipeline in-memory.")
         from ..analysis.ep_flux import eliassen_palm
         ds = eliassen_palm(ds, time_mean=True)
     elif 'time' in ds['a_EP'].dims:
-        logger.info("Averaging pre-computed EP flux over time.")  # noqa: F821
+        logger.info("Averaging pre-computed EP flux over time.")
         ds = ds.mean(dim='time', keep_attrs=True)
 
     alt_name = _find_alt_name(ds)
 
-    # --- classify the vertical coordinate from the RAW coord (pre-conversion) ---
+    # classify coordinate type before _prep converts m → km / Pa → hPa
     a_EP_raw = ds['a_EP'].squeeze()
     is_meters = _coord_is_meter(a_EP_raw[alt_name])
     is_pres = (not is_meters) and _is_pressure_coord(alt_name, ds)
@@ -316,7 +315,6 @@ def plot_ep_flux(ds, out_dir=".", prefix="ep_flux",
     else:
         alt_label = alt_name
 
-    # --- prepare every field through one consistent path ---
     def prep(name):
         return _prep(ds[name], alt_name, is_meters, is_pres)
 
@@ -361,7 +359,6 @@ def plot_ep_flux(ds, out_dir=".", prefix="ep_flux",
     else:
         pres_hpa = _P0_HPA * np.exp(-alt / _H_SCALE)  # standard atmosphere
 
-    # --- figure ---
     fig, ax = plt.subplots(figsize=(11, 7))
 
     # filled contours: a_EP acceleration
@@ -398,13 +395,11 @@ def plot_ep_flux(ds, out_dir=".", prefix="ep_flux",
         ax.text(0.02, alt_max_km, ' EP validity limit', transform=ax.get_yaxis_transform(),
                 va='bottom', fontsize=7, color='0.35', zorder=6)
 
-    # vertical scale
     if is_pres:
         ax.set_yscale('log')
         ax.invert_yaxis()
     _add_dual_yaxis(ax, alt, pres_hpa, is_pres)
 
-    # decoration
     ax.set_xlim(-90, 90)
     ax.set_xticks([-90, -60, -30, 0, 30, 60, 90])
     ax.set_xticklabels(['90°S', '60°S', '30°S', '0°', '30°N', '60°N', '90°N'])
@@ -421,6 +416,6 @@ def plot_ep_flux(ds, out_dir=".", prefix="ep_flux",
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"{prefix}_ep_flux.png")
     plt.savefig(out_path, dpi=300, bbox_inches='tight')
-    logger.info(f"Saved EP flux plot to {out_path}")  # noqa: F821
+    logger.info(f"Saved EP flux plot to {out_path}")
     plt.close(fig)
     return out_path

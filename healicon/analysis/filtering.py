@@ -47,18 +47,20 @@ def _filter_block(data_block, fwhm_rad, lmax, is_nested):
 
 def filter_spatial(ds: xr.Dataset, fwhm_deg: float = None, lmax: int = None,
                    wavelength_km: float = None) -> xr.Dataset:
-    """
-    Filters spatial data using spherical harmonics.
+    """Filter all HEALPix variables using spherical harmonics.
 
-    Args:
-        ds: Input dataset
-        fwhm_deg: Full-width at half-maximum (degrees) for a Gaussian beam
-        lmax: Hard low-pass cutoff — retain only spherical harmonic degrees <= lmax
-        wavelength_km: Hard low-pass cutoff expressed as a physical scale. Equivalent to
-                       passing lmax=int(wavelength_to_degree(wavelength_km))
+    Exactly one of the three filter parameters must be given:
 
-    Returns:
-        Filtered dataset
+    fwhm_deg
+        Gaussian beam smoothing with the specified full-width-at-half-maximum.
+        Implemented via ``healpy.smoothing``.
+    lmax
+        Hard spectral low-pass: retain only degrees l ≤ lmax.
+    wavelength_km
+        Hard spectral low-pass expressed as a physical scale.
+        Converted to ``lmax`` via ``wavelength_to_degree(wavelength_km)``.
+
+    Variables without the HEALPix cell dimension are passed through unchanged.
     """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'

@@ -2,17 +2,25 @@
 Eliassen-Palm Flux Analysis
 ===========================
 
-Coordinate-aware EP flux.
+Coordinate-aware EP flux with separate HEIGHT and PRESSURE branches, each
+self-consistent in its vertical derivative and ρ₀ treatment.
 
-Adds a HEIGHT vs PRESSURE branch so the diagnostic is self-consistent on
-either vertical coordinate (fixing the previous hybrid that differentiated in
-pressure while using the height-coordinate rho0 prefactor).
+  HEIGHT coords (metres) — full primitive-equation TEM:
+      Uses the full θ-gradient stream function Ψ (Hardiman et al. / Iwasaki 1989):
 
-  HEIGHT coords (metres):   Andrews, Holton & Leovy (1987), eq. 3.5.3
-      F^(phi) = rho0 a cosphi ( u_bar_z [v'th']/th_z - [u'v'] )
-      F^(z)   = rho0 a cosphi ( f_hat   [v'th']/th_z - [u'w'] )
+      Ψ = a cosφ · (ρ₀[v'θ']·θ_z − ρ₀[w'θ']·(θ_φ/a)) / ((θ_φ/a)² + θ_z²)
+
+      F^(phi) = -rho0 a cosphi [u'v']  +  Ψ · du_bar/dz
+      F^(z)   = -rho0 a cosphi [u'w']  +  Ψ · f_hat
       div = (a cosphi)^-1 d(F_phi cosphi)/dphi + dF_z/dz
       a_EP = div / (rho0 a cosphi)
+
+      When θ_φ → 0 (horizontal θ-surfaces), Ψ → a cosφ ρ₀ [v'θ']/θ_z and the
+      formulas reduce exactly to Andrews, Holton & Leovy (1987), eq. 3.5.3:
+          F^(phi) = rho0 a cosphi ( u_bar_z [v'th']/th_z - [u'v'] )
+          F^(z)   = rho0 a cosphi ( f_hat   [v'th']/th_z - [u'w'] )
+
+      Also outputs: Ψ [kg/s], v* and w* (TEM residual velocities).
 
   PRESSURE coords (isobaric): Edmon/Hoskins/McIntyre (1980) form
       F^(phi) = a cosphi ( u_bar_p [v'th']/th_p - [u'v'] )
@@ -52,7 +60,7 @@ from typing import Literal
 import numpy as np
 import xarray as xr
 
-from ..cf_coords import _cf_guess, _find_coordinate, _is_z
+from ..cf_coords import _cf_guess, _find_coordinate, _is_z, convert_units
 from ..extract import zonal_mean as _zonal_mean
 from ..grid import append_history, get_cells_dim
 
@@ -76,14 +84,16 @@ _STD_PRES_LEVELS = np.array([
     200, 100, 70, 50, 30, 20, 10, 1, 0.1, 0.01,
     0.001, 0.0001, 0.00001], dtype=float)  # Pa
 
-# ── Robust variable lookup ────────────────────────────────────────────────────
+# ── Variable lookup ───────────────────────────────────────────────────────────
 
 # Fallback name patterns for each physical quantity.
 _VAR_NAME_ALIASES = {
+    'u': ('u', 'ua', 'U'),
+    'v': ('v', 'va', 'V'),
     'theta': ('theta', 'theta_zm', 'pot_temp', 'pt'),
     'temperature': ('temp', 'temp_zm', 'ta', 'temperature', 't'),
     'pressure': ('pres', 'pres_zm', 'pressure', 'pfull', 'p'),
-    'w': ('w', 'wa', 'wap', 'omega'),
+    'w': ('w', 'wa', 'wap'),  # omega (Pa/s) excluded — different physical quantity
     'density': ('rho', 'rho0', 'density'),
 }
 
@@ -112,8 +122,6 @@ def _find_var(ds: xr.Dataset, target: str) -> str | None:
 def _parse_dataset(ds: xr.Dataset) -> xr.Dataset:
     """Validate and normalise an input dataset for the EP flux pipeline.
 
-    Responsibilities
-    ----------------
     1. Resolve variable names to **canonical** forms (``u``, ``v``, ``w``,
        ``temp``, ``theta``, ``pres``) using CF conventions + common aliases.
     2. Derive missing thermodynamic fields where possible:
@@ -158,6 +166,11 @@ def _parse_dataset(ds: xr.Dataset) -> xr.Dataset:
             logger.debug(f"Renaming variables to canonical names: {safe_rename}")
             ds = ds.rename_vars(safe_rename)
 
+    # ── 2.5 Unit Verification & Auto-Conversion ──────────────────────────────
+    from ..cf_coords import check_convert_units
+    logger.debug("Validating and auto-converting physical units...")
+    ds = check_convert_units(ds)
+
     # ── 3. Derive θ if not present ───────────────────────────────────────────
     has_theta = 'theta' in ds
     has_temp = 'temp' in ds
@@ -179,10 +192,8 @@ def _parse_dataset(ds: xr.Dataset) -> xr.Dataset:
 
             if z is not None and _is_pressure_coord(alt_name, ds):
                 # Vertical coordinate IS pressure → θ = T·(P₀/p)^κ
-                p_coord = z.copy()
-                units = str(z.attrs.get('units', '')).lower()
-                if units in ('hpa', 'mb', 'mbar', 'millibar', 'hectopascal'):
-                    p_coord = p_coord * 100.0  # convert to Pa
+                p_coord_units = str(z.attrs.get('units', '')) or 'Pa'
+                p_coord = convert_units(z.copy(), p_coord_units, 'Pa')
                 logger.info(f"Deriving θ from T and pressure coordinate '{alt_name}'.")
                 ds['theta'] = ds['temp'] * (_P0 / p_coord) ** _KAPPA
                 ds['theta'].attrs = {'long_name': 'Potential temperature', 'units': 'K'}
@@ -444,13 +455,12 @@ def _interp_to_pressure_levels(
 def _preprocess_vertical(ds: xr.Dataset) -> xr.Dataset:
     """Ensure the dataset carries a usable vertical coordinate before EP flux.
 
-    Decision tree
-    -------------
-    1. Found a real height coordinate (metres via :func:`_is_z`) → no-op.
-    2. Found a pressure dim/coord already               → no-op.
-    3. Found a 4-D pressure *variable* (``pres`` / ``pressure``):
-       → interpolate all fields to :data:`_STD_PRES_LEVELS` via
-       :func:`_interp_to_pressure_levels`.
+    Cases, in priority order:
+
+    1. Real height coordinate (metres via :func:`_is_z`) → no-op.
+    2. Pressure already a dim/coord                      → no-op.
+    3. 4-D pressure *variable* (``pres`` / ``pressure``) → interpolate to
+       :data:`_STD_PRES_LEVELS` via :func:`_interp_to_pressure_levels`.
     4. Nothing useful found → warn and return unchanged.
     """
     coord = _find_coordinate(ds, 'level', raise_notfound=False)
@@ -673,9 +683,18 @@ def _align_w_to_full_levels(ds: xr.Dataset) -> xr.Dataset:
     """Interpolate staggered vertical wind w to the full model levels.
 
     ICON stores w on half-levels (e.g. ``height_2`` with n+1 levels) while u, v,
-    temp are on full levels (``height`` with n levels).  This function detects that
-    pattern and interpolates w to the full-level coordinate so the dataset is
-    self-consistent for eddy-flux computation.
+    and temp are on full levels (``height`` with n levels).  Detects that stagger
+    pattern and interpolates w to the full-level coordinate so all fields share
+    a common vertical dimension for eddy-flux computation.
+
+    Strategy (in priority order):
+    1. ``xr.interp`` against the full-level coordinate values — exact and correct
+       for non-uniform level spacing.  Used whenever both the half-level and
+       full-level coordinates carry numeric values.
+    2. Arithmetic mean of adjacent half-levels — only when coordinate values are
+       absent.  This is equivalent to assuming the full level sits exactly at the
+       midpoint of two consecutive interface heights (uniform-spacing assumption).
+       A warning is emitted so the caller knows a less accurate path was taken.
     """
     if 'w' not in ds:
         return ds
@@ -683,15 +702,19 @@ def _align_w_to_full_levels(ds: xr.Dataset) -> xr.Dataset:
     try:
         alt_name = _find_alt_name(ds)
     except ValueError:
-        return ds  # no vertical coordinate found — nothing to do
+        return ds
 
     w_dims = ds['w'].dims
-    # Detect the half-level dimension: same base name with _2 suffix or size = n+1
+
+    # Already on full levels — nothing to do.
+    if alt_name in w_dims:
+        return ds
+
+    full_size = ds.sizes.get(alt_name)
+
+    # Detect the half-level dimension.
     half_dim = None
-    full_size = ds.sizes.get(alt_name, None)
     for dim in w_dims:
-        if dim == alt_name:
-            break  # w already on full levels
         if full_size and ds.sizes.get(dim, 0) == full_size + 1:
             half_dim = dim
             break
@@ -702,56 +725,90 @@ def _align_w_to_full_levels(ds: xr.Dataset) -> xr.Dataset:
     if half_dim is None:
         return ds
 
-    if ds.sizes.get(half_dim) == full_size + 1:
-        logger.info(f"Destaggering w from '{half_dim}' to full levels '{alt_name}'.")
+    # ── Strategy 1: xr.interp (correct for non-uniform level spacing) ────────
+    if half_dim in ds.coords and alt_name in ds.coords:
+        logger.info(
+            f"Destaggering w: interpolating from '{half_dim}' to full levels '{alt_name}'."
+        )
+        w_interp = ds['w'].interp(
+            {half_dim: ds[alt_name]},
+            method='linear',
+            kwargs={'fill_value': 'extrapolate'},
+        )
+        if half_dim in w_interp.dims and half_dim != alt_name:
+            w_interp = w_interp.rename({half_dim: alt_name})
+        w_interp.attrs = ds['w'].attrs
+        ds = ds.assign({'w': w_interp})
+        if half_dim in ds.dims:
+            ds = ds.drop_dims(half_dim)
+        return ds
+
+    # ── Strategy 2: arithmetic mean (fallback — assumes uniform spacing) ──────
+    half_n = ds.sizes.get(half_dim, 0)
+    if half_n == full_size + 1:
+        logger.warning(
+            f"Destaggering w from '{half_dim}' to '{alt_name}': no coordinate values "
+            f"available — falling back to arithmetic mean (assumes uniform level spacing)."
+        )
         w_data = ds['w'].data
-        axis = w_dims.index(half_dim)
-        s_lower = [slice(None)] * ds['w'].ndim
-        s_upper = [slice(None)] * ds['w'].ndim
-        s_lower[axis] = slice(1, None)
-        s_upper[axis] = slice(0, -1)
-        w_interp_data = 0.5 * (w_data[tuple(s_lower)] + w_data[tuple(s_upper)])
+        axis = list(w_dims).index(half_dim)
+        sl = [slice(None)] * ds['w'].ndim
+        su = [slice(None)] * ds['w'].ndim
+        sl[axis] = slice(1, None)
+        su[axis] = slice(0, -1)
+        w_interp_data = 0.5 * (w_data[tuple(sl)] + w_data[tuple(su)])
 
         new_dims = [d if d != half_dim else alt_name for d in w_dims]
         new_coords = {k: v for k, v in ds['w'].coords.items() if k != half_dim}
         if alt_name in ds.coords:
             new_coords[alt_name] = ds[alt_name]
 
-        w_interp = xr.DataArray(w_interp_data, dims=new_dims, coords=new_coords)
-        return ds.assign({'w': w_interp})
-
-    if half_dim in ds.coords and alt_name in ds.coords:
-        logger.info(f"Interpolating w from '{half_dim}' to full levels '{alt_name}'.")
-        w_interp = ds['w'].interp({half_dim: ds[alt_name].values},
-                                  method='linear',
-                                  kwargs={'fill_value': 'extrapolate'})
-        if half_dim in w_interp.dims and half_dim != alt_name:
-            w_interp = w_interp.rename({half_dim: alt_name})
-        return ds.assign({'w': w_interp})
+        w_interp = xr.DataArray(
+            w_interp_data, dims=new_dims, coords=new_coords, attrs=ds['w'].attrs
+        )
+        ds = ds.assign({'w': w_interp})
+        if half_dim in ds.dims:
+            ds = ds.drop_dims(half_dim)
+        return ds
 
     return ds
 
 
 # ── Stage 1: Eddy covariances ─────────────────────────────────────────────────
 
-def compute_eddy_fluxes(ds: xr.Dataset, preprocess: bool = False) -> xr.Dataset:
+def compute_eddy_fluxes(
+        ds: xr.Dataset,
+        preprocess: bool = False,
+        lmax: int | None = None,
+) -> xr.Dataset:
     """Compute zonal-mean eddy covariances from a HEALPix dataset.
+
+    Eddy quantities are defined as the departure from the zonal mean:
+    q' = q − [q], where [·] denotes the zonal average over HEALPix rings.
+
+    Covariances always computed: [u'v'], [v'θ'].
+    Computed when *w* is present: [u'w'], [w'θ'].
 
     Parameters
     ----------
     ds : xr.Dataset
-        HEALPix dataset. Must contain ``u`` and ``v``. ``temp``/``pres`` are
-        strongly recommended; ``w`` enables the full TEM vertical flux.
+        HEALPix dataset with canonical variable names (u, v required;
+        theta required; w, temp, pres optional).
     preprocess : bool, default False
-        Whether to run :func:`_preprocess_vertical` here. Default False because
-        the driver :func:`eliassen_palm` now owns that single decision. Set True
-        only if you call this function standalone without the driver.
+        Run :func:`_preprocess_vertical` before computing covariances.
+        Keep False when calling from :func:`eliassen_palm` (it preprocesses
+        once and passes the result here).
+    lmax : int or None
+        Band-limit all fields to spherical-harmonic degree *lmax* before
+        computing covariances.  Useful for scale-selective diagnostics and
+        for suppressing sub-grid noise in the θ-gradients used by Ψ.
 
     Returns
     -------
-    xr.Dataset with ``u_zm``, ``v_zm``, ``theta_zm``, ``upvp_zm``, ``vptp_zm``,
-    ``upwp_zm``, ``pres_zm``, ``temp_zm`` (subject to input availability),
-    all on the vertical coordinate already attached to ``ds``.
+    xr.Dataset
+        Zonal-mean fields: u_zm, v_zm, theta_zm, upvp_zm [m² s⁻²],
+        vptp_zm [K m s⁻¹], and, if w is present, upwp_zm [m² s⁻²],
+        wptp_zm [K m s⁻¹].  Also passes through temp_zm and pres_zm.
     """
     # _parse_dataset guarantees canonical names (u, v, theta, temp, pres, w).
     # Vertical-coordinate preprocessing is owned by the driver (eliassen_palm).
@@ -760,6 +817,11 @@ def compute_eddy_fluxes(ds: xr.Dataset, preprocess: bool = False) -> xr.Dataset:
         ds = _parse_dataset(ds)
         ds = _align_w_to_full_levels(ds)
         ds = _preprocess_vertical(ds)
+
+    if lmax is not None:
+        from .filtering import filter_spatial
+        logger.info(f"Pre-filtering input fields to lmax={lmax} before eddy flux computation.")
+        ds = filter_spatial(ds, lmax=lmax)
 
     for v in ('u', 'v'):
         if v not in ds:
@@ -794,10 +856,7 @@ def compute_eddy_fluxes(ds: xr.Dataset, preprocess: bool = False) -> xr.Dataset:
     lats_pixels = 90.0 - np.rad2deg(theta_ring)
     lats_zm = ds_zm['lat'].values
 
-    ring_idx = np.searchsorted(np.sort(lats_zm), lats_pixels)
-    ring_idx = np.clip(ring_idx, 0, len(lats_zm) - 1)
-    sorted_idx = np.argsort(lats_zm)
-    ring_idx = sorted_idx[ring_idx]
+    ring_idx = np.abs(lats_zm[:, None] - lats_pixels[None, :]).argmin(axis=0)
 
     def _broadcast_to_pixels(da_zm):
         """(…, lat) zonal-mean DataArray -> (…, cells) by ring/pixel mapping."""
@@ -843,9 +902,15 @@ def compute_eddy_fluxes(ds: xr.Dataset, preprocess: bool = False) -> xr.Dataset:
     if has_w:
         w_zm_px = _broadcast_to_pixels(ds_zm['w'])
         w_prime = ds['w'] - w_zm_px
+        out['w_zm'] = ds_zm['w'].assign_attrs(
+            {'long_name': 'Zonal-mean vertical velocity', 'units': 'm s-1'})
         upwp_zm = _zonal_mean(xr.Dataset({'upwp': u_prime * w_prime}))['upwp']
         upwp_zm.attrs = {'long_name': "Zonal-mean eddy vertical flux [u'w']", 'units': 'm2 s-2'}
         out['upwp_zm'] = upwp_zm
+        wptp_zm = _zonal_mean(xr.Dataset({'wptp': w_prime * theta_prime}))['wptp']
+        wptp_zm.attrs = {'long_name': "Zonal-mean eddy vertical heat flux [w'theta']",
+                         'units': 'K m s-1'}
+        out['wptp_zm'] = wptp_zm
 
     out.attrs = ds.attrs
     return out
@@ -868,10 +933,11 @@ def _is_pressure_coord(alt_name, ds):
 
 
 def _diff_safe(da, dim):
-    """Safely compute 2nd-order finite differences, even on chunked Dask arrays.
+    """2nd-order centred finite difference along *dim*, NaN-masked at boundaries.
 
-    Also propagates the input NaN mask onto the output so that
-    ``np.gradient`` does not create spurious large values at NaN boundaries.
+    Chunks along *dim* are consolidated before differentiating so the stencil
+    is not split across chunks.  Points whose immediate neighbour is NaN are
+    also masked, suppressing spurious large values at data boundaries.
     """
     nan_mask = da.isnull()
     if da.chunks is not None:
@@ -887,16 +953,83 @@ def _diff_safe(da, dim):
 
 
 def _stability(theta_bar, alt_name):
-    """d(theta_bar)/d(coord) with a SIGN-PRESERVING floor (avoids flipping the
-    sign of F where the gradient is near zero)."""
+    """dθ̄/d(coord) [K/m or K/Pa] with a sign-preserving floor.
+
+    The floor (±ε = ±1e-10) avoids dividing by zero in near-neutral layers
+    (mesopause minimum, isothermal stratopause) while preserving the sign so
+    the EP flux components do not flip spuriously.
+    """
     tz = _diff_safe(theta_bar, alt_name)
     eps = 1e-10
     tz_floored = xr.where(np.abs(tz) > eps, tz, eps * xr.where(tz >= 0, 1.0, -1.0))
     return tz_floored.where(tz.notnull())
 
 
+def _theta_stream_function(
+        rho0:      xr.DataArray,
+        vptp:      xr.DataArray,
+        wptp:      xr.DataArray,
+        theta_bar: xr.DataArray,
+        alt_name:  str,
+        cos_phi:   xr.DataArray,
+        eps:       float = 1e-30,
+) -> xr.DataArray:
+    """TEM mass stream function Ψ [kg s⁻¹] from the full θ-gradient projection.
+
+    Ψ = a cosφ · (ρ₀[v'θ']·θ_z  −  ρ₀[w'θ']·(θ_φ/a)) / ((θ_φ/a)² + θ_z²)
+
+    Both gradient components are in K m⁻¹.  In the limit θ_φ → 0 (horizontal
+    θ-surfaces):
+        Ψ → a cosφ ρ₀ [v'θ'] / θ_z
+    which is the Iwasaki (1989) / AHL87 eq. 3.5.3 limit.
+
+    The denominator is regularised to *eps* to guard against near-zero
+    θ-gradients (isothermal layers, mesopause minimum, polar vortex core).
+    """
+    theta_z = _stability(theta_bar, alt_name)                          # dθ̄/dz [K/m]
+    # _diff_safe differentiates w.r.t. lat in degrees; ×(180/π) converts to
+    # radians, then /a gives the meridional K/m gradient component.
+    theta_phi_over_a = _diff_safe(theta_bar, 'lat') * (180.0 / np.pi) / _A  # [K/m]
+
+    grad_sq = theta_phi_over_a ** 2 + theta_z ** 2
+    grad_sq = xr.where(grad_sq < eps, eps, grad_sq)
+
+    # Log the max tilt ratio so users can gauge when the θ_φ correction matters.
+    # Values > 0.1 (i.e. θ_φ/a > ~30 % of θ_z) indicate strongly tilted θ-surfaces.
+    try:
+        tilt_ratio = float(
+            (np.abs(theta_phi_over_a) / (np.abs(theta_z) + 1e-30)).max()
+        )
+        logger.debug(
+            f"θ-surface tilt: max |θ_φ/a| / |θ_z| = {tilt_ratio:.3g}  "
+            f"({'significant' if tilt_ratio > 0.1 else 'small'} Ψ correction)"
+        )
+    except Exception:
+        pass
+
+    numer = rho0 * vptp * theta_z - rho0 * wptp * theta_phi_over_a   # [kg K²/(m³ s)]
+    Psi_unscaled = numer / grad_sq                                     # [kg/(m·s)]
+    return _A * cos_phi * Psi_unscaled                                 # [kg/s]
+
+
 def compute_ep_flux(eddy_ds, mode="auto"):
-    """EP flux components, branching on the vertical coordinate type."""
+    """Compute F_phi and F_z from zonal-mean eddy covariances.
+
+    Branches on the vertical coordinate detected in *eddy_ds*:
+
+    Height coords (mode='full'):
+        F^φ = −ρ₀ a cosφ [u'v'] + Ψ · dū/dz       [kg s⁻²]
+        F^z = −ρ₀ a cosφ [u'w'] + Ψ · f̂            [kg s⁻²]
+        where Ψ is the TEM stream function from :func:`_theta_stream_function`.
+
+    Pressure coords (mode='full', Edmon et al. 1980 eq. 3.1):
+        F^φ = a cosφ (ū_p [v'θ']/θ̄_p − [u'v'])    [m³ s⁻²]
+        F^z = a cosφ (f̂   [v'θ']/θ̄_p − [u'ω'])    [Pa m² s⁻²]
+
+    QG limit (mode='qg'): Ψ = 0, f̂ → f.
+
+    mode='auto' uses 'full' when [u'w'] is available, 'qg' otherwise.
+    """
     has_upwp = 'upwp_zm' in eddy_ds
     if mode == 'full' and not has_upwp:
         raise ValueError("mode='full' requires 'upwp_zm' (needs w in the input).")
@@ -941,9 +1074,17 @@ def compute_ep_flux(eddy_ds, mode="auto"):
             F_phi = _A * cos_phi * (u_shear * vptp / theta_s - upvp)
             F_vert = _A * cos_phi * (f_hat * vptp / theta_s - upomega)
         else:
+            # Height coords: full primitive-equation TEM via Ψ stream function.
+            # Ψ uses the full θ-gradient (both θ_z and θ_φ/a); when [w'θ'] is
+            # absent (no w in input) wptp is zero and Ψ → a cosφ ρ₀[v'θ']/θ_z,
+            # recovering the AHL87 formula exactly.
             upwp = eddy_ds['upwp_zm']
-            F_phi = rho0 * _A * cos_phi * (u_shear * vptp / theta_s - upvp)
-            F_vert = rho0 * _A * cos_phi * (f_hat * vptp / theta_s - upwp)
+            wptp = eddy_ds.get('wptp_zm', xr.zeros_like(vptp))
+            Psi = _theta_stream_function(
+                rho0, vptp, wptp, eddy_ds['theta_zm'], alt_name, cos_phi
+            )
+            F_phi  = -rho0 * _A * cos_phi * upvp  +  Psi * u_shear
+            F_vert = -rho0 * _A * cos_phi * upwp  +  Psi * f_hat
     else:
         if is_pres:
             F_phi = -_A * cos_phi * upvp
@@ -952,12 +1093,36 @@ def compute_ep_flux(eddy_ds, mode="auto"):
             F_phi = -rho0 * _A * cos_phi * upvp
             F_vert = rho0 * _A * cos_phi * (f * vptp / theta_s)
 
+    # Height:   F_phi = rho0 a cosphi [m2/s2]  → kg/s2  (≡ Pa m = N m-1)
+    # Pressure: F_phi = a cosphi [m2/s2]        → m3/s2
+    #           F_vert = a cosphi [Pa m/s2]      → Pa m2/s2  (omega carries Pa/s)
     F_phi.attrs = {'long_name': 'EP flux, meridional component',
-                   'units': 'm3 s-2' if not is_pres else 'm2 Pa s-2'}
+                   'units': 'kg s-2' if not is_pres else 'm3 s-2'}
     F_vert.attrs = {'long_name': f'EP flux, vertical component ({coord_kind})',
-                    'units': 'm3 s-2' if not is_pres else 'm2 Pa s-2'}
+                    'units': 'kg s-2' if not is_pres else 'Pa m2 s-2'}
 
     out = xr.Dataset({'F_phi': F_phi, 'F_z': F_vert, 'rho0': rho0})
+
+    # Ψ and residual velocities — height coords only (Ψ is undefined for isobaric)
+    if not is_pres and use_full:
+        out['Psi'] = Psi.assign_attrs(
+            {'long_name': 'TEM mass stream function', 'units': 'kg s-1'})
+
+        if 'v_zm' in eddy_ds and 'w_zm' in eddy_ds:
+            dPsi_dz   = _diff_safe(Psi, alt_name)
+            # cosφ floor avoids 1/cosφ blow-up at the poles
+            cos_phi_safe = xr.where(np.abs(cos_phi) > 1e-6, cos_phi, 1e-6)
+            dPsiC_dphi = _diff_safe(Psi * cos_phi, 'lat') * (180.0 / np.pi)
+            v_star = eddy_ds['v_zm'] - dPsi_dz   / (rho0 * _A * cos_phi_safe)
+            w_star = eddy_ds['w_zm'] + dPsiC_dphi / (rho0 * _A ** 2 * cos_phi_safe)
+            out['v_star'] = v_star.assign_attrs(
+                {'long_name': 'TEM residual meridional velocity', 'units': 'm s-1'})
+            out['w_star'] = w_star.assign_attrs(
+                {'long_name': 'TEM residual vertical velocity', 'units': 'm s-1'})
+
+    for passthrough in ('u_zm', 'v_zm', 'w_zm', 'pres_zm', 'temp_zm', 'wptp_zm'):
+        if passthrough in eddy_ds:
+            out[passthrough] = eddy_ds[passthrough]
     out.attrs['ep_flux_mode'] = mode_used
     out.attrs['ep_flux_coord'] = coord_kind  # consumed by the divergence
     return out
@@ -965,17 +1130,23 @@ def compute_ep_flux(eddy_ds, mode="auto"):
 
 def compute_ep_divergence(ep_ds, valid_pressure_min_pa=1e-1,
                           valid_height_max_m=1.2e5, mask_invalid=False):
-    """div.F and the EP-flux zonal acceleration, branching on coordinate type.
+    """Compute EP flux divergence and the residual zonal acceleration a_EP.
+
+    div F = (a cosφ)⁻¹ ∂(F_φ cosφ)/∂φ + ∂F_z/∂z    (height, AHL87 eq. 3.5.6)
+    div F = (a cosφ)⁻¹ ∂(F_φ cosφ)/∂φ + ∂F_z/∂p    (pressure, Edmon+80 eq. 3.3)
+
+    a_EP = div F / (ρ₀ a cosφ)   [m s⁻¹ day⁻¹]  (height)
+    a_EP = div F / (a cosφ)      [m s⁻¹ day⁻¹]  (pressure)
 
     Parameters
     ----------
     valid_pressure_min_pa, valid_height_max_m : float
-        Documented validity floor (recorded in a_EP.attrs). Above ~100-120 km
-        molecular diffusion / ion drag dominate and the EP framework loses
-        meaning -- independent of coordinate choice.
+        Documented validity ceiling recorded in ``a_EP.attrs``. Above ~100-120 km
+        molecular diffusion and ion drag dominate and the EP-flux framework loses
+        meaning regardless of coordinate choice.
     mask_invalid : bool
-        If True, NaN out a_EP beyond the validity floor. Default False: the
-        computation stays honest and the plotting layer decides what to hide.
+        If True, NaN a_EP beyond the validity ceiling. Default False leaves the
+        values in place and lets the plotting layer decide what to mask.
     """
     alt_name = _find_alt_name(ep_ds)
     is_pres = (ep_ds.attrs.get('ep_flux_coord', None) == 'pressure') \
@@ -1008,7 +1179,11 @@ def compute_ep_divergence(ep_ds, valid_pressure_min_pa=1e-1,
         )
     a_EP = a_EP.where(~edge_mask)
 
+    # div_F = (1/(a cosphi)) d(F_phi cosphi)/dphi + dF_vert/dvert
+    # Height: [kg/s2 / m] = kg/(m s2) = Pa/m → / (rho0 a cosphi [kg/m2]) = m/s2
+    # Pressure: [m3/s2 / m + Pa m2/s2 / Pa] = m2/s2  → / (a cosphi [m]) = m/s2
     div_F.attrs = {'long_name': 'EP flux divergence',
+                   'units': 'Pa' if not is_pres else 'm2 s-2',
                    'ep_flux_coord': 'pressure' if is_pres else 'height'}
     a_EP.attrs = {
         'long_name': 'EP-flux wave forcing on zonal-mean wind',
@@ -1078,19 +1253,41 @@ def eliassen_palm(
         mode: Literal['auto', 'full', 'qg'] = 'auto',
         time_mean: bool = False,
         vertical: Literal['auto', 'native'] = 'auto',
+        lmax: int | None = None,
 ) -> xr.Dataset:
-    """Full EP-flux pipeline: HEALPix dataset -> F, div.F, acceleration.
+    """Full EP-flux pipeline: HEALPix dataset → F, div F, a_EP.
+
+    Pipeline stages:
+    1. :func:`_parse_dataset`       — canonicalise variable names, derive θ/p.
+    2. :func:`_align_w_to_full_levels` — destagger w from half-levels if needed.
+    3. :func:`_preprocess_vertical` — optionally interpolate to isobaric levels.
+    4. :func:`compute_eddy_fluxes`  — zonal-mean eddy covariances.
+    5. :func:`compute_ep_flux`      — F_phi, F_z (branches on coord type).
+    6. :func:`compute_ep_divergence`— div F and a_EP [m s⁻¹ day⁻¹].
 
     Parameters
     ----------
+    mode : {'auto', 'full', 'qg'}
+        'auto': full TEM when [u'w'] is available, QG otherwise.
+        'full': full primitive-equation TEM (requires w in input).
+        'qg':  quasi-geostrophic limit (no Ψ stream function correction).
+    time_mean : bool
+        Average output over the time dimension after computing EP flux.
     vertical : {'auto', 'native'}
-        'auto'   : run _preprocess_vertical (may interpolate to pressure levels
-                   when the input has only a generalized-height index + a 4-D
-                   pressure field).
-        'native' : skip preprocessing entirely and compute on whatever vertical
-                   coordinate is already attached (use this for HL output whose
-                   coordinate is already height-in-metres -- guarantees NO
-                   interpolation).
+        'auto'   : run :func:`_preprocess_vertical`, which may interpolate to
+                   standard isobaric levels when a 4-D pressure field is present
+                   but no real height coordinate.
+        'native' : skip preprocessing; compute on the coordinate already in the
+                   dataset (use for HL output with height-in-metres already set).
+    lmax : int or None
+        Band-limit inputs to this spherical-harmonic degree before computing
+        eddy covariances; passed to :func:`compute_eddy_fluxes`.
+
+    Returns
+    -------
+    xr.Dataset
+        Contains: F_phi, F_z, rho0, div_F, a_EP, u_zm.
+        Height-coord full-TEM also adds: Psi, v_star, w_star.
     """
     # ---- Validate & normalise variable names FIRST -------------------------
     ds = _parse_dataset(ds)
@@ -1109,7 +1306,7 @@ def eliassen_palm(
     logger.info(f"EP flux vertical coordinate: '{alt_name}' ({coord_kind}).")
 
     # ---- stages inherit the coordinate; none of them re-decide -------------
-    eddy_ds = compute_eddy_fluxes(ds)  # canonical names guaranteed by _parse_dataset
+    eddy_ds = compute_eddy_fluxes(ds, lmax=lmax)  # canonical names guaranteed by _parse_dataset
     ep_ds = compute_ep_flux(eddy_ds, mode=mode)  # branches on coord_kind
     out = compute_ep_divergence(ep_ds)  # branches on coord_kind
 

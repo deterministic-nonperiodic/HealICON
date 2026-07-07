@@ -701,8 +701,15 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim,
 @click.option('--out-dir', default='.',
               help='Output directory for plots (default: current directory)')
 @click.option('--prefix', default=None, help='Prefix for output filenames.')
+@click.option('--vmax', type=float, default=120.0, show_default=True,
+              help='EP-flux: symmetric colour limit for a_EP (m/s/day). Large values saturate '
+                   'the colorbar rather than dominating the scale. Pass 0 to use a data-driven 97th-percentile.')
+@click.option('--rho-min', type=float, default=None,
+              help='EP-flux: density floor (kg/m3). Points where rho0 < rho_min are blanked. '
+                   'Default: no masking (vmax already handles dynamic range). '
+                   'Use e.g. 1e-6 to cut off above ~100 km in height coordinates.')
 @profile_command
-def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, out_dir, prefix):
+def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, out_dir, prefix, vmax, rho_min):
     """
     Generate simple visualizations for healicon products.
 
@@ -741,7 +748,9 @@ def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, out_dir, prefi
         plot_map(ds, var_name=var_name, target_height=target_height, out_dir=out_dir, prefix=prefix)
     elif plot_type in ('ep-flux', 'epflux'):
         from .visualize import plot_ep_flux
-        plot_ep_flux(ds, out_dir=out_dir, prefix=prefix)
+        plot_ep_flux(ds, out_dir=out_dir, prefix=prefix,
+                     vmax=vmax if vmax != 0.0 else None,
+                     rho_min=rho_min)
     elif plot_type == 'spectrum':
         plot_spectrum(ds, var_name=var_name, target_height=target_height, out_dir=out_dir,
                       prefix=prefix)

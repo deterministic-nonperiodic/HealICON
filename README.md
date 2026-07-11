@@ -10,6 +10,7 @@ HealICON is a command-line analysis tool for global atmospheric model outputs, u
 - Helmholtz decomposition: rotational/divergent components
 - Extraction: vertical slices or 1D points
 - Regridding: arbitrary nside or zoom-factor
+- Eliassen-Palm flux: full primitive-equation TEM or quasi-geostrophic approximation on height or pressure coordinates; residual circulation (v*, w*) and wave-induced acceleration a_EP
 
 ## Features
 
@@ -75,18 +76,6 @@ healicon convert -n 64 "data/raw_*.nc" "output/hp_{basename}"
 ```
 _Note: `{basename}` in the output template will automatically be replaced by the input file's name (e.g. `raw_01.nc`). You can also use `{name_no_ext}`._
 
-### Variable Mapping (Namelist)
-
-You can specify a YAML file to explicitly map input variables to output variables.
-
-**config.yaml**
-```yaml
-variables:
-  # output_name: input_name
-  temp: t
-  u_wind: u
-```
-
 **Command:**
 ```bash
 healicon convert -n 64 -c config.yaml "data/icon_*.nc" "output/hp_{basename}"
@@ -142,8 +131,63 @@ healicon extract-point --lat 45.0 --lon 10.0 "data.nc" "point.nc"
 # 7. Tidal Analysis: Extract tidal amplitude and phase, with optional wavenumber filtering and symmetric/antisymmetric decomposition
 healicon tides --modes DW1,SW2,DE3,SE2 "input_time_series.nc" "output_tides.nc"
 
-# 8. Regrade Resolution: Change HEALPix resolution using nside or zoom (nside=2^zoom)
+# 8. Eliassen-Palm Flux: Compute F_phi, F_z, div F, and wave-induced acceleration a_EP
+#    Requires u and v. Adding temp+pres enables QG and full TEM; adding w enables
+#    the full primitive-equation TEM with Psi, v*, w* in the output.
+#    When a relative vorticity field (vor/vorticity/zeta) is present, it is used
+#    directly for f_hat = f + zeta_bar instead of finite-differencing u_zm.
+healicon ep-flux "data.nc" "ep_flux.nc"                        # auto: full TEM if w present, else QG
+healicon ep-flux --mode full "data.nc" "ep_flux.nc"            # force full TEM (requires w)
+healicon ep-flux --mode qg   "data.nc" "ep_flux_qg.nc"         # quasi-geostrophic
+healicon ep-flux --time-mean "data.nc" "ep_flux_mean.nc"       # time-average before saving
+
+# 9. Regrade Resolution: Change HEALPix resolution using nside or zoom (nside=2^zoom)
 healicon regrade --zoom 6 "data.nc" "regraded.nc"
+```
+
+### Visualization
+
+`HealICON` includes a built-in plot command for quick inspection of analysis outputs:
+
+```bash
+# EP flux: quiver overlay of (F_phi, F_z) on a_EP background, with divergence contours
+healicon plot --type ep-flux "ep_flux.nc"
+
+# Cross-section (latitude x height) for any variable
+healicon plot --type section --var temp "data.nc"
+
+# Keogram (time x height), supports comma-separated variables for stacked panels
+healicon plot --type keogram --var u        "data.nc"
+healicon plot --type keogram --var u,v,temp "data.nc"
+
+# Global HEALPix map at a target altitude
+healicon plot --type map --var temp --height 85 "data.nc"
+
+# Angular power spectrum
+healicon plot --type spectrum --var u "data.nc"
+```
+
+### Python API
+
+All analysis routines are accessible directly in Python:
+
+```python
+import xarray as xr
+from healicon.analysis.ep_flux import eliassen_palm
+
+ds = xr.open_dataset("data.nc")
+
+# Full pipeline: eddy covariances -> F_phi, F_z, div_F, a_EP
+ep_ds = eliassen_palm(ds, mode="auto")   # mode: 'auto' | 'full' | 'qg'
+
+# Output variables (height-coordinate full TEM):
+#   F_phi   [kg s-2]       EP flux, meridional component
+#   F_z     [kg m-1 s-2]   EP flux, vertical component
+#   div_F   [kg m-1 s-2]   EP flux divergence
+#   a_EP    [m s-1 day-1]  wave-induced zonal acceleration
+#   Psi     [kg s-1]       TEM mass stream function
+#   v_star, w_star         residual-mean meridional / vertical velocity
+#   u_zm, temp_zm, ...     zonal-mean diagnostics passed through
 ```
 
 ## Output Metadata

@@ -31,11 +31,16 @@ def _prep_keogram_data(
     var: str,
     time_dim: str,
     factor: float,
+    lat: float | None = None,
+    lon: float | None = None,
 ) -> tuple[xr.DataArray, str, bool]:
     """Prepare a (time, alt) DataArray for keogram plotting.
 
-    HEALPix datasets are reduced via zonal mean followed by a
-    cos-latitude-weighted average over remaining spatial dims.
+    For HEALPix datasets:
+    - If *lat* and *lon* are both given, extracts a single grid point via
+      :func:`~healicon.extract.extract_point` — no spatial averaging.
+    - Otherwise computes a zonal mean then a cos-latitude-weighted average.
+
     The altitude coordinate is converted: m -> km, Pa -> hPa.
 
     Returns (da, alt_dim, is_pres).
@@ -44,9 +49,14 @@ def _prep_keogram_data(
     try:
         cell_dim = get_cells_dim(ds)
         if cell_dim in ds.dims:
-            logger.info("HEALPix data detected: computing zonal mean for keogram.")
-            from ..extract import zonal_mean
-            ds = zonal_mean(ds)
+            if lat is not None and lon is not None:
+                from ..extract import extract_point
+                logger.info(f"Extracting point lat={lat}, lon={lon} for keogram.")
+                ds = extract_point(ds, lat=lat, lon=lon)
+            else:
+                logger.info("HEALPix data detected: computing zonal mean for keogram.")
+                from ..extract import zonal_mean
+                ds = zonal_mean(ds)
     except Exception:
         pass
 
@@ -97,6 +107,8 @@ def plot_keogram(
     datasets,
     variables,
     time_dim: str = 'time',
+    lat: float | None = None,
+    lon: float | None = None,
     y_limits=None,
     v_range=None,
     cmap=None,
@@ -111,12 +123,18 @@ def plot_keogram(
     Parameters
     ----------
     datasets : xr.Dataset or dict[str, xr.Dataset]
-        Input data. HEALPix datasets are averaged to (time, height) automatically.
+        Input data. HEALPix datasets are reduced to (time, height) automatically.
         A bare Dataset is wrapped under the label ``'Data'``.
     variables : str or list of str
         Variable names. Each becomes one row of panels.
     time_dim : str
         Name of the time dimension.
+    lat : float, optional
+        Latitude of the extraction point (degrees). Requires *lon* as well.
+        When both are given, a single HEALPix grid point is extracted instead
+        of computing a spatial average.
+    lon : float, optional
+        Longitude of the extraction point (degrees). Requires *lat* as well.
     y_limits : [float, float], optional
         Vertical-axis limits in km (height) or hPa (pressure).
     v_range : [vmin, vmax, vstep] or dict[str, list], optional
@@ -126,7 +144,8 @@ def plot_keogram(
     share_cbar : bool
         Share one vertical colorbar per variable row (default ``True``).
     location_label : str, optional
-        Domain / location annotation in the upper-right corner of each panel.
+        Explicit annotation in the upper-right corner of each panel.
+        Auto-populated from *lat*/*lon* when those are given and this is ``None``.
     start_label : str
         First letter for panel annotations ``(a)``, ``(b)``, ... (default ``'a'``).
     out_dir : str
@@ -201,7 +220,7 @@ def plot_keogram(
 
             try:
                 da, alt_dim, is_pres = _prep_keogram_data(
-                    ds, var, time_dim, attrs['factor']
+                    ds, var, time_dim, attrs['factor'], lat=lat, lon=lon
                 )
             except Exception as exc:
                 logger.warning(f"Skipping '{var}' in '{label}': {exc}")
@@ -267,9 +286,13 @@ def plot_keogram(
                 fontsize=12, loc='left', fontweight='bold',
             )
 
-            if location_label:
+            _loc = location_label
+            if _loc is None and lat is not None and lon is not None:
+                _loc = (f"{abs(lat):.1f}°{'N' if lat >= 0 else 'S'}, "
+                        f"{abs(lon):.1f}°{'E' if lon >= 0 else 'W'}")
+            if _loc:
                 at = AnchoredText(
-                    location_label, loc='upper right',
+                    _loc, loc='upper right',
                     prop=dict(size=9), frameon=True,
                 )
                 at.patch.set_boxstyle("round,pad=0.3")
@@ -292,7 +315,8 @@ def plot_keogram(
 
     os.makedirs(out_dir, exist_ok=True)
     var_str = '_'.join(variables)
-    out_path = os.path.join(out_dir, f"{prefix}_keogram_{var_str}.png")
+    loc_tag = f"_lat{int(lat)}_lon{int(lon)}" if (lat is not None and lon is not None) else ""
+    out_path = os.path.join(out_dir, f"{prefix}_keogram_{var_str}{loc_tag}.png")
     plt.savefig(out_path, dpi=300, bbox_inches='tight')
     logger.info(f"Saved keogram to {out_path}")
     plt.close(fig)

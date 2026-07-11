@@ -21,13 +21,18 @@ def plot_section(
     prefix: str = "section",
     v_range=None,
     y_limits=None,
+    lon: float | None = None,
 ):
     """Plot a 2D cross-section (latitude x height or time x height).
 
-    For HEALPix datasets (spatial dimension ``'cells'``) a zonal mean is
-    computed automatically.  The *x_dim* / *y_dim* arguments are used as hints;
-    CF coordinate detection is used as a fallback so that ``'altitude'``,
-    ``'z'``, ``'height'``, ... are all resolved transparently.
+    For HEALPix datasets (spatial dimension ``'cells'``):
+    - If *lon* is given, extracts data along that meridian via
+      :func:`~healicon.extract.extract_along_longitude`.
+    - Otherwise computes a zonal mean.
+
+    The *x_dim* / *y_dim* arguments are used as hints; CF coordinate detection
+    is used as a fallback so that ``'altitude'``, ``'z'``, ``'height'``, ...
+    are all resolved transparently.
 
     Parameters
     ----------
@@ -43,6 +48,9 @@ def plot_section(
         Colour-scale bounds. Defaults to the entry in ``VARIABLE_ATTRS``.
     y_limits : [z_min, z_max], optional
         Vertical-axis limits in km (height) or hPa (pressure).
+    lon : float, optional
+        If given, extract the section at this longitude (degrees) instead of
+        computing a zonal mean.
 
     Returns
     -------
@@ -57,18 +65,24 @@ def plot_section(
 
     data = ds[var_name].squeeze()
 
-    # Step 1: HEALPix -> zonal mean
+    # Step 1: HEALPix -> meridional slice or zonal mean
     from ..grid import get_cells_dim
     try:
         cell_dim = get_cells_dim(ds)
         if cell_dim in data.dims:
-            logger.info(
-                f"HEALPix dataset detected (dim='{cell_dim}'). "
-                "Computing zonal mean before section plot."
-            )
-            from ..extract import zonal_mean
-            ds_zm = zonal_mean(ds)
-            data = ds_zm[var_name].squeeze()
+            if lon is not None:
+                from ..extract import extract_along_longitude
+                logger.info(f"Extracting section along lon={lon:.1f}.")
+                ds_use = extract_along_longitude(ds, lon=lon)
+                data = ds_use[var_name].squeeze()
+            else:
+                logger.info(
+                    f"HEALPix dataset detected (dim='{cell_dim}'). "
+                    "Computing zonal mean before section plot."
+                )
+                from ..extract import zonal_mean
+                ds_zm = zonal_mean(ds)
+                data = ds_zm[var_name].squeeze()
     except Exception:
         pass
 
@@ -210,10 +224,12 @@ def plot_section(
         ax.set_ylabel('Altitude / km', fontsize=11)
 
     long_name = data.attrs.get('long_name', var_name)
-    ax.set_title(f"{long_name} Cross-Section", fontweight='bold')
+    lon_suffix = f" (lon={lon:.1f}°)" if lon is not None else ""
+    ax.set_title(f"{long_name} Cross-Section{lon_suffix}", fontweight='bold')
 
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{prefix}_section_{var_name}.png")
+    lon_tag = f"_lon{int(lon)}" if lon is not None else ""
+    out_path = os.path.join(out_dir, f"{prefix}_section_{var_name}{lon_tag}.png")
     plt.savefig(out_path, dpi=300, bbox_inches='tight')
     logger.info(f"Saved cross-section plot to {out_path}")
     plt.close(fig)

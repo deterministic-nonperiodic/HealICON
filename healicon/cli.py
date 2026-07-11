@@ -698,6 +698,10 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim,
 @click.option('--y-dim', default='z_mc', help='Y dimension for section plots (default: z_mc)')
 @click.option('--height', 'target_height', type=float, default=None,
               help='Select level closest to this height (km) for map and spectrum plots. Avoids vertical averages.')
+@click.option('--lat', type=float, default=None,
+              help='Latitude (degrees) for point extraction in keogram plots.')
+@click.option('--lon', type=float, default=None,
+              help='Longitude (degrees) for meridional section or point extraction in keogram plots.')
 @click.option('--out-dir', default='.',
               help='Output directory for plots (default: current directory)')
 @click.option('--prefix', default=None, help='Prefix for output filenames.')
@@ -709,7 +713,7 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim,
                    'Default: no masking (vmax already handles dynamic range). '
                    'Use e.g. 1e-6 to cut off above ~100 km in height coordinates.')
 @profile_command
-def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, out_dir, prefix, vmax, rho_min):
+def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, lat, lon, out_dir, prefix, vmax, rho_min):
     """
     Generate simple visualizations for healicon products.
 
@@ -741,13 +745,13 @@ def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, out_dir, prefi
         if var_name is None:
             raise click.UsageError("Must specify --var for section plots.")
         plot_section(ds, var_name=var_name, x_dim=x_dim, y_dim=y_dim, out_dir=out_dir,
-                     prefix=prefix)
+                     prefix=prefix, lon=lon)
     elif plot_type == 'keogram':
         if var_name is None:
             raise click.UsageError("Must specify --var for keogram plots.")
         from .visualize import plot_keogram
         variables = [v.strip() for v in var_name.split(',')]
-        plot_keogram(ds, variables=variables, out_dir=out_dir, prefix=prefix)
+        plot_keogram(ds, variables=variables, lat=lat, lon=lon, out_dir=out_dir, prefix=prefix)
     elif plot_type == 'map':
         if var_name is None:
             raise click.UsageError("Must specify --var for map plots.")

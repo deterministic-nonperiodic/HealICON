@@ -558,9 +558,9 @@ def _fourier_precompute_ring_coefs(
     for every level in one vectorised pass here, then store the compact ring
     series in ``spectrum_kwargs['_ring_cache']`` for the block workers.
 
-    Memory cost: ``n_zwn × n_time × n_extra × n_rings × 2 × 8`` bytes.
+    Memory cost: ``n_zwn x n_time x n_extra x n_rings x 2 x 8`` bytes.
     For ICON nside=64 (n_time=185, n_extra=41, n_rings=255):
-    ≈ 3 ZWNs × 185 × 41 × 255 × 16 = **93 MB** — trivial.
+    ≈ 3 ZWNs x 185 x 41 x 255 x 16 = **93 MB** — trivial.
 
     Args:
         da: DataArray with dims ``(time_dim, [*extra_dims], cell_dim)``.
@@ -649,7 +649,7 @@ def _fourier_precompute_ring_coefs(
             cos_w = ring_cos[zwn]
             sin_w = ring_sin[zwn]
 
-            # Real part: data × cos(zwn×phi)/N_ring
+            # Real part: data x cos(zwnxphi)/N_ring
             fm_cos = np.add.reduceat(
                 batch_np * cos_w[None, None, :], startpix, axis=-1
             )  # (n_time, batch, n_rings)
@@ -1296,7 +1296,7 @@ def spherical_harmonic_wavelet_spectrum(da: xr.DataArray, zwn: int,
     n_extra = int(np.prod(extra_sizes)) if extra_dims else 1
     order_str = 'nested' if is_nested else 'ring'
 
-    # ── Phase 1: batched map2alm across all (time × extra) pairs ──────────
+    # ── Phase 1: batched map2alm across all (time x extra) pairs ──────────
     alm_result = _sh_precompute_alm(
         da, zwn_list=[abs(zwn)], time_dim=time_dim,
         lmax=lmax, map2alm_iter=map2alm_iter,

@@ -268,46 +268,53 @@ class HealpixInterpolator:
                 if self._spatial_dim not in da.dims:
                     out_ds[var_name] = da
                     continue
-                interpolated_da = xr.apply_ufunc(
-                    _interp_unstructured_block,
-                    da,
-                    kwargs={'indices': self._indices, 'weights': self._weights,
-                            'valid_mask': self._valid_mask},
-                    input_core_dims=[[self._spatial_dim]],
-                    output_core_dims=[["cells"]],
-                    exclude_dims=set((self._spatial_dim, "cells")),
-                    dask="parallelized",
-                    output_dtypes=[da.dtype],
-                    dask_gufunc_kwargs={'output_sizes': {'cells': len(self._target_lon)},
-                                        'allow_rechunk': True}
-                )
+                with xr.set_options(keep_attrs=True):
+                    interpolated_da = xr.apply_ufunc(
+                        _interp_unstructured_block,
+                        da,
+                        kwargs={'indices': self._indices, 'weights': self._weights,
+                                'valid_mask': self._valid_mask},
+                        input_core_dims=[[self._spatial_dim]],
+                        output_core_dims=[["cells"]],
+                        exclude_dims=set((self._spatial_dim, "cells")),
+                        dask="parallelized",
+                        output_dtypes=[da.dtype],
+                        dask_gufunc_kwargs={'output_sizes': {'cells': len(self._target_lon)},
+                                            'allow_rechunk': True}
+                    )
             else:  # regular
                 if self._lat_name not in da.dims or self._lon_name not in da.dims:
                     out_ds[var_name] = da
                     continue
-                interpolated_da = xr.apply_ufunc(
-                    _interp_regular_block,
-                    da,
-                    kwargs={
-                        'lon_coords': self._source_lon,
-                        'lat_coords': self._source_lat,
-                        'target_lon': self._target_lon,
-                        'target_lat': self._target_lat
-                    },
-                    input_core_dims=[[self._lat_name, self._lon_name]],
-                    output_core_dims=[["cells"]],
-                    exclude_dims=set((self._lat_name, self._lon_name)),
-                    dask="parallelized",
-                    output_dtypes=[da.dtype],
-                    dask_gufunc_kwargs={'output_sizes': {'cells': len(self._target_lon)},
-                                        'allow_rechunk': True}
-                )
+                with xr.set_options(keep_attrs=True):
+                    interpolated_da = xr.apply_ufunc(
+                        _interp_regular_block,
+                        da,
+                        kwargs={
+                            'lon_coords': self._source_lon,
+                            'lat_coords': self._source_lat,
+                            'target_lon': self._target_lon,
+                            'target_lat': self._target_lat
+                        },
+                        input_core_dims=[[self._lat_name, self._lon_name]],
+                        output_core_dims=[["cells"]],
+                        exclude_dims=set((self._lat_name, self._lon_name)),
+                        dask="parallelized",
+                        output_dtypes=[da.dtype],
+                        dask_gufunc_kwargs={'output_sizes': {'cells': len(self._target_lon)},
+                                            'allow_rechunk': True}
+                    )
 
             interpolated_da = interpolated_da.assign_coords(cells=out_ds.cells)
             out_ds[var_name] = interpolated_da
             out_ds[var_name].attrs = da.attrs
 
         out_ds.attrs.update(ds.attrs)
+        # Explicitly copy coordinate attributes (apply_ufunc drops them for non-core coords)
+        for c in ds.coords:
+            if c in out_ds.coords and c not in [self._lon_name, self._lat_name, "cells"]:
+                out_ds[c].attrs.update(ds[c].attrs)
+
         out_ds = add_healpix_grid_mapping(out_ds, self.nside, order='ring')
 
         history_msg = f"Interpolated to HEALPix grid (nside={self.nside}, scheme=RING) using HealICON."

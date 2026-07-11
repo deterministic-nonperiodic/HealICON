@@ -1,6 +1,15 @@
 """
-Helmholtz decomposition, vorticity/divergence computation,
-and wind reconstruction from vorticity/divergence.
+Helmholtz decomposition of horizontal wind on the HEALPix sphere.
+
+Every non-divergent wind can be written as the curl of a stream function ψ and
+every irrotational wind as the gradient of a velocity potential χ:
+
+    u = u_rot + u_div
+    ζ = ∇²ψ  →  ψ_lm = -B_lm / √[l(l+1)]   (x a → units m² s⁻¹)
+    D = ∇²χ  →  χ_lm =  E_lm / √[l(l+1)]   (x a → units m² s⁻¹)
+
+E_lm (electric / divergent mode) and B_lm (magnetic / rotational mode) are
+extracted from the spin-1 spherical harmonic transform via healpy.map2alm_spin.
 """
 import healpy as hp
 import numpy as np
@@ -45,8 +54,7 @@ def _helmholtz_block(u_block, v_block, lmax, nside, is_nested):
 
     l_arr, _ = hp.Alm.getlm(lmax)
     fl = np.sqrt(l_arr * (l_arr + 1.0))
-    # Safe denominator: avoid division by zero at l=0 (monopole, physically meaningless for wind)
-    fl_safe = np.where(l_arr > 0, fl, 1.0)
+    fl_safe = np.where(l_arr > 0, fl, 1.0)  # fl=0 at l=0; prevents division by zero
     n_alm = len(l_arr)
     order_str = 'nested' if is_nested else 'ring'
 
@@ -84,13 +92,13 @@ def _helmholtz_block(u_block, v_block, lmax, nside, is_nested):
         u_div[i] = ensure_original_order(u_div_ring, order_str)
         v_div[i] = ensure_original_order(v_div_ring, order_str)
 
-        # Streamfunction ψ: ζ = ∇²ψ  →  ψ_lm = -almB_lm / fl  (× a for m²/s)
+        # Streamfunction ψ: ζ = ∇²ψ  →  ψ_lm = -almB_lm / fl  (x a for m²/s)
         psi_alm = np.where(l_arr > 0, -almB / fl_safe, 0.0 + 0.0j)
         psi_map = np.where(valid_mask, hp.alm2map(psi_alm, nside, lmax=lmax) * _EARTH_RADIUS_M,
                            np.nan)
         psi[i] = ensure_original_order(psi_map, order_str)
 
-        # Velocity potential χ: D = ∇²χ  →  χ_lm = almE_lm / fl  (× a for m²/s)
+        # Velocity potential χ: D = ∇²χ  →  χ_lm = almE_lm / fl  (x a for m²/s)
         chi_alm = np.where(l_arr > 0, almE / fl_safe, 0.0 + 0.0j)
         chi_map = np.where(valid_mask, hp.alm2map(chi_alm, nside, lmax=lmax) * _EARTH_RADIUS_M,
                            np.nan)
@@ -109,27 +117,13 @@ def compute_helmholtz(ds: xr.Dataset, u_var: str, v_var: str,
                       lmax: int | None = None,
                       include_psi: bool = True,
                       include_chi: bool = True) -> xr.Dataset:
-    """
-    Helmholtz decomposition of horizontal wind (u, v) on a HEALPix sphere.
+    """Helmholtz decomposition of (u, v) on a HEALPix sphere.
 
-    The wind is split into:
-        rotational (non-divergent) component  →  u_rot, v_rot
-        divergent  (irrotational)  component  →  u_div, v_div
+    Splits the wind into a rotational (non-divergent) part (u_rot, v_rot)
+    and a divergent (irrotational) part (u_div, v_div), with optional
+    streamfunction ψ and velocity potential χ [m² s⁻¹].
 
-    Optionally:
-        streamfunction    ψ  [m²/s]  (include_psi=True)
-        velocity potential χ  [m²/s]  (include_chi=True)
-
-    Args:
-        ds         : HEALPix xr.Dataset with a 'cell' dimension.
-        u_var      : Name of the eastward  wind variable.
-        v_var      : Name of the northward wind variable.
-        lmax       : Maximum spherical harmonic degree (default: 3*nside-1).
-        include_psi: Include streamfunction in the output.
-        include_chi: Include velocity potential in the output.
-
-    Returns:
-        xr.Dataset containing u_rot, v_rot, u_div, v_div, and optionally ψ, χ.
+    *lmax* defaults to 3·nside - 1 (full healpy resolution).
     """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'
@@ -192,7 +186,6 @@ def compute_helmholtz(ds: xr.Dataset, u_var: str, v_var: str,
             'grid_mapping': 'healpix',
         }
 
-    # Pass through any other variables unchanged
     for var in ds.data_vars:
         if var not in [u_var, v_var]:
             out_ds[var] = ds[var]
@@ -204,19 +197,7 @@ def compute_helmholtz(ds: xr.Dataset, u_var: str, v_var: str,
 
 
 def _vorticity_divergence_block(u_block, v_block, lmax, nside, is_nested):
-    """
-    Computes horizontal vorticity and divergence from U and V wind components.
-    
-    Args:
-        u_block: U wind component data
-        v_block: V wind component data
-        lmax: Maximum spherical harmonic degree
-        nside: HEALPix nside
-        is_nested: Whether data is in nested order
-
-    Returns:
-        Tuple of (divergence, vorticity)
-    """
+    """Spectral vorticity/divergence for a single (..., npix) block."""
     # u_block, v_block shape (..., npix)
     orig_shape = u_block.shape
     npix = orig_shape[-1]
@@ -249,13 +230,11 @@ def _vorticity_divergence_block(u_block, v_block, lmax, nside, is_nested):
         v_theta = -v_filled
         v_phi = u_filled
 
-        # map2alm_spin returns E and B modes for spin=1
         almE, almB = hp.map2alm_spin([v_theta, v_phi], spin=1, lmax=lmax)
 
         div_alm = -fl * almE / R
         vor_alm = fl * almB / R
 
-        # Transform back to map space
         div_map = np.where(valid_mask, hp.alm2map(div_alm, nside, lmax=lmax), np.nan)
         vor_map = np.where(valid_mask, hp.alm2map(vor_alm, nside, lmax=lmax), np.nan)
 
@@ -272,17 +251,11 @@ def _vorticity_divergence_block(u_block, v_block, lmax, nside, is_nested):
 
 def compute_vorticity_divergence(ds: xr.Dataset, u_var: str, v_var: str,
                                  lmax: int | None = None) -> xr.Dataset:
-    """
-    Computes horizontal vorticity and divergence from U and V wind components.
-    
-    Args:
-        ds: Dataset containing U and V wind components
-        u_var: Name of the U wind variable
-        v_var: Name of the V wind variable
-        lmax: Maximum spherical harmonic degree (optional)
-        
-    Returns:
-        Dataset containing vorticity and divergence
+    """Compute relative vorticity ζ and horizontal divergence D from (u, v).
+
+    Uses the spin-1 SHT:  D_lm = -fl · E_lm / a,  ζ_lm = fl · B_lm / a
+    where fl = √[l(l+1)] and a is Earth's radius [m].
+    Output units: s⁻¹.
     """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'
@@ -326,19 +299,7 @@ def compute_vorticity_divergence(ds: xr.Dataset, u_var: str, v_var: str,
 
 
 def _uv_from_vorticity_divergence_block(div_block, vor_block, lmax, nside, is_nested):
-    """
-    Reconstructs U and V wind components from vorticity and divergence.
-    
-    Args:
-        div_block: Divergence data (potentially chunked)
-        vor_block: Vorticity data (potentially chunked)
-        lmax: Maximum spherical harmonic degree
-        nside: HEALPix nside
-        is_nested: Whether data is in nested order
-
-    Returns:
-        Tuple of (u_reconstructed, v_reconstructed)
-    """
+    """Reconstruct (u, v) from vorticity/divergence for a single (..., npix) block."""
     orig_shape = div_block.shape
     npix = orig_shape[-1]
 
@@ -367,17 +328,14 @@ def _uv_from_vorticity_divergence_block(div_block, vor_block, lmax, nside, is_ne
         div_filled = np.where(valid_mask, div_ring, 0.0)
         vor_filled = np.where(valid_mask, vor_ring, 0.0)
 
-        # Convert to alm
         div_alm = hp.map2alm(div_filled, lmax=lmax)
         vor_alm = hp.map2alm(vor_filled, lmax=lmax)
 
-        # Get E and B modes
-        # Div = -fl * E / R -> E = -Div * R / fl
-        # Vor = fl * B / R -> B = Vor * R / fl
+        # D_lm = -fl·E_lm/R  →  E_lm = -D_lm·R/fl
+        # ζ_lm =  fl·B_lm/R  →  B_lm =  ζ_lm·R/fl
         almE = np.where(l > 0, -div_alm * R / fl_safe, 0.0 + 0.0j)
         almB = np.where(l > 0, vor_alm * R / fl_safe, 0.0 + 0.0j)
 
-        # Transform back to map space with spin=1
         m_spin = hp.alm2map_spin([almE, almB], nside, spin=1, lmax=lmax)
         v_theta = m_spin[0]
         v_phi = m_spin[1]
@@ -400,17 +358,12 @@ def _uv_from_vorticity_divergence_block(div_block, vor_block, lmax, nside, is_ne
 
 def compute_uv_from_vorticity_divergence(ds: xr.Dataset, div_var: str, vor_var: str,
                                          lmax: int | None = None) -> xr.Dataset:
-    """
-    Computes U and V wind components from horizontal divergence and vorticity.
-    
-    Args:
-        ds: Dataset containing divergence and vorticity
-        div_var: Name of the divergence variable
-        vor_var: Name of the vorticity variable
-        lmax: Maximum spherical harmonic degree (optional)
-        
-    Returns:
-        Dataset containing U and V wind components
+    """Reconstruct (u, v) from divergence and vorticity via inverse SHT.
+
+    Inverts the spectral relations:
+        E_lm = -D_lm · a / fl   (divergent mode)
+        B_lm =  ζ_lm · a / fl   (rotational mode)
+    then applies the spin-1 synthesis to recover the wind components.
     """
     cell_dim = get_cells_dim(ds)
     is_nested = get_healpix_order(ds) == 'nested'

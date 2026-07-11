@@ -60,6 +60,14 @@ from .wavelet import (
     spherical_harmonic_wavelet_spectrum,
 )
 
+# --- Eliassen-Palm flux ---
+from .ep_flux import (
+    compute_eddy_fluxes,
+    compute_ep_flux,
+    compute_ep_divergence,
+    eliassen_palm,
+)
+
 # Re-export grid utilities that were historically importable from analysis
 from ..grid import ensure_ring, ensure_original_order
 
@@ -77,6 +85,11 @@ __all__ = [
     "fourier_wavelet_spectrum",
     "spherical_harmonic_wavelet_spectrum",
     "compute_wavelet_tidal_analysis",
+    # EP flux
+    "compute_eddy_fluxes",
+    "compute_ep_flux",
+    "compute_ep_divergence",
+    "eliassen_palm",
     # Internal but used by wavelet module
     "ensure_ring",
     "ensure_original_order",

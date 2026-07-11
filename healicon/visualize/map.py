@@ -98,7 +98,7 @@ def plot_map(ds: xr.Dataset, var_name: str, target_height: float | None = None, 
         ax.grid(True, linestyle='--', alpha=0.5)
 
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{prefix}_{var_name}.png")
+    out_path = os.path.join(out_dir, f"{prefix}_map_{var_name}.png")
     plt.savefig(out_path, dpi=300, bbox_inches='tight')
     logger.info(f"Saved map plot to {out_path}")
     plt.close(fig)

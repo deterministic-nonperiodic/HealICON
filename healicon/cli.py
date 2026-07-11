@@ -689,7 +689,7 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim,
 @cli.command()
 @click.argument('ifile')
 @click.option('--type', 'plot_type',
-              type=click.Choice(['tides', 'section', 'map', 'spectrum', 'ep-flux', 'epflux']),
+              type=click.Choice(['tides', 'section', 'keogram', 'map', 'spectrum', 'ep-flux', 'epflux']),
               required=True,
               help='Type of plot to generate.')
 @click.option('--var', 'var_name', default=None,
@@ -742,6 +742,12 @@ def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, out_dir, prefi
             raise click.UsageError("Must specify --var for section plots.")
         plot_section(ds, var_name=var_name, x_dim=x_dim, y_dim=y_dim, out_dir=out_dir,
                      prefix=prefix)
+    elif plot_type == 'keogram':
+        if var_name is None:
+            raise click.UsageError("Must specify --var for keogram plots.")
+        from .visualize import plot_keogram
+        variables = [v.strip() for v in var_name.split(',')]
+        plot_keogram(ds, variables=variables, out_dir=out_dir, prefix=prefix)
     elif plot_type == 'map':
         if var_name is None:
             raise click.UsageError("Must specify --var for map plots.")

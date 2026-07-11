@@ -14,6 +14,7 @@ __all__: List[str] = [
     "_cf_guess",
     "_coord_is_degrees",
     "_is_geographic",
+    "_is_pressure_coord",
     "_is_z",
     "_coord_is_meter",
     "is_geographic_grid",
@@ -73,6 +74,15 @@ ALLOWED_UNITS: List[str] = ["deg", "degrees", "degrees_north", "degrees_east",
                             "m", "meters", "km", "kilometers"]
 
 _METER_UNITS: set = {"m", "meter", "meters", "metre", "metres"}
+_PRESSURE_NAMES: frozenset = frozenset(('plev', 'pres', 'pres_zm', 'pressure', 'isobaric'))
+_PRESSURE_STD_NAMES: frozenset = frozenset(('air_pressure',
+                                             'atmosphere_ln_pressure_coordinate'))
+_PRESSURE_UNITS: frozenset = frozenset((
+    'pa', 'pascal', 'pascals',
+    'hpa', 'hectopascal', 'hectopascals',
+    'mb', 'mbar', 'millibar', 'millibars',
+    'bar',
+))
 
 # --------------------------
 # Unit and coordinate checks
@@ -428,6 +438,25 @@ def _coord_is_meter(c: xr.DataArray) -> bool:
     return (u in _METER_UNITS) or any(tok in u for tok in ("metre", "meter"))
 
 
+def _is_pressure_coord(cname: str, coords) -> bool:
+    """True if the coordinate *cname* is a pressure (isobaric) coordinate.
+
+    Checks: well-known name patterns, CF standard_name, then unit strings.
+    *coords* accepts an :class:`xr.Dataset` or a ``dataset.coords`` mapping.
+    """
+    if cname.lower() in _PRESSURE_NAMES:
+        return True
+    if cname not in coords:
+        return False
+    coord = coords[cname]
+    standard_name = str(coord.attrs.get('standard_name', '')).lower()
+    if standard_name in _PRESSURE_STD_NAMES:
+        return True
+    if _get_units_str(coord).lower() in _PRESSURE_UNITS:
+        return True
+    return False
+
+
 def _is_z(cname: str, coords: Union[xr.Dataset, xr.DataArray, Any]) -> bool:
     """True if *cname* is a height-in-metres vertical coordinate.
 
@@ -446,22 +475,14 @@ def _is_z(cname: str, coords: Union[xr.Dataset, xr.DataArray, Any]) -> bool:
     if cname not in coords:
         return False
 
+    if _is_pressure_coord(cname, coords):
+        return False
+
     coord = coords[cname]
     name = cname.lower()
     units = _get_units_str(coord).lower()
     standard_name = (coord.attrs.get("standard_name", "") or "").strip().lower()
     axis = (coord.attrs.get("axis", "") or "").strip().upper()
-
-    pressure_units = ('pa', 'hpa', 'mb', 'millibar', 'bar')
-    pressure_names = ('plev', 'pressure', 'pres', 'isobaric')
-    pressure_std_names = ('air_pressure', 'atmosphere_ln_pressure_coordinate')
-
-    if any(unit in units for unit in pressure_units):
-        return False
-    if any(pname in name for pname in pressure_names):
-        return False
-    if standard_name in pressure_std_names:
-        return False
 
     # axis='Z' + metre units (most reliable)
     meter_units = ('m', 'meter', 'meters', 'metre', 'metres', 'gpm')
@@ -473,7 +494,6 @@ def _is_z(cname: str, coords: Union[xr.Dataset, xr.DataArray, Any]) -> bool:
 
     height_name_patterns = ('z', 'height', 'altitude', 'depth', 'zlev', 'z_')
     if any(pattern in name for pattern in height_name_patterns):
-        # Verify it has meter units to avoid false positives
         if any(unit in units for unit in meter_units):
             return True
 

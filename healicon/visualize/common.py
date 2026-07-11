@@ -2,6 +2,7 @@ import logging
 import re
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +13,45 @@ try:
 except ImportError:
     wind_cm = 'RdYlBu_r'
 
-temp_cm = 'inferno'
+_TEMP_CM_COLORS = [
+    '#3e0214', '#3d0216', '#570b25', '#6e1531', '#87203e',
+    '#9f294c', '#af4d4c', '#be704c', '#c38a53', '#c19d61',
+    '#c2ab75', '#aba87d', '#879a84', '#648d89', '#648d89',
+    '#438190', '#287593', '#27678a', '#275b80', '#254f77',
+    '#26436f', '#2f4775', '#39517f', '#415c87', '#4d6591',
+    '#56719c', '#617ba5', '#7591b9', '#7f9bc3', '#8aa4cd',
+    '#93b1d7', '#9cb8df', '#a7bfe3', '#afc6e6', '#b8cdea',
+    '#c0d4ed', '#cbdbf4', '#d3e2f7', '#dce9fa', '#e4f0ff',
+    '#e7f8ff',
+]
+temp_cm = LinearSegmentedColormap.from_list('temp_c42', _TEMP_CM_COLORS[::-1])
+
+VARIABLE_ATTRS: dict[str, dict] = {
+    'temp': {
+        'label': 'Temperature', 'units': 'K',
+        'factor': 1.0, 'v_range': [160., 282., 20.], 'colormap': temp_cm,
+    },
+    'u': {
+        'label': 'Zonal velocity', 'units': r'm s$^{-1}$',
+        'factor': 1.0, 'v_range': [-90., 91., 20.], 'colormap': wind_cm,
+    },
+    'v': {
+        'label': 'Meridional velocity', 'units': r'm s$^{-1}$',
+        'factor': 1.0, 'v_range': [-90., 91., 20.], 'colormap': wind_cm,
+    },
+    'w': {
+        'label': 'Vertical velocity', 'units': r'cm s$^{-1}$',
+        'factor': 1e2, 'v_range': [-300., 301., 50.], 'colormap': wind_cm,
+    },
+    'theta': {
+        'label': 'Potential temperature', 'units': 'K',
+        'factor': 1.0, 'v_range': [200., 1000., 100.], 'colormap': temp_cm,
+    },
+    'tke': {
+        'label': 'Turbulent kinetic energy', 'units': r'm$^2$ s$^{-2}$',
+        'factor': 1.0, 'v_range': [0., 20., 5.], 'colormap': temp_cm,
+    },
+}
 
 SPECTRAL_KEYMAP: dict[str, str] = {
     'kinetic_energy_cl': r'$E_K$',

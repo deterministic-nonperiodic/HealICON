@@ -1,41 +1,63 @@
 import logging
 import os
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+import numpy as np
 import xarray as xr
 
-from .common import wind_cm, temp_cm, set_publication_style
-from ..cf_coords import _find_coordinate, _coord_is_meter
+from .common import wind_cm, temp_cm, set_publication_style, VARIABLE_ATTRS
+from ..cf_coords import _find_coordinate, _coord_is_meter, _is_pressure_coord
 
 logger = logging.getLogger(__name__)
 
 
-def plot_section(ds: xr.Dataset, var_name: str, x_dim: str = 'lat', y_dim: str = 'z_mc',
-                 out_dir: str = ".", prefix: str = "section"):
-    """
-    Plot a 2D cross-section (e.g. Latitude vs Height, or Time vs Height).
+def plot_section(
+    ds: xr.Dataset,
+    var_name: str,
+    x_dim: str = 'lat',
+    y_dim: str = 'z_mc',
+    out_dir: str = ".",
+    prefix: str = "section",
+    v_range=None,
+    y_limits=None,
+):
+    """Plot a 2D cross-section (latitude x height or time x height).
 
-    For HEALPix datasets (spatial dimension 'cells') a zonal mean is computed
-    automatically so that a proper latitude axis is available.  The x_dim /
-    y_dim arguments are treated as *hints*; if the exact name is absent the
-    function falls back to CF coordinate detection so that names like
-    'altitude', 'z', 'height', … are all handled transparently.
+    For HEALPix datasets (spatial dimension ``'cells'``) a zonal mean is
+    computed automatically.  The *x_dim* / *y_dim* arguments are used as hints;
+    CF coordinate detection is used as a fallback so that ``'altitude'``,
+    ``'z'``, ``'height'``, ... are all resolved transparently.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+    var_name : str
+    x_dim : str
+        Hint for the horizontal dimension (default ``'lat'``).
+    y_dim : str
+        Hint for the vertical dimension (default ``'z_mc'``).
+    out_dir : str
+    prefix : str
+    v_range : [vmin, vmax, vstep], optional
+        Colour-scale bounds. Defaults to the entry in ``VARIABLE_ATTRS``.
+    y_limits : [z_min, z_max], optional
+        Vertical-axis limits in km (height) or hPa (pressure).
+
+    Returns
+    -------
+    str or None
+        Path of the saved PNG, or ``None`` if the variable was not found.
     """
     set_publication_style()
 
     if var_name not in ds:
         logger.error(f"Variable '{var_name}' not found in dataset.")
-        return
+        return None
 
-    data = ds[var_name]
+    data = ds[var_name].squeeze()
 
-    # Squeeze out singleton dimensions
-    data = data.squeeze()
-
-    # ------------------------------------------------------------------
-    # Step 1: If this is a HEALPix dataset, compute a zonal mean first
-    # so we get a proper lat dimension to plot against.
-    # ------------------------------------------------------------------
+    # Step 1: HEALPix -> zonal mean
     from ..grid import get_cells_dim
     try:
         cell_dim = get_cells_dim(ds)
@@ -45,32 +67,19 @@ def plot_section(ds: xr.Dataset, var_name: str, x_dim: str = 'lat', y_dim: str =
                 "Computing zonal mean before section plot."
             )
             from ..extract import zonal_mean
-            # Pass the full dataset so that all dimension coordinates
-            # (e.g. altitude) are present in the output and get properly
-            # attached to the target DataArray.  Slice to the target
-            # variable afterward to keep memory usage small.
             ds_zm = zonal_mean(ds)
             data = ds_zm[var_name].squeeze()
-    except (ValueError, Exception):
-        pass  # not HEALPix — proceed with original data
+    except Exception:
+        pass
 
-    # ------------------------------------------------------------------
-    # Step 2: Resolve the x / y dimension names via CF conventions.
-    # The user-supplied names (default 'lat', 'z_mc') are used as
-    # hints; if they are not present we try CF detection.
-    # ------------------------------------------------------------------
+    # Step 2: Resolve x/y dims via CF detection
     def _resolve_dim(hint: str, cf_type: str):
-        """Return the actual dim name for *hint*, falling back to CF detection."""
-        # Exact match first (must be both a coord and a dimension)
         if hint in data.dims and hint in data.coords:
             return hint
-        # Try CF coordinate detection on the current data slice
         ds_for_search = data.to_dataset(name=var_name)
         coord = _find_coordinate(ds_for_search, cf_type, raise_notfound=False)
         if coord is not None and coord.name in data.dims:
-            logger.info(
-                f"Resolved '{hint}' \u2192 '{coord.name}' via CF detection."
-            )
+            logger.info(f"Resolved '{hint}' -> '{coord.name}' via CF detection.")
             return coord.name
         return None
 
@@ -87,67 +96,125 @@ def plot_section(ds: xr.Dataset, var_name: str, x_dim: str = 'lat', y_dim: str =
             f"Could not resolve dimension(s) {', '.join(missing)} for section plot. "
             f"Available dims: {list(data.dims)}, coords: {list(data.coords)}"
         )
-        return
+        return None
 
     x_dim, y_dim = resolved_x, resolved_y
 
-    # Average over remaining dimensions
-    reduced_dims = [dim for dim in data.dims if dim not in [x_dim, y_dim]]
+    # Step 3: Average over remaining dims
+    reduced_dims = [d for d in data.dims if d not in (x_dim, y_dim)]
     if reduced_dims:
         logger.info(f"Averaging over additional dimensions: {reduced_dims}")
         data = data.mean(dim=reduced_dims)
 
+    # Step 4: m -> km for height coords
     if y_dim in data.coords and _coord_is_meter(data[y_dim]):
         data = data.assign_coords({y_dim: data[y_dim] / 1000.0})
-        data[y_dim].attrs['units'] = 'km'
-        if 'long_name' not in data[y_dim].attrs:
-            data[y_dim].attrs['long_name'] = 'Height'
+        data[y_dim].attrs.update({'units': 'km', 'long_name': 'Height'})
 
-    # Ensure both axes are monotonically increasing so that contourf
-    # renders correctly (ICON stores altitude top-down, i.e. descending).
     try:
         data = data.sortby(x_dim).sortby(y_dim)
     except Exception:
-        pass  # non-fatal — proceed with original ordering
+        pass
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    # Step 5: Variable display attributes
+    default_cmap = temp_cm if 'temp' in var_name else wind_cm
+    attrs = VARIABLE_ATTRS.get(var_name, {
+        'label': data.attrs.get('long_name', var_name),
+        'units': data.attrs.get('units', ''),
+        'factor': 1.0,
+        'v_range': [
+            float(data.min()), float(data.max()),
+            (float(data.max()) - float(data.min())) / 8.0,
+        ],
+        'colormap': default_cmap,
+    })
 
-    # Determine colormap based on variable
-    cmap = temp_cm if 'temp' in var_name else wind_cm
+    data = data * attrs['factor']
 
-    # Use xarray's built-in contourf plotting
-    cf = data.plot.contourf(
-        ax=ax,
-        x=x_dim,
-        y=y_dim,
-        levels=20,
-        cmap=cmap,
-        add_colorbar=True,
-        cbar_kwargs={'pad': 0.02}
+    vr = v_range if v_range is not None else attrs['v_range']
+    v_min, v_max, v_inc = float(vr[0]), float(vr[1]), float(vr[2])
+
+    num_cn = max(50, int((v_max - v_min) / 1.25))
+    cn_levels = np.linspace(v_min, v_max, num_cn)
+    cbar_ticks = np.arange(v_min, v_max + v_inc * 0.5, v_inc)
+
+    if var_name == 'temp':
+        cc_levels = np.append(np.arange(v_min, 300., 20.), np.arange(300., 501., 50.))
+    else:
+        cc_levels = np.arange(v_min, v_max + v_inc * 0.5, v_inc)
+
+    # Step 6: Plot
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    cn = data.plot.contourf(
+        ax=ax, x=x_dim, y=y_dim,
+        levels=cn_levels, cmap=attrs['colormap'], extend='both',
+        add_colorbar=False, add_labels=False,
+    )
+    cn.axes.set_title("")
+    try:
+        for c in cn.collections:
+            c.set_edgecolor("face")
+    except AttributeError:
+        cn.set_edgecolor("face")
+
+    cc = data.plot.contour(
+        ax=ax, x=x_dim, y=y_dim,
+        levels=cc_levels, colors=['black'], linewidths=0.5,
+        add_colorbar=False,
+    )
+    cc.axes.set_title("")
+    ax.clabel(cc, inline=True, colors='white', fontsize=9, fmt='%1.0f')
+
+    cb = fig.colorbar(
+        cn, ax=ax, ticks=cbar_ticks, orientation='vertical',
+        pad=0.02, extend='both', shrink=0.92,
+    )
+    cb.set_label(
+        f"{attrs['label']} / {attrs['units']}", fontsize=11, fontweight='bold'
+    )
+    cb.ax.tick_params(which='minor', length=0)
+    cb.ax.set_yticklabels(
+        [str(int(np.round(t))) for t in cbar_ticks], fontsize=10
     )
 
+    # x-axis
     if x_dim == 'lat':
         ax.set_xlim(-90, 90)
         ax.set_xticks([-60, -30, 0, 30, 60])
-        ax.set_xticklabels(['60°S', '30°S', '0°', '30°N', '60°N'])
+        ax.set_xticklabels(['60S', '30S', '0', '30N', '60N'])
+        ax.set_xlabel('Latitude', fontsize=11)
+    elif x_dim == 'time':
+        ax.set_xlabel("")
+        ax.xaxis.set_major_formatter(
+            mdates.ConciseDateFormatter(ax.xaxis.get_major_locator())
+        )
+        plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
 
-    y_is_pressure = False
-    if y_dim in data.coords:
-        units = str(data[y_dim].attrs.get('units', '')).strip().lower()
-        if any(u in units for u in ('pa', 'hpa', 'mb', 'millibar', 'bar')):
-            y_is_pressure = True
-
-    if y_dim == 'plev' or y_is_pressure:
-        ax.invert_yaxis()
+    # y-axis
+    is_pres = _is_pressure_coord(y_dim, data.coords)
+    if is_pres:
         ax.set_yscale('log')
+        ax.invert_yaxis()
+        ax.set_ylabel('Pressure / hPa', fontsize=11)
+    else:
+        if y_limits is not None:
+            ax.set_ylim(*y_limits)
+            ylim = list(y_limits)
+        else:
+            ylim = [float(data[y_dim].min()), float(data[y_dim].max())]
+        y_span = ylim[1] - ylim[0]
+        y_step = 20 if y_span > 60 else 10 if y_span > 30 else 5
+        yticks = np.arange(ylim[0], ylim[1] + y_step, y_step)
+        ax.set_yticks(yticks[(yticks >= ylim[0]) & (yticks <= ylim[1])])
+        ax.set_ylabel('Altitude / km', fontsize=11)
 
-    # Title & grid customization
     long_name = data.attrs.get('long_name', var_name)
     ax.set_title(f"{long_name} Cross-Section", fontweight='bold')
-    ax.grid(True, linestyle='--', alpha=0.5)
 
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{prefix}_{var_name}.png")
+    out_path = os.path.join(out_dir, f"{prefix}_section_{var_name}.png")
     plt.savefig(out_path, dpi=300, bbox_inches='tight')
     logger.info(f"Saved cross-section plot to {out_path}")
     plt.close(fig)
+    return out_path

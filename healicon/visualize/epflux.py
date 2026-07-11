@@ -14,8 +14,9 @@ logger = logging.getLogger(__name__)
 _A_EARTH = 6.371e6  # Earth radius [m]
 _H_SCALE = 7.0  # log-pressure scale height [km]
 _P0_HPA = 1013.25  # reference surface pressure [hPa]
-_G = 9.81 # gravity acceleration [m/s^2]
-_KAPPA = 2/7 # ratio of specific heats
+_G = 9.81  # gravity acceleration [m/s^2]
+_KAPPA = 2 / 7  # ratio of specific heats
+
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -93,18 +94,18 @@ def _ep_scale_jucker(F_phi, F_z, lat, alt, alt_name, rho0, is_pres):
     fp = F_phi.transpose('lat', alt_name).values
     fz = F_z.transpose('lat', alt_name).values
 
-    cos_phi = np.cos(np.deg2rad(lat))                  # (lat,)
-    cos2    = cos_phi ** 2
-    geom    = np.outer(cos_phi, np.ones(len(alt))) * _A_EARTH   # a cosφ  (lat, alt)
-    geom    = np.where(np.abs(geom) < 1e-30, 1e-30, geom)
+    cos_phi = np.cos(np.deg2rad(lat))  # (lat,)
+    cos2 = cos_phi ** 2
+    geom = np.outer(cos_phi, np.ones(len(alt))) * _A_EARTH  # a cosφ  (lat, alt)
+    geom = np.where(np.abs(geom) < 1e-30, 1e-30, geom)
     cos2_2d = np.outer(cos2, np.ones(len(alt)))
 
     if is_pres:
         # ep1_cart [m²/s²], ep2_hPa [hPa·m/s²]
-        ep1 = fp / geom                    # [m²/s²]
-        ep2_hpa = fz / geom / 100.0        # [hPa·m/s²]  (F_z in Pa·m²/s², /100 → hPa)
-        Fphi  = (2*np.pi / _G) * cos2_2d * _A_EARTH**2 * ep1      # [m³]
-        Fvert = (2*np.pi / _G) * cos2_2d * _A_EARTH**3 * ep2_hpa  # [m³·hPa]
+        ep1 = fp / geom  # [m²/s²]
+        ep2_hpa = fz / geom / 100.0  # [hPa·m/s²]  (F_z in Pa·m²/s², /100 → hPa)
+        Fphi = (2 * np.pi / _G) * cos2_2d * _A_EARTH ** 2 * ep1  # [m³]
+        Fvert = (2 * np.pi / _G) * cos2_2d * _A_EARTH ** 3 * ep2_hpa  # [m³·hPa]
     else:
         # Both components [m²/s²]; ep2 gets an extra a so units match after dy [in/m]
         if rho0 is not None:
@@ -114,10 +115,10 @@ def _ep_scale_jucker(F_phi, F_z, lat, alt, alt_name, rho0, is_pres):
             r_val = np.where(r_val < 1e-30, 1e-30, r_val)
         else:
             r_val = np.ones_like(geom)
-        ep1 = fp / (geom * r_val)          # [m²/s²]
-        ep2 = fz / (geom * r_val)          # [m²/s²]
-        Fphi  = cos2_2d * _A_EARTH**2 * ep1   # [m⁴/s²]
-        Fvert = cos2_2d * _A_EARTH**3 * ep2   # [m⁵/s²]  (→ m⁴·in/s² after xin/m)
+        ep1 = fp / (geom * r_val)  # [m²/s²]
+        ep2 = fz / (geom * r_val)  # [m²/s²]
+        Fphi = cos2_2d * _A_EARTH ** 2 * ep1  # [m⁴/s²]
+        Fvert = cos2_2d * _A_EARTH ** 3 * ep2  # [m⁵/s²]  (→ m⁴·in/s² after xin/m)
 
     return Fphi, Fvert
 
@@ -129,7 +130,8 @@ def _add_ep_quiver(ax, F_phi, F_z, lat, alt, alt_name, *, is_pres, rho0=None,
     Arrow direction is the group-velocity direction in physical (lat, z) space.
     For pressure coords the result is identical to aostools.PlotEPfluxArrows.
 
-    Returns the matplotlib Quiver, or None if no finite values remain.
+    Returns ``(Quiver, ref_amplitude, label_str)`` or ``None`` if no finite
+    values remain.  The caller is responsible for placing the quiver key.
     """
     Fphi, Fvert = _ep_scale_jucker(F_phi, F_z, lat, alt, alt_name, rho0, is_pres)
 
@@ -138,45 +140,45 @@ def _add_ep_quiver(ax, F_phi, F_z, lat, alt, alt_name, *, is_pres, rho0=None,
     sa = max(1, len(alt) // n_alt)
     lat_s = lat[::sl]
     alt_s = alt[::sa]
-    LAT2, ALT2 = np.meshgrid(lat_s, alt_s)          # (n_alt_s, n_lat_s)
-    Fphi_s  = Fphi[::sl, ::sa].T                     # (lat,alt) → (alt,lat)
+    LAT2, ALT2 = np.meshgrid(lat_s, alt_s)  # (n_alt_s, n_lat_s)
+    Fphi_s = Fphi[::sl, ::sa].T  # (lat,alt) → (alt,lat)
     Fvert_s = Fvert[::sl, ::sa].T
 
     # Suppress polar region: cosφ → 0 amplifies residual noise by 1/cosφ.
     # Exclude |lat| > 85° completely; they must not influence the arrow scale.
     pole_mask = np.abs(LAT2) > 85.0
-    Fphi_s  = np.where(pole_mask, np.nan, Fphi_s)
+    Fphi_s = np.where(pole_mask, np.nan, Fphi_s)
     Fvert_s = np.where(pole_mask, np.nan, Fvert_s)
 
     # --- Jucker (2021): convert to display-space (inches) ------------------
     # Axis physical dimensions in inches, independent of canvas draw state.
-    fig   = ax.get_figure()
+    fig = ax.get_figure()
     fig_w, fig_h = fig.get_size_inches()
-    pos   = ax.get_position()
-    ax_w  = pos.width  * fig_w   # inches
-    ax_h  = pos.height * fig_h   # inches
+    pos = ax.get_position()
+    ax_w = pos.width * fig_w  # inches
+    ax_h = pos.height * fig_h  # inches
 
-    delta_x   = (lat[-1] - lat[0]) or 1.0
-    delta_x_r = delta_x * np.pi / 180.0             # radians
+    delta_x = (lat[-1] - lat[0]) or 1.0
+    delta_x_r = delta_x * np.pi / 180.0  # radians
 
     # dx [in/rad ≡ in]: "distance occupied by 1 radian of latitude on diagram"
     dx = ax_w / delta_x_r
 
     if is_pres:
         # log-pressure y-axis; pressure is inverted (larger p at bottom)
-        p_min   = float(np.nanmin(alt_s[alt_s > 0])) if np.any(alt_s > 0) else 1e-3
-        p_max   = float(np.nanmax(alt_s))
+        p_min = float(np.nanmin(alt_s[alt_s > 0])) if np.any(alt_s > 0) else 1e-3
+        p_max = float(np.nanmax(alt_s))
         log_span = abs(np.log(p_max / max(p_min, 1e-10))) or 1.0
         # dy [in/hPa]: element-wise so it is correct for each pressure level
-        dy = -ax_h / np.maximum(ALT2, 1e-10) / log_span   # negative: p increases downward
-        u_arr = Fphi_s  * dx                 # [m³·in]
-        v_arr = Fvert_s * dy                 # [m³·hPa·in/hPa] = [m³·in]
+        dy = -ax_h / np.maximum(ALT2, 1e-10) / log_span  # negative: p increases downward
+        u_arr = Fphi_s * dx  # [m³·in]
+        v_arr = Fvert_s * dy  # [m³·hPa·in/hPa] = [m³·in]
     else:
         # linear height y-axis; alt is in km (after _prep), convert to m for units
         delta_y_m = (alt[-1] - alt[0]) * 1000.0 or 1.0
-        dy = ax_h / delta_y_m                # [in/m]
-        u_arr = Fphi_s  * dx                 # [m⁴/s²·in]
-        v_arr = Fvert_s * dy                 # [m⁵/s²·in/m] = [m⁴/s²·in]
+        dy = ax_h / delta_y_m  # [in/m]
+        u_arr = Fphi_s * dx  # [m⁴/s²·in]
+        v_arr = Fvert_s * dy  # [m⁵/s²·in/m] = [m⁴/s²·in]
 
     # --- quiver with aostools conventions: angles='uv', scale_units='inches'
     finite = np.isfinite(u_arr) & np.isfinite(v_arr)
@@ -198,7 +200,7 @@ def _add_ep_quiver(ax, F_phi, F_z, lat, alt, alt_name, *, is_pres, rho0=None,
         width=0.0028, headwidth=4.5, headlength=5.0, headaxislength=4.2,
     )
 
-    # canvas.draw() is required to populate Q.scale in non-interactive mode
+    # canvas.draw() populates q.scale (unavailable before first render)
     try:
         fig.canvas.draw()
         U = q.scale
@@ -206,13 +208,11 @@ def _add_ep_quiver(ax, F_phi, F_z, lat, alt, alt_name, *, is_pres, rho0=None,
             label = (r'{:.1e}$\,\mathrm{{m}}^3$'.format(U / ax_w)
                      if is_pres
                      else r'{:.1e}$\,\mathrm{{m}}^4\mathrm{{s}}^{{-2}}$'.format(U / ax_w))
-            ax.quiverkey(q, 0.88, 1.035, U / ax_w, label,
-                         labelpos='E', coordinates='axes',
-                         fontproperties={'size': 8})
+            return q, U / ax_w, label
     except Exception:
         pass
 
-    return q
+    return q, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +249,7 @@ def _add_dual_yaxis(ax, alt, pres_hpa, is_pres):
                 p_to_a = interp1d(pres_hpa[::-1], alt[::-1],
                                   bounds_error=False, fill_value='extrapolate')
                 p_ticks_all = np.array(
-                    [1000, 500, 200, 100, 50, 20, 10, 5, 2, 1, 0.1, 0.01])
+                    [1000, 500, 200, 100, 50, 20, 10, 5, 2, 1, 0.1, 0.01, 0.001, 0.0001, 0.00001])
                 p_min, p_max = pres_hpa.min(), pres_hpa.max()
                 p_ticks = p_ticks_all[(p_ticks_all >= p_min * 0.5)
                                       & (p_ticks_all <= p_max * 2)]
@@ -271,8 +271,8 @@ def _add_dual_yaxis(ax, alt, pres_hpa, is_pres):
 # Main entry point
 # ---------------------------------------------------------------------------
 def plot_ep_flux(ds, out_dir=".", prefix="ep_flux",
-                 vmax=120.0, rho_min=None, quiver_scale=0.8):
-    """Plot an Eliassen-Palm flux cross-section (lat x altitude/pressure).
+                 vmax=120.0, rho_min=None, quiver_scale=0.4):
+    """Plot an Eliassen-Palm flux cross-section (lat vs. altitude/pressure).
 
     Parameters
     ----------
@@ -328,9 +328,9 @@ def plot_ep_flux(ds, out_dir=".", prefix="ep_flux",
     if not is_pres and rho_min is not None and rho0 is not None:
         try:
             dense_enough = rho0 > rho_min
-            a_EP  = a_EP.where(dense_enough)
+            a_EP = a_EP.where(dense_enough)
             F_phi = F_phi.where(dense_enough)
-            F_z   = F_z.where(dense_enough)
+            F_z = F_z.where(dense_enough)
         except Exception as e:
             logger.warning(f"rho0 mask could not be applied: {e}")
 
@@ -341,9 +341,9 @@ def plot_ep_flux(ds, out_dir=".", prefix="ep_flux",
         if valid_max_m is not None:
             alt_max_km = float(valid_max_m) / 1000.0
             if rho_min is None:
-                a_EP  = a_EP.where(a_EP[alt_name]   <= alt_max_km)
+                a_EP = a_EP.where(a_EP[alt_name] <= alt_max_km)
                 F_phi = F_phi.where(F_phi[alt_name] <= alt_max_km)
-                F_z   = F_z.where(F_z[alt_name]     <= alt_max_km)
+                F_z = F_z.where(F_z[alt_name] <= alt_max_km)
 
     lat = a_EP['lat'].values
     alt = a_EP[alt_name].values
@@ -359,7 +359,7 @@ def plot_ep_flux(ds, out_dir=".", prefix="ep_flux",
     else:
         pres_hpa = _P0_HPA * np.exp(-alt / _H_SCALE)  # standard atmosphere
 
-    fig, ax = plt.subplots(figsize=(11, 7))
+    fig, ax = plt.subplots(figsize=(9, 7))
 
     # filled contours: a_EP acceleration
     if vmax is None:
@@ -373,7 +373,7 @@ def plot_ep_flux(ds, out_dir=".", prefix="ep_flux",
         levels=fill_levels, cmap='RdBu_r', extend='both',
         add_colorbar=False, add_labels=False,
     )
-    cbar = fig.colorbar(cf, ax=ax, pad=0.075, fraction=0.024, shrink=0.90)
+    cbar = fig.colorbar(cf, ax=ax, pad=0.08, shrink=0.48, orientation='horizontal')
     cbar.set_label(r"EP-flux acceleration  $a_{EP}$  (m s$^{-1}$ day$^{-1}$)",
                    fontsize=10)
     cbar.ax.tick_params(labelsize=8)
@@ -383,8 +383,8 @@ def plot_ep_flux(ds, out_dir=".", prefix="ep_flux",
         _add_wind_contours(ax, u_zm, alt_name)
 
     # EP flux quiver
-    _add_ep_quiver(ax, F_phi, F_z, lat, alt, alt_name,
-                   is_pres=is_pres, rho0=rho0, quiver_scale=quiver_scale)
+    qkey = _add_ep_quiver(ax, F_phi, F_z, lat, alt, alt_name,
+                          is_pres=is_pres, rho0=rho0, quiver_scale=quiver_scale)
 
     # --- hatched overlay above EP validity ceiling (height coords only) ----
     if alt_max_km is not None and alt_max_km < alt[-1]:
@@ -413,6 +413,23 @@ def plot_ep_flux(ds, out_dir=".", prefix="ep_flux",
     ax.grid(True, linestyle='-', alpha=0.35, color='grey')
 
     fig.tight_layout()
+
+    # Place quiver key to the right of the colorbar in figure coordinates.
+    # tight_layout has already settled the axes, so cbar.ax.get_position() is accurate.
+    if qkey is not None:
+        q, q_amp, q_label = qkey
+        if q_amp is not None:
+            try:
+                fig.canvas.draw()
+                cb_pos = cbar.ax.get_position()
+                q_x = cb_pos.x1 + 0.1
+                q_y = (cb_pos.y0 + cb_pos.y1) / 2
+                ax.quiverkey(q, q_x, q_y, q_amp, q_label,
+                             labelpos='E', coordinates='figure',
+                             fontproperties={'size': 8})
+            except Exception:
+                pass
+
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"{prefix}_ep_flux.png")
     plt.savefig(out_path, dpi=300, bbox_inches='tight')

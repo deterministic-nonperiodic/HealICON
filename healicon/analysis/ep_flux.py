@@ -15,7 +15,7 @@ self-consistent in its vertical derivative and ρ₀ treatment.
       div = (a cosphi)^-1 d(F_phi cosphi)/dphi + dF_z/dz
       a_EP = div / (rho0 a cosphi)
 
-      When θ_φ → 0 (horizontal θ-surfaces), Ψ → a cosφ ρ₀ [v'θ']/θ_z and the
+      When θ_φ → 0 (horizontal θ-surfaces/isentropic), Ψ → a cosφ ρ₀ [v'θ']/θ_z and the
       formulas reduce exactly to Andrews, Holton & Leovy (1987), eq. 3.5.3:
           F^(phi) = rho0 a cosphi ( u_bar_z [v'th']/th_z - [u'v'] )
           F^(z)   = rho0 a cosphi ( f_hat   [v'th']/th_z - [u'w'] )
@@ -38,11 +38,6 @@ This is the one place density re-enters the pressure branch; it is an excellent
 approximation for the zonal mean even where the instantaneous flow is
 non-hydrostatic, because the mean state stays close to hydrostatic balance.
 
-Validity: above ~100-120 km molecular diffusion and ion drag dominate the
-momentum budget and the EP-flux framework itself (not the coordinate choice)
-loses meaning. compute_ep_divergence records a documented validity floor in the
-output attrs; it does NOT mask by default (that is the plotting layer's job).
-
 References:
     Andrews, D. G., Holton, J. R., & Leovy, C. B. (1987).
     Middle Atmosphere Dynamics. Academic Press.
@@ -60,7 +55,7 @@ from typing import Literal
 import numpy as np
 import xarray as xr
 
-from ..cf_coords import _cf_guess, _find_coordinate, _is_z, convert_units
+from ..cf_coords import _cf_guess, _find_coordinate, _is_pressure_coord, _is_z, convert_units
 from ..extract import zonal_mean as _zonal_mean
 from ..grid import append_history, get_cells_dim
 
@@ -95,6 +90,7 @@ _VAR_NAME_ALIASES = {
     'pressure': ('pres', 'pres_zm', 'pressure', 'pfull', 'p'),
     'w': ('w', 'wa', 'wap'),  # omega (Pa/s) excluded — different physical quantity
     'density': ('rho', 'rho0', 'density'),
+    'vorticity': ('vor', 'vorticity', 'zeta', 'rel_vort'),
 }
 
 
@@ -143,6 +139,7 @@ def _parse_dataset(ds: xr.Dataset) -> xr.Dataset:
         'temp': _find_var(ds, 'temperature'),
         'theta': _find_var(ds, 'theta'),
         'pres': _find_var(ds, 'pressure'),
+        'vor': _find_var(ds, 'vorticity'),
     }
 
     missing = [k for k in ('u', 'v') if var_map[k] is None]
@@ -799,7 +796,8 @@ def compute_eddy_fluxes(
     xr.Dataset
         Zonal-mean fields: u_zm, v_zm, theta_zm, upvp_zm [m² s⁻²],
         vptp_zm [K m s⁻¹], and, if w is present, upwp_zm [m² s⁻²],
-        wptp_zm [K m s⁻¹].  Also passes through temp_zm and pres_zm.
+        wptp_zm [K m s⁻¹].  Also passes through temp_zm, pres_zm, and
+        vor_zm [s⁻¹] when the input contains a relative vorticity field.
     """
     # _parse_dataset guarantees canonical names (u, v, theta, temp, pres, w).
     # Vertical-coordinate preprocessing is owned by the driver (eliassen_palm).
@@ -829,6 +827,7 @@ def compute_eddy_fluxes(
     has_temp = 'temp' in ds
     has_w = 'w' in ds
     has_pres = 'pres' in ds
+    has_vor = 'vor' in ds
 
     # θ is guaranteed present by _parse_dataset
     theta = ds['theta']
@@ -903,27 +902,18 @@ def compute_eddy_fluxes(
                          'units': 'K m s-1'}
         out['wptp_zm'] = wptp_zm
 
+    if has_vor:
+        vor_zm = ds_zm['vor']
+        vor_zm.attrs = {'long_name': "Zonal-mean relative vorticity", 'units': 's-1'}
+        out['vor_zm'] = vor_zm
+
     out.attrs = ds.attrs
     return out
 
 
 # ── Stage 2-3: EP flux components ────────────────────────────────────────────
 
-def _is_pressure_coord(alt_name, ds):
-    """True if the vertical coordinate `alt_name` is a pressure coordinate."""
-    if alt_name in ('plev', 'pres', 'pres_zm', 'pressure'):
-        return True
-    coord = ds[alt_name] if alt_name in ds.coords else None
-    if coord is not None:
-        units = str(coord.attrs.get('units', '')).lower()
-        if units in ('pa', 'hpa', 'mb', 'mbar', 'millibar', 'hectopascal'):
-            return True
-        if str(coord.attrs.get('standard_name', '')).lower() == 'air_pressure':
-            return True
-    return False
-
-
-def _diff_safe(da, dim):
+def _gradient_1d(da, dim):
     """2nd-order centred finite difference along *dim*, NaN-masked at boundaries.
 
     Chunks along *dim* are consolidated before differentiating so the stencil
@@ -950,7 +940,7 @@ def _stability(theta_bar, alt_name):
     (mesopause minimum, isothermal stratopause) while preserving the sign so
     the EP flux components do not flip spuriously.
     """
-    tz = _diff_safe(theta_bar, alt_name)
+    tz = _gradient_1d(theta_bar, alt_name)
     eps = 1e-10
     tz_floored = xr.where(np.abs(tz) > eps, tz, eps * xr.where(tz >= 0, 1.0, -1.0))
     return tz_floored.where(tz.notnull())
@@ -958,8 +948,8 @@ def _stability(theta_bar, alt_name):
 
 def _theta_stream_function(
         rho0: xr.DataArray,
-        vptp: xr.DataArray,
-        wptp: xr.DataArray,
+        v_ptp: xr.DataArray,
+        w_ptp: xr.DataArray,
         theta_bar: xr.DataArray,
         alt_name: str,
         cos_phi: xr.DataArray,
@@ -980,7 +970,7 @@ def _theta_stream_function(
     theta_z = _stability(theta_bar, alt_name)  # dθ̄/dz [K/m]
     # _diff_safe differentiates w.r.t. lat in degrees; x(180/π) converts to
     # radians, then /a gives the meridional K/m gradient component.
-    theta_phi_over_a = _diff_safe(theta_bar, 'lat') * (180.0 / np.pi) / _A  # [K/m]
+    theta_phi_over_a = _gradient_1d(theta_bar, 'lat') * (180.0 / np.pi) / _A  # [K/m]
 
     grad_sq = theta_phi_over_a ** 2 + theta_z ** 2
     grad_sq = xr.where(grad_sq < eps, eps, grad_sq)
@@ -998,7 +988,7 @@ def _theta_stream_function(
     except Exception:
         pass
 
-    numer = rho0 * vptp * theta_z - rho0 * wptp * theta_phi_over_a  # [kg K²/(m³ s)]
+    numer = rho0 * v_ptp * theta_z - rho0 * w_ptp * theta_phi_over_a  # [kg K²/(m³ s)]
     Psi_unscaled = numer / grad_sq  # [kg/(m·s)]
     return _A * cos_phi * Psi_unscaled  # [kg/s]
 
@@ -1051,12 +1041,18 @@ def compute_ep_flux(eddy_ds, mode="auto"):
 
     if use_full:
         u_bar = eddy_ds['u_zm']
-        u_shear = _diff_safe(u_bar, alt_name)  # du_bar/dz or /dp
+        u_shear = _gradient_1d(u_bar, alt_name)  # du_bar/dz or /dp
 
         # absolute vorticity factor f_hat = f + zeta_bar (coordinate-independent)
-        ubar_cos = u_bar * cos_phi
-        dubar_cos_dphi = _diff_safe(ubar_cos, 'lat') * (180.0 / np.pi)
-        f_hat = f - dubar_cos_dphi / (_A * cos_phi)
+        if 'vor_zm' in eddy_ds:
+            # Model vorticity is more accurate than finite-diff of u_zm: no double
+            # averaging, no lat-resolution truncation, no 1/cosphi blow-up at poles.
+            f_hat = f + eddy_ds['vor_zm']
+            logger.info("f_hat: using model vor_zm (bypasses finite-diff of u_zm).")
+        else:
+            ubar_cos = u_bar * cos_phi
+            dubar_cos_dphi = _gradient_1d(ubar_cos, 'lat') * (180.0 / np.pi)
+            f_hat = f - dubar_cos_dphi / (_A * cos_phi)
 
         if is_pres:
             # isobaric: no rho0 prefactor; vertical eddy flux is [u'omega]
@@ -1100,10 +1096,10 @@ def compute_ep_flux(eddy_ds, mode="auto"):
             {'long_name': 'TEM mass stream function', 'units': 'kg s-1'})
 
         if 'v_zm' in eddy_ds and 'w_zm' in eddy_ds:
-            dPsi_dz = _diff_safe(Psi, alt_name)
+            dPsi_dz = _gradient_1d(Psi, alt_name)
             # cosφ floor avoids 1/cosφ blow-up at the poles
             cos_phi_safe = xr.where(np.abs(cos_phi) > 1e-6, cos_phi, 1e-6)
-            dPsiC_dphi = _diff_safe(Psi * cos_phi, 'lat') * (180.0 / np.pi)
+            dPsiC_dphi = _gradient_1d(Psi * cos_phi, 'lat') * (180.0 / np.pi)
             v_star = eddy_ds['v_zm'] - dPsi_dz / (rho0 * _A * cos_phi_safe)
             w_star = eddy_ds['w_zm'] + dPsiC_dphi / (rho0 * _A ** 2 * cos_phi_safe)
             out['v_star'] = v_star.assign_attrs(
@@ -1111,7 +1107,7 @@ def compute_ep_flux(eddy_ds, mode="auto"):
             out['w_star'] = w_star.assign_attrs(
                 {'long_name': 'TEM residual vertical velocity', 'units': 'm s-1'})
 
-    for passthrough in ('u_zm', 'v_zm', 'w_zm', 'pres_zm', 'temp_zm', 'wptp_zm'):
+    for passthrough in ('u_zm', 'v_zm', 'w_zm', 'pres_zm', 'temp_zm', 'wptp_zm', 'vor_zm'):
         if passthrough in eddy_ds:
             out[passthrough] = eddy_ds[passthrough]
     out.attrs['ep_flux_mode'] = mode_used
@@ -1147,8 +1143,8 @@ def compute_ep_divergence(ep_ds, valid_pressure_min_pa=1e-1,
     cos_phi = np.cos(lat_rad)
     F_phi, F_z, rho0 = ep_ds['F_phi'], ep_ds['F_z'], ep_ds['rho0']
 
-    dFphi_cos_dphi = _diff_safe(F_phi * cos_phi, 'lat') * (180.0 / np.pi)
-    dFz_dvert = _diff_safe(F_z, alt_name)  # d/dp or d/dz
+    dFphi_cos_dphi = _gradient_1d(F_phi * cos_phi, 'lat') * (180.0 / np.pi)
+    dFz_dvert = _gradient_1d(F_z, alt_name)  # d/dp or d/dz
     div_F = (1.0 / (_A * cos_phi)) * dFphi_cos_dphi + dFz_dvert
 
     # acceleration: divide by (rho0 a cosphi) in height, (a cosphi) in pressure
@@ -1277,6 +1273,9 @@ def eliassen_palm(
     xr.Dataset
         Contains: F_phi, F_z, rho0, div_F, a_EP, u_zm.
         Height-coord full-TEM also adds: Psi, v_star, w_star.
+        If relative vorticity (vor/vorticity/zeta) is present in *ds*,
+        vor_zm [s⁻¹] is passed through and used for f_hat = f + vor_zm
+        instead of deriving ζ̄ from finite differences of u_zm.
     """
     ds = _parse_dataset(ds)
     ds = _align_w_to_full_levels(ds)

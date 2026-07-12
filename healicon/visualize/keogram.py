@@ -54,7 +54,7 @@ def _prep_keogram_data(
                 logger.info(f"Extracting point lat={lat}, lon={lon} for keogram.")
                 ds = extract_point(ds, lat=lat, lon=lon)
             else:
-                logger.info("HEALPix data detected: computing zonal mean for keogram.")
+                logger.info("Unstructured grid detected: computing zonal mean for keogram.")
                 from ..extract import zonal_mean
                 ds = zonal_mean(ds)
     except Exception:

@@ -37,7 +37,7 @@ VARIABLE_ATTRS: dict[str, dict] = {
     },
     'v': {
         'label': 'Meridional velocity', 'units': r'm s$^{-1}$',
-        'factor': 1.0, 'v_range': [-90., 91., 20.], 'colormap': wind_cm,
+        'factor': 1.0, 'v_range': [-60., 61., 20.], 'colormap': wind_cm,
     },
     'w': {
         'label': 'Vertical velocity', 'units': r'cm s$^{-1}$',

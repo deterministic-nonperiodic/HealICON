@@ -77,7 +77,7 @@ def plot_section(
                 data = ds_use[var_name].squeeze()
             else:
                 logger.info(
-                    f"HEALPix dataset detected (dim='{cell_dim}'). "
+                    f"Unstructured grid detected (dim='{cell_dim}'). "
                     "Computing zonal mean before section plot."
                 )
                 from ..extract import zonal_mean

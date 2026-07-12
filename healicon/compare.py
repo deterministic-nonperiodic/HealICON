@@ -371,6 +371,8 @@ def compare(
     lat_range: tuple[float, float] = (-90., 90.),
     level_range: tuple[float, float] | None = None,
     vector: bool = False,
+    lmax: int | None = None,
+    wavelength_km: float | None = None,
 ) -> 'pd.DataFrame':
     """Compare two datasets and return a DataFrame of statistics.
 
@@ -397,6 +399,12 @@ def compare(
     vector : bool
         If True and both ``u`` and ``v`` are present, append a ``wind`` row
         with vector correlation statistics (Crosby et al., 1993).
+    lmax : int, optional
+        Hard spectral low-pass cutoff: retain only degrees l ≤ lmax.
+        Both datasets must be on HEALPix grids.
+    wavelength_km : float, optional
+        Hard spectral low-pass cutoff expressed as a physical scale (km).
+        Converted to ``lmax`` internally.  Both datasets must be on HEALPix.
 
     Returns
     -------
@@ -415,6 +423,20 @@ def compare(
 
     actual_lat_range = None
     actual_level_range = None
+
+    # ── Optional low-pass spectral filter (before spatial reduction) ──────
+    if lmax is not None or wavelength_km is not None:
+        from .grid import is_healpix as _is_healpix
+        if not (_is_healpix(ds_ref) and _is_healpix(ds_cmp)):
+            raise ValueError(
+                "Low-pass filtering (--lmax / --wavelength) requires both "
+                "datasets to be on HEALPix grids."
+            )
+        from .analysis import filter_spatial as _filter_spatial
+        filt_kw = dict(lmax=lmax) if lmax is not None else dict(wavelength_km=wavelength_km)
+        logger.info(f"Applying spectral low-pass filter: {filt_kw}")
+        ds_ref = _filter_spatial(ds_ref[variables], **filt_kw)
+        ds_cmp = _filter_spatial(ds_cmp[variables], **filt_kw)
 
     ds_ref = _apply_spatial_reduce(ds_ref[variables], reduce, lat_range)
     ds_cmp = _apply_spatial_reduce(ds_cmp[variables], reduce, lat_range)
@@ -730,6 +752,14 @@ def _export_df(df, precision: int):
     return pd.DataFrame(rows)
 
 
+def _make_stat_headers(lev_hdr: str, units: str) -> list[str]:
+    """Build the stat column headers with an optional unit suffix."""
+    u = f' ({units})' if units else ''
+    return [lev_hdr, 'N',
+            f'Bias{u}', f'RMSE{u}', f'cRMSE{u}', f'MAE{u}',
+            'r', f'σ_ref{u}', f'σ_cmp{u}', 'Skill']
+
+
 def _print_table(df, precision: int, no_color: bool) -> None:
     isatty  = sys.stdout.isatty()
     do_color = not no_color and isatty
@@ -740,13 +770,16 @@ def _print_table(df, precision: int, no_color: bool) -> None:
     is_meter  = bool(df['is_meter'].any())
     lev_hdr   = 'Pres (hPa)' if is_pres else ('Alt (km)' if is_meter else 'Level')
 
-    # Derive unit suffix for stat headers from first non-empty units value
-    units = next((u for u in df['Units'] if u), '')
-    u = f' ({units})' if units else ''
+    # Per-variable unit lookup (preserves insertion order)
+    var_units: dict[str, str] = {}
+    for _, row in df.iterrows():
+        v = row['Variable']
+        if v not in var_units:
+            var_units[v] = row['Units'] or ''
 
-    stat_headers = [lev_hdr, 'N',
-                    f'Bias{u}', f'RMSE{u}', f'cRMSE{u}', f'MAE{u}',
-                    'r', f'σ_ref{u}', f'σ_cmp{u}', 'Skill']
+    # Initial header uses the first variable's units
+    first_units = next(iter(var_units.values()), '')
+    stat_headers = _make_stat_headers(lev_hdr, first_units)
     headers = (['Variable'] + stat_headers) if multi_var else stat_headers
 
     # Build string rows
@@ -780,6 +813,15 @@ def _print_table(df, precision: int, no_color: bool) -> None:
 
     left_cols = 2 if multi_var else 1
     widths = _col_widths(headers, str_rows)
+
+    # If units differ between variables we will re-emit headers; compute
+    # widths against ALL possible header variants so columns stay stable.
+    if multi_var and len(set(var_units.values())) > 1:
+        for vu in var_units.values():
+            alt_headers = (['Variable'] + _make_stat_headers(lev_hdr, vu))
+            for i, h in enumerate(alt_headers):
+                widths[i] = max(widths[i], len(h))
+
     sep    = '  '.join('─' * w for w in widths)
     thin   = '  '.join('╌' * w for w in widths)
 
@@ -787,6 +829,7 @@ def _print_table(df, precision: int, no_color: bool) -> None:
     print(sep)
 
     prev_var = None
+    prev_units = first_units
     var_has_level_rows: dict[str, bool] = {}
     for _, row in df.iterrows():
         v = row['Variable']
@@ -798,9 +841,22 @@ def _print_table(df, precision: int, no_color: bool) -> None:
 
     for cells, (_, row) in zip(str_rows, df.iterrows()):
         cur_var = row['Variable']
+        cur_units = var_units.get(cur_var, '')
+
         if multi_var and prev_var is not None and cur_var != prev_var:
-            print()
-        prev_var = cur_var
+            if cur_units != prev_units:
+                # Units changed — re-emit header with new unit suffix
+                new_stat = _make_stat_headers(lev_hdr, cur_units)
+                new_hdr  = (['Variable'] + new_stat)
+                print(sep)
+                print()
+                print(_fmt_row(new_hdr, widths, left_cols=left_cols))
+                print(sep)
+            else:
+                print()
+
+        prev_var   = cur_var
+        prev_units = cur_units
 
         _lv = row['Level']
         if (_lv is None or (isinstance(_lv, float) and np.isnan(_lv))) and var_has_level_rows.get(cur_var, False):

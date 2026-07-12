@@ -853,9 +853,16 @@ def epflux_cmd(ifile, ofile, mode, time_mean):
 @click.option('--vector', is_flag=True, default=False,
               help='Append a "wind" row with vector correlation statistics '
                    '(Crosby et al. 1993) when both u and v are present.')
+@click.option('--lmax', type=int, default=None,
+              help='Low-pass spectral cutoff: retain only degrees l ≤ lmax. '
+                   'Both files must be HEALPix.')
+@click.option('--wavelength', 'wavelength_km', type=float, default=None,
+              help='Low-pass spectral cutoff as a physical scale (km). '
+                   'Both files must be HEALPix.')
 @profile_command
 def compare(ref, cmp, variables, by_level, select_levels, reduce, lat_range,
-            level_range, fmt, precision, no_color, output_file, vector):
+            level_range, fmt, precision, no_color, output_file, vector,
+            lmax, wavelength_km):
     """Compare two datasets and print a statistics table.
 
     REF is the reference file; CMP is the dataset to evaluate against it.
@@ -869,6 +876,8 @@ def compare(ref, cmp, variables, by_level, select_levels, reduce, lat_range,
       healicon compare ref.nc cmp.nc --var u,v --vector --by-level
       healicon compare ref.nc cmp.nc --by-level --format csv --output stats.csv
       healicon compare ref.nc cmp.nc --levels 50000,80000,100000
+      healicon compare ref.nc cmp.nc --lmax 42
+      healicon compare ref.nc cmp.nc --wavelength 500
     """
     import xarray as xr
     from .compare import compare as _compare, print_table
@@ -894,6 +903,8 @@ def compare(ref, cmp, variables, by_level, select_levels, reduce, lat_range,
         lat_range=lat_range,
         level_range=level_range,
         vector=vector,
+        lmax=lmax,
+        wavelength_km=wavelength_km,
     )
 
     import os
@@ -902,6 +913,11 @@ def compare(ref, cmp, variables, by_level, select_levels, reduce, lat_range,
         'cmp': os.path.basename(cmp),
         'reduce': reduce,
     }
+
+    if lmax is not None:
+        meta['filter'] = f'lmax={lmax}'
+    elif wavelength_km is not None:
+        meta['filter'] = f'λ≥{wavelength_km:.0f} km'
 
     actual_lat = df.attrs.get('actual_lat_range')
     if actual_lat:

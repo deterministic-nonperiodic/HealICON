@@ -3,6 +3,7 @@ import glob
 import logging
 import os
 import resource
+import sys
 import time
 
 import click
@@ -57,7 +58,8 @@ def profile_command(func):
         lev_str = f"1 level" if n_levels == 1 else f"{n_levels} levels"
 
         click.echo(
-            f"Processed {var_str} over {time_str} {lev_str} [{elapsed:.2f}s {mem_used_mb:.0f}MB]")
+            f"Processed {var_str} over {time_str} {lev_str} [{elapsed:.2f}s {mem_used_mb:.0f}MB]",
+            err=True)
 
         return result
 
@@ -101,7 +103,7 @@ def cli():
     """HealICON: Interpolate atmospheric model outputs to HEALPix grid."""
     try:
         from dask.diagnostics import ProgressBar
-        ProgressBar().register()
+        ProgressBar(out=sys.stderr).register()
     except ImportError:
         pass
 
@@ -816,6 +818,109 @@ def epflux_cmd(ifile, ofile, mode, time_mean):
     out_ds = eliassen_palm(ds, mode=mode, time_mean=time_mean)
     write_dataset(out_ds, ofile)
     logger.info(f"EP flux saved to {ofile}")
+
+
+@cli.command()
+@click.argument('ref', type=click.Path(exists=True))
+@click.argument('cmp', type=click.Path(exists=True))
+@click.option('--var', '-v', 'variables', type=str, default=None,
+              help='Comma-separated variables to compare. Default: all common variables.')
+@click.option('--by-level', is_flag=True, default=False,
+              help='Emit one statistics row per vertical level.')
+@click.option('--levels', 'select_levels', default=None, type=str,
+              metavar='LEV,LEV,...',
+              help='Comma-separated level values to compare (native units). '
+                   'Nearest available level is matched. Implies --by-level.')
+@click.option('--reduce', type=click.Choice(['zonal-mean', 'global', 'none']),
+              default='zonal-mean', show_default=True,
+              help='Spatial reduction before comparison. "none" requires identical grids.')
+@click.option('--lat-range', type=(float, float), default=(-90., 90.), show_default=True,
+              metavar='LAT_MIN LAT_MAX',
+              help='Restrict comparison to this latitude window (degrees).')
+@click.option('--level-range', type=(float, float), default=None,
+              metavar='LEV_MIN LEV_MAX',
+              help='Restrict vertical range (native units: m for height, hPa for pressure).')
+@click.option('--format', 'fmt', type=click.Choice(['table', 'csv', 'markdown']),
+              default='table', show_default=True,
+              help='Output format.')
+@click.option('--precision', type=int, default=3, show_default=True,
+              help='Decimal places in the output table.')
+@click.option('--no-color', is_flag=True, default=False,
+              help='Suppress ANSI colour in terminal output.')
+@click.option('--output', '-o', 'output_file', default=None,
+              type=click.Path(dir_okay=False, writable=True),
+              help='Write CSV or Markdown output to this file instead of stdout.')
+@click.option('--vector', is_flag=True, default=False,
+              help='Append a "wind" row with vector correlation statistics '
+                   '(Crosby et al. 1993) when both u and v are present.')
+@profile_command
+def compare(ref, cmp, variables, by_level, select_levels, reduce, lat_range,
+            level_range, fmt, precision, no_color, output_file, vector):
+    """Compare two datasets and print a statistics table.
+
+    REF is the reference file; CMP is the dataset to evaluate against it.
+    Statistics (bias, RMSE, cRMSE, MAE, Pearson r, σ, skill score) are
+    computed over jointly non-NaN values after optional spatial reduction.
+
+    \b
+    Examples:
+      healicon compare ref.nc cmp.nc
+      healicon compare ref.nc cmp.nc --var temp,u,v --by-level
+      healicon compare ref.nc cmp.nc --var u,v --vector --by-level
+      healicon compare ref.nc cmp.nc --by-level --format csv --output stats.csv
+      healicon compare ref.nc cmp.nc --levels 50000,80000,100000
+    """
+    import xarray as xr
+    from .compare import compare as _compare, print_table
+
+    var_list = [v.strip() for v in variables.split(',')] if variables else None
+
+    lev_list = None
+    if select_levels is not None:
+        lev_list = [float(x.strip()) for x in select_levels.split(',')]
+        by_level = True
+
+    logger.info(f"Opening REF: {ref}")
+    ds_ref = xr.open_dataset(ref, chunks={'time': 24})
+    logger.info(f"Opening CMP: {cmp}")
+    ds_cmp = xr.open_dataset(cmp, chunks={'time': 24})
+
+    df = _compare(
+        ds_ref, ds_cmp,
+        variables=var_list,
+        by_level=by_level,
+        select_levels=lev_list,
+        reduce=reduce,
+        lat_range=lat_range,
+        level_range=level_range,
+        vector=vector,
+    )
+
+    import os
+    meta = {
+        'ref': os.path.basename(ref),
+        'cmp': os.path.basename(cmp),
+        'reduce': reduce,
+    }
+
+    actual_lat = df.attrs.get('actual_lat_range')
+    if actual_lat:
+        meta['lat'] = f'{actual_lat[0]:.1f}°–{actual_lat[1]:.1f}°'
+    else:
+        meta['lat'] = f'{lat_range[0]:.1f}°–{lat_range[1]:.1f}°'
+
+    actual_level = df.attrs.get('actual_level_range')
+    if actual_level:
+        lo, hi = actual_level
+        meta['level'] = (f'{lo/1000:.1f}–{hi/1000:.1f} km'
+                         if lo > 1000 else f'{lo:.0f}–{hi:.0f} m')
+    elif level_range:
+        lo, hi = level_range
+        meta['level'] = (f'{lo/1000:.1f}–{hi/1000:.1f} km'
+                         if lo > 1000 else f'{lo:.0f}–{hi:.0f} m')
+
+    print_table(df, fmt=fmt, precision=precision, no_color=no_color, meta=meta,
+                output_file=output_file)
 
 
 if __name__ == '__main__':

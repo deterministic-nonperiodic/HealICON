@@ -9,7 +9,8 @@ from .cf_coords import _find_coordinate
 logger = logging.getLogger(__name__)
 
 
-def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None, order: str = 'ring') -> xr.Dataset:
+def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None,
+                order: str = 'ring') -> xr.Dataset:
     """
     Parse SABER satellite data and bin it to a HEALPix grid.
     The input dataset is expected to have dimensions (event, altitude)

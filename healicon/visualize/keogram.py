@@ -27,12 +27,12 @@ def _resolve_alt_dim(da: xr.DataArray, time_dim: str, var: str) -> str | None:
 
 
 def _prep_keogram_data(
-    ds: xr.Dataset,
-    var: str,
-    time_dim: str,
-    factor: float,
-    lat: float | None = None,
-    lon: float | None = None,
+        ds: xr.Dataset,
+        var: str,
+        time_dim: str,
+        factor: float,
+        lat: float | None = None,
+        lon: float | None = None,
 ) -> tuple[xr.DataArray, str, bool]:
     """Prepare a (time, alt) DataArray for keogram plotting.
 
@@ -104,19 +104,19 @@ def _prep_keogram_data(
 
 
 def plot_keogram(
-    datasets,
-    variables,
-    time_dim: str = 'time',
-    lat: float | None = None,
-    lon: float | None = None,
-    y_limits=None,
-    v_range=None,
-    cmap=None,
-    share_cbar: bool = True,
-    location_label: str | None = None,
-    start_label: str = 'a',
-    out_dir: str = '.',
-    prefix: str = 'keogram',
+        datasets,
+        variables,
+        time_dim: str = 'time',
+        lat: float | None = None,
+        lon: float | None = None,
+        y_limits=None,
+        v_range=None,
+        cmap=None,
+        share_cbar: bool = True,
+        location_label: str | None = None,
+        start_label: str = 'a',
+        out_dir: str = '.',
+        prefix: str = 'keogram',
 ):
     """Plot time x height keograms for one or more variables.
 

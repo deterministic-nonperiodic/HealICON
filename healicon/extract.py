@@ -94,7 +94,7 @@ def extract_along_latitude(ds: xr.Dataset, lat: float, num_lons: int | None = No
 
 
 def _unstructured_extract_along_longitude(
-    ds: xr.Dataset, lon: float, cell_dim: str, num_lats: int | None = None
+        ds: xr.Dataset, lon: float, cell_dim: str, num_lats: int | None = None
 ) -> xr.Dataset:
     """Extract along a meridian for non-HEALPix unstructured grids (e.g. ICON).
 
@@ -118,21 +118,21 @@ def _unstructured_extract_along_longitude(
 
     # Cartesian unit-sphere coords for the nearby cells.
     theta_c = np.deg2rad(90.0 - cell_lat[nearby])
-    phi_c   = np.deg2rad(cell_lon[nearby])
+    phi_c = np.deg2rad(cell_lon[nearby])
     x_c = np.sin(theta_c) * np.cos(phi_c)
     y_c = np.sin(theta_c) * np.sin(phi_c)
     z_c = np.cos(theta_c)
 
     # Cartesian coords of all target points (shape: num_lats).
-    phi_q    = np.deg2rad(lon)
-    theta_q  = np.deg2rad(90.0 - target_lats)
+    phi_q = np.deg2rad(lon)
+    theta_q = np.deg2rad(90.0 - target_lats)
     xq = np.sin(theta_q) * np.cos(phi_q)
     yq = np.sin(theta_q) * np.sin(phi_q)
     zq = np.cos(theta_q)
 
     # (num_lats, n_nearby) squared distance; argmin gives nearest cell per lat.
-    d2 = ((xq[:, None] - x_c)**2 + (yq[:, None] - y_c)**2 + (zq[:, None] - z_c)**2)
-    pixel_indices = nearby[np.argmin(d2, axis=1)]   # (num_lats,)
+    d2 = ((xq[:, None] - x_c) ** 2 + (yq[:, None] - y_c) ** 2 + (zq[:, None] - z_c) ** 2)
+    pixel_indices = nearby[np.argmin(d2, axis=1)]  # (num_lats,)
 
     logger.info(
         f"Unstructured grid: extracting along lon={lon:.1f}° via nearest-cell "
@@ -280,7 +280,7 @@ def _unstructured_zonal_mean_block(data_block, bin_indices, n_bins, counts):
     orig_shape = data_block.shape
     data_2d = data_block.reshape(-1, data_block.shape[-1])
     out = np.empty((data_2d.shape[0], n_bins), dtype=data_2d.dtype)
-    
+
     has_nans = np.isnan(data_2d).any()
     if not has_nans:
         for i in range(data_2d.shape[0]):
@@ -295,7 +295,7 @@ def _unstructured_zonal_mean_block(data_block, bin_indices, n_bins, counts):
             counts_i = np.bincount(bin_indices, weights=valid_counts[i], minlength=n_bins)
             counts_i = np.where(counts_i == 0, np.nan, counts_i)
             out[i] = sums / counts_i
-            
+
     return out.reshape(orig_shape[:-1] + (n_bins,))
 
 
@@ -536,18 +536,18 @@ def extract_point(ds: xr.Dataset, lat: float, lon: float) -> xr.Dataset:
     if not is_healpix(ds):
         cell_lat, cell_lon = _get_cell_latlon_deg(ds)
         theta_c = np.deg2rad(90.0 - cell_lat)
-        phi_c   = np.deg2rad(cell_lon)
+        phi_c = np.deg2rad(cell_lon)
         x_c = np.sin(theta_c) * np.cos(phi_c)
         y_c = np.sin(theta_c) * np.sin(phi_c)
         z_c = np.cos(theta_c)
 
         theta_q = np.deg2rad(90.0 - lat)
-        phi_q   = np.deg2rad(lon)
+        phi_q = np.deg2rad(lon)
         xq = np.sin(theta_q) * np.cos(phi_q)
         yq = np.sin(theta_q) * np.sin(phi_q)
         zq = np.cos(theta_q)
 
-        pix = int(np.argmin((x_c - xq)**2 + (y_c - yq)**2 + (z_c - zq)**2))
+        pix = int(np.argmin((x_c - xq) ** 2 + (y_c - yq) ** 2 + (z_c - zq) ** 2))
         logger.info(
             f"Extracting point data at lat={lat}, lon={lon} "
             f"(nearest unstructured cell index {pix}, "

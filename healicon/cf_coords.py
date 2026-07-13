@@ -1,11 +1,10 @@
+import logging
 import re
-import warnings
 from typing import Tuple, Union, Dict, Any, List
 
 import numpy as np
-import xarray as xr
-import logging
 import pint
+import xarray as xr
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +75,7 @@ ALLOWED_UNITS: List[str] = ["deg", "degrees", "degrees_north", "degrees_east",
 _METER_UNITS: set = {"m", "meter", "meters", "metre", "metres"}
 _PRESSURE_NAMES: frozenset = frozenset(('plev', 'pres', 'pres_zm', 'pressure', 'isobaric'))
 _PRESSURE_STD_NAMES: frozenset = frozenset(('air_pressure',
-                                             'atmosphere_ln_pressure_coordinate'))
+                                            'atmosphere_ln_pressure_coordinate'))
 _PRESSURE_UNITS: frozenset = frozenset((
     'pa', 'pascal', 'pascals',
     'hpa', 'hectopascal', 'hectopascals',
@@ -114,8 +113,8 @@ expected_range = {
     "u": [-350., 350.],
     "v": [-350., 350.],
     "w": [-100., 100.],
-    "temp": [120, 2500.],    # up to ~1500 K in active thermosphere
-    "theta": [120, 1e8],     # no practical upper bound in the MLT/thermosphere
+    "temp": [120, 2500.],  # up to ~1500 K in active thermosphere
+    "theta": [120, 1e8],  # no practical upper bound in the MLT/thermosphere
     "pres": [0.0, 2000e2],
     "u_wind": [-350., 350.],
     "v_wind": [-350., 350.],
@@ -136,6 +135,7 @@ expected_range = {
 UNITS_REG = pint.UnitRegistry()
 _unit_cmd = re.compile(r"(?<=[A-Za-z)])(?![A-Za-z)])(?<![0-9\-][eE])(?<![0-9\-])(?=[0-9\-])")
 
+
 def _parse_units(unit_str):
     if isinstance(unit_str, (pint.Quantity, pint.Unit)):
         return unit_str
@@ -145,16 +145,20 @@ def _parse_units(unit_str):
         unit_str = unit_str.replace('degrees_E', 'degree').replace('degrees_N', 'degree')
         return UNITS_REG(_unit_cmd.sub('**', unit_str))
 
+
 def equivalent_units(unit_1, unit_2):
     ratio = (_parse_units(unit_1) / _parse_units(unit_2)).to_base_units()
     return ratio.dimensionless and np.isclose(ratio.magnitude, 1.0)
 
+
 def compatible_units(unit_1, unit_2):
     return _parse_units(unit_1).is_compatible_with(_parse_units(unit_2))
 
+
 def _get_units_str(da: xr.DataArray) -> str:
-    """Extract and normalise the units string from a DataArray (empty string if absent)."""
+    """Extract and normalize the units string from a DataArray (empty string if absent)."""
     return str(da.attrs.get("units", "")).strip()
+
 
 def get_conversion_components(from_units: str, to_units: str) -> tuple[float, float]:
     """Affine conversion coefficients for Y = X · multiplier + offset.
@@ -168,6 +172,7 @@ def get_conversion_components(from_units: str, to_units: str) -> tuple[float, fl
     q1 = pint.Quantity(1.0, _parse_units(from_units))
     multiplier = float(q1.to(_parse_units(to_units)).magnitude) - offset
     return multiplier, offset
+
 
 def convert_units(da: xr.DataArray, from_units: str, to_units: str) -> xr.DataArray:
     """Apply affine unit conversion Y = X · m + b, preserving Dask chunks.
@@ -188,6 +193,7 @@ def convert_units(da: xr.DataArray, from_units: str, to_units: str) -> xr.DataAr
         f"Cannot convert '{da.name or 'variable'}': "
         f"incompatible units '{source_units}' → '{to_units}'."
     )
+
 
 def check_convert_units(dataset_or_array: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
     """Validate and convert all recognised variables to canonical SI units.
@@ -270,7 +276,7 @@ def _cf_guess(ds: xr.Dataset, target: str) -> str | None:
     # Additionally, check long_name to break ties: if long_name clearly
     # refers to a different physical quantity, skip the match.
     _CONFLICTING_LONG_NAMES: dict[str, set[str]] = {
-        'theta': {'temperature', 'temp'},       # if long_name says "temperature", it's not theta
+        'theta': {'temperature', 'temp'},  # if long_name says "temperature", it's not theta
         'temperature': {'potential temperature', 'theta'},  # vice versa
     }
     conflicts = _CONFLICTING_LONG_NAMES.get(target, set())

@@ -21,12 +21,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ── ANSI helpers ────────────────────────────────────────────────────────────
-_RESET  = '\033[0m'
-_GREEN  = '\033[92m'
+_RESET = '\033[0m'
+_GREEN = '\033[92m'
 _YELLOW = '\033[93m'
-_RED    = '\033[91m'
+_RED = '\033[91m'
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
 
 def _strip_ansi(s: str) -> str:
     return _ANSI_RE.sub('', s)
@@ -52,7 +53,7 @@ def compute_stats(arr_ref: np.ndarray, arr_cmp: np.ndarray) -> dict:
     valid = np.isfinite(arr_ref) & np.isfinite(arr_cmp)
     ref = arr_ref[valid]
     cmp = arr_cmp[valid]
-    n   = int(valid.sum())
+    n = int(valid.sum())
     nan = float('nan')
 
     if n < 2:
@@ -61,33 +62,33 @@ def compute_stats(arr_ref: np.ndarray, arr_cmp: np.ndarray) -> dict:
 
     # BLAS-backed dot products replace elementwise square+mean passes, and the
     # |diff| pass reuses the diff buffer -- ~1.5x faster, fewer temporaries.
-    diff  = cmp - ref
-    s_d   = float(diff.sum())
-    s_d2  = float(np.dot(diff, diff))
-    bias  = s_d / n
-    rmse  = float(np.sqrt(s_d2 / n))
-    crmse = float(np.sqrt(max(0.0, rmse**2 - bias**2)))
-    mae   = float(np.abs(diff, out=diff).sum()) / n     # diff no longer needed
+    diff = cmp - ref
+    s_d = float(diff.sum())
+    s_d2 = float(np.dot(diff, diff))
+    bias = s_d / n
+    rmse = float(np.sqrt(s_d2 / n))
+    crmse = float(np.sqrt(max(0.0, rmse ** 2 - bias ** 2)))
+    mae = float(np.abs(diff, out=diff).sum()) / n  # diff no longer needed
 
     ref_a = ref - ref.mean()
     cmp_a = cmp - cmp.mean()
-    sxx   = float(np.dot(ref_a, ref_a))
-    syy   = float(np.dot(cmp_a, cmp_a))
-    sxy   = float(np.dot(ref_a, cmp_a))
+    sxx = float(np.dot(ref_a, ref_a))
+    syy = float(np.dot(cmp_a, cmp_a))
+    sxy = float(np.dot(ref_a, cmp_a))
     denom = float(np.sqrt(sxx * syy))
-    r     = sxy / denom if denom > 0 else nan
+    r = sxy / denom if denom > 0 else nan
 
     sigma_ref = float(np.sqrt(sxx / (n - 1)))
     sigma_cmp = float(np.sqrt(syy / (n - 1)))
-    skill = 1.0 - rmse**2 / sigma_ref**2 if sigma_ref > 0 else nan
+    skill = 1.0 - rmse ** 2 / sigma_ref ** 2 if sigma_ref > 0 else nan
 
     return dict(N=n, Bias=float(bias), RMSE=rmse, cRMSE=crmse, MAE=float(mae),
                 r=float(r), σ_ref=sigma_ref, σ_cmp=sigma_cmp, Skill=float(skill))
 
 
 def compute_vector_stats(
-    u_ref: np.ndarray, v_ref: np.ndarray,
-    u_cmp: np.ndarray, v_cmp: np.ndarray,
+        u_ref: np.ndarray, v_ref: np.ndarray,
+        u_cmp: np.ndarray, v_cmp: np.ndarray,
 ) -> dict:
     """Vector statistics for horizontal wind (u, v).
 
@@ -110,7 +111,7 @@ def compute_vector_stats(
              & np.isfinite(u_cmp) & np.isfinite(v_cmp))
     ur, vr = u_ref[valid], v_ref[valid]
     uc, vc = u_cmp[valid], v_cmp[valid]
-    n   = int(valid.sum())
+    n = int(valid.sum())
     nan = float('nan')
 
     if n < 2:
@@ -118,23 +119,23 @@ def compute_vector_stats(
                     σ_ref=nan, σ_cmp=nan, Skill=nan)
 
     # Crosby et al. (1993) vector correlation coefficient (BLAS dot products)
-    dot        = float(np.dot(uc, ur) + np.dot(vc, vr))
+    dot = float(np.dot(uc, ur) + np.dot(vc, vr))
     mag_cmp_sq = float(np.dot(uc, uc) + np.dot(vc, vc))
     mag_ref_sq = float(np.dot(ur, ur) + np.dot(vr, vr))
     r = (dot / np.sqrt(mag_cmp_sq * mag_ref_sq)
          if mag_cmp_sq > 0 and mag_ref_sq > 0 else nan)
 
     du, dv = uc - ur, vc - vr
-    mag2  = du * du
-    mag2 += dv * dv                                     # in-place: du^2+dv^2
-    rmse  = float(np.sqrt(mag2.mean()))
-    bias  = float(np.sqrt(du.mean()**2 + dv.mean()**2))
-    crmse = float(np.sqrt(max(0.0, rmse**2 - bias**2)))
-    mae   = float(np.sqrt(mag2, out=mag2).mean())       # reuse buffer
+    mag2 = du * du
+    mag2 += dv * dv  # in-place: du^2+dv^2
+    rmse = float(np.sqrt(mag2.mean()))
+    bias = float(np.sqrt(du.mean() ** 2 + dv.mean() ** 2))
+    crmse = float(np.sqrt(max(0.0, rmse ** 2 - bias ** 2)))
+    mae = float(np.sqrt(mag2, out=mag2).mean())  # reuse buffer
 
-    sigma_ref = float(np.sqrt(np.std(ur, ddof=1)**2 + np.std(vr, ddof=1)**2))
-    sigma_cmp = float(np.sqrt(np.std(uc, ddof=1)**2 + np.std(vc, ddof=1)**2))
-    skill = float(1.0 - rmse**2 / sigma_ref**2) if sigma_ref > 0 else nan
+    sigma_ref = float(np.sqrt(np.std(ur, ddof=1) ** 2 + np.std(vr, ddof=1) ** 2))
+    sigma_cmp = float(np.sqrt(np.std(uc, ddof=1) ** 2 + np.std(vc, ddof=1) ** 2))
+    skill = float(1.0 - rmse ** 2 / sigma_ref ** 2) if sigma_ref > 0 else nan
 
     return dict(N=n, Bias=bias, RMSE=rmse, cRMSE=crmse, MAE=mae, r=r,
                 σ_ref=sigma_ref, σ_cmp=sigma_cmp, Skill=skill)
@@ -169,7 +170,7 @@ def _stats_by_level_vec(arr_ref, arr_cmp, lev_axis, cmp_lev_axis, indices) -> li
     R = np.asarray(arr_ref, dtype=np.float64)
     C = np.asarray(arr_cmp, dtype=np.float64)
     if cmp_lev_axis != lev_axis:
-        C = np.moveaxis(C, cmp_lev_axis, lev_axis)          # view
+        C = np.moveaxis(C, cmp_lev_axis, lev_axis)  # view
     idx = np.asarray(indices, dtype=int)
     R = np.take(R, idx, axis=lev_axis)
     C = np.take(C, idx, axis=lev_axis)
@@ -184,7 +185,7 @@ def _stats_by_level_vec(arr_ref, arr_cmp, lev_axis, cmp_lev_axis, indices) -> li
         D = Cz - Rz
         bias = D.sum(axis=axes) / n_f
         rmse = np.sqrt((D * D).sum(axis=axes) / n_f)
-        crmse = np.sqrt(np.maximum(0.0, rmse**2 - bias**2))
+        crmse = np.sqrt(np.maximum(0.0, rmse ** 2 - bias ** 2))
         mae = np.abs(D).sum(axis=axes) / n_f
         mr = Rz.sum(axis=axes) / n_f
         mc = Cz.sum(axis=axes) / n_f
@@ -199,7 +200,7 @@ def _stats_by_level_vec(arr_ref, arr_cmp, lev_axis, cmp_lev_axis, indices) -> li
         r = np.where(denom > 0, sxy / denom, np.nan)
         sig_r = np.sqrt(sxx / (n_f - 1))
         sig_c = np.sqrt(syy / (n_f - 1))
-        skill = np.where(sig_r > 0, 1.0 - rmse**2 / sig_r**2, np.nan)
+        skill = np.where(sig_r > 0, 1.0 - rmse ** 2 / sig_r ** 2, np.nan)
 
     keys = ('Bias', 'RMSE', 'cRMSE', 'MAE', 'r', 'σ_ref', 'σ_cmp', 'Skill')
     vals = (bias, rmse, crmse, mae, r, sig_r, sig_c, skill)
@@ -322,7 +323,6 @@ def _common_variables(ds1, ds2, requested=None) -> list[str]:
 
 def _apply_spatial_reduce(ds, mode: str, lat_range: tuple[float, float]):
     """Reduce spatial dimensions; clip to lat_range afterwards."""
-    import xarray as xr
 
     if mode == 'none':
         return ds
@@ -362,17 +362,17 @@ def _apply_spatial_reduce(ds, mode: str, lat_range: tuple[float, float]):
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
 def compare(
-    ds_ref,
-    ds_cmp,
-    variables: list[str] | None = None,
-    by_level: bool = False,
-    select_levels: list[float] | None = None,
-    reduce: str = 'zonal-mean',
-    lat_range: tuple[float, float] = (-90., 90.),
-    level_range: tuple[float, float] | None = None,
-    vector: bool = False,
-    lmax: int | None = None,
-    wavelength_km: float | None = None,
+        ds_ref,
+        ds_cmp,
+        variables: list[str] | None = None,
+        by_level: bool = False,
+        select_levels: list[float] | None = None,
+        reduce: str = 'zonal-mean',
+        lat_range: tuple[float, float] = (-90., 90.),
+        level_range: tuple[float, float] | None = None,
+        vector: bool = False,
+        lmax: int | None = None,
+        wavelength_km: float | None = None,
 ) -> 'pd.DataFrame':
     """Compare two datasets and return a DataFrame of statistics.
 
@@ -432,7 +432,8 @@ def compare(
             elif var.attrs.get('grid_mapping') in ds.variables:
                 vars_to_keep.append(var.attrs['grid_mapping'])
         seen = set()
-        unique_vars = [v for v in vars_to_keep if v in ds.variables and not (v in seen or seen.add(v))]
+        unique_vars = [v for v in vars_to_keep if
+                       v in ds.variables and not (v in seen or seen.add(v))]
         return ds[unique_vars]
 
     # ── Optional low-pass spectral filter (before spatial reduction) ──────
@@ -464,7 +465,7 @@ def compare(
         """Return the vertical dimension name, with CF detection and a fallback."""
         try:
             coord = _find_coordinate(da.to_dataset(name=var_name), 'level',
-                                      raise_notfound=False)
+                                     raise_notfound=False)
             if coord is not None and coord.name in da.dims:
                 return coord.name
         except Exception:
@@ -515,9 +516,9 @@ def compare(
         if not display_name:
             display_name = var
 
-        attrs  = VARIABLE_ATTRS.get(var, {})
+        attrs = VARIABLE_ATTRS.get(var, {})
         factor = attrs.get('factor', 1.0)
-        units  = attrs.get('units', da_ref.attrs.get('units', ''))
+        units = attrs.get('units', da_ref.attrs.get('units', ''))
 
         lev_dim = _find_lev_dim(da_ref, var)
         logger.debug("'%s': lev_dim=%r  da_ref.dims=%s  da_cmp.dims=%s",
@@ -525,7 +526,7 @@ def compare(
 
         is_meter = (_coord_is_meter(da_ref[lev_dim])
                     if lev_dim and lev_dim in da_ref.coords else False)
-        is_pres  = (_is_pressure_coord(lev_dim, da_ref.coords) if lev_dim else False)
+        is_pres = (_is_pressure_coord(lev_dim, da_ref.coords) if lev_dim else False)
 
         # Apply level range filter
         if level_range is not None and lev_dim is not None and lev_dim in da_ref.coords:
@@ -570,7 +571,7 @@ def compare(
         logger.info(f"  Loading '{var}' …")
         arr_ref = np.asarray(da_ref)
         arr_cmp = np.asarray(da_cmp)
-        if factor != 1.0:                       # avoid a full copy when a no-op
+        if factor != 1.0:  # avoid a full copy when a no-op
             arr_ref = arr_ref * factor
             arr_cmp = arr_cmp * factor
 
@@ -626,29 +627,29 @@ def compare(
                         lev_f = float(lev_vals[i])
                         lev_display = lev_f / 1000.0 if is_meter else lev_f
                         records.append({'Variable': display_name, 'Units': units,
-                                         'is_pres': is_pres, 'is_meter': is_meter,
-                                         'Level': lev_display, **stats})
+                                        'is_pres': is_pres, 'is_meter': is_meter,
+                                        'Level': lev_display, **stats})
 
         if not _skip_scalar:
             # GLOBAL row: flatten all remaining dimensions
             stats_g = compute_stats(arr_ref, arr_cmp)
             records.append({'Variable': display_name, 'Units': units,
-                             'is_pres': is_pres, 'is_meter': is_meter,
-                             'Level': None, **stats_g})
+                            'is_pres': is_pres, 'is_meter': is_meter,
+                            'Level': None, **stats_g})
 
     # ── Vector wind statistics ────────────────────────────────────────────────
     if vector:
         if 'u' in _vector_cache and 'v' in _vector_cache:
-            cu, cv   = _vector_cache['u'], _vector_cache['v']
+            cu, cv = _vector_cache['u'], _vector_cache['v']
             vec_pres = cu['is_pres']
-            vec_m    = cu['is_meter']
-            vec_u    = cu['units'] or 'm s⁻¹'
+            vec_m = cu['is_meter']
+            vec_u = cu['units'] or 'm s⁻¹'
             u_r, u_c = cu['arr_ref'], cu['arr_cmp']
             v_r, v_c = cv['arr_ref'], cv['arr_cmp']
 
             if by_level and cu['lev_axis'] is not None and cu['lev_vals'] is not None:
-                lv_vals   = cu['lev_vals']
-                la_u, la_v  = cu['lev_axis'],     cv['lev_axis']
+                lv_vals = cu['lev_vals']
+                la_u, la_v = cu['lev_axis'], cv['lev_axis']
                 cla_u, cla_v = cu['cmp_lev_axis'], cv['cmp_lev_axis']
                 n_lev = min(u_r.shape[la_u], u_c.shape[cla_u],
                             v_r.shape[la_v], v_c.shape[cla_v])
@@ -672,14 +673,14 @@ def compare(
                     )
                     lev_f = float(lv_vals[i])
                     records.append({'Variable': 'Winds', 'Units': vec_u,
-                                     'is_pres': vec_pres, 'is_meter': vec_m,
-                                     'Level': lev_f / 1000.0 if vec_m else lev_f,
-                                     **stats})
+                                    'is_pres': vec_pres, 'is_meter': vec_m,
+                                    'Level': lev_f / 1000.0 if vec_m else lev_f,
+                                    **stats})
 
             stats_vec = compute_vector_stats(u_r, v_r, u_c, v_c)
             records.append({'Variable': 'Winds', 'Units': vec_u,
-                             'is_pres': vec_pres, 'is_meter': vec_m,
-                             'Level': None, **stats_vec})
+                            'is_pres': vec_pres, 'is_meter': vec_m,
+                            'Level': None, **stats_vec})
         else:
             logger.warning(
                 "--vector: both 'u' and 'v' must be present in both datasets "
@@ -720,12 +721,12 @@ def _fmt_num(val, precision: int, sign: bool = False) -> str:
 
 
 def print_table(
-    df,
-    fmt: str = 'table',
-    precision: int = 3,
-    no_color: bool = False,
-    meta: dict | None = None,
-    output_file: str | None = None,
+        df,
+        fmt: str = 'table',
+        precision: int = 3,
+        no_color: bool = False,
+        meta: dict | None = None,
+        output_file: str | None = None,
 ) -> None:
     """Print the comparison DataFrame as a formatted table, CSV, or Markdown.
 
@@ -795,16 +796,16 @@ def _export_df(df, precision: int):
             f'{lev:.1f}' if not row['is_pres'] else f'{lev:.2g}')
         rows.append({
             'Variable': row['Variable'],
-            'Level':    lev_str,
-            'N':        int(row['N']),
-            'Bias':     round(row['Bias'],  precision),
-            'RMSE':     round(row['RMSE'],  precision),
-            'cRMSE':    round(row['cRMSE'], precision),
-            'MAE':      round(row['MAE'],   precision),
-            'r':        round(row['r'],     precision),
-            'σ_ref':    round(row['σ_ref'], precision),
-            'σ_cmp':    round(row['σ_cmp'], precision),
-            'Skill':    round(row['Skill'], precision),
+            'Level': lev_str,
+            'N': int(row['N']),
+            'Bias': round(row['Bias'], precision),
+            'RMSE': round(row['RMSE'], precision),
+            'cRMSE': round(row['cRMSE'], precision),
+            'MAE': round(row['MAE'], precision),
+            'r': round(row['r'], precision),
+            'σ_ref': round(row['σ_ref'], precision),
+            'σ_cmp': round(row['σ_cmp'], precision),
+            'Skill': round(row['Skill'], precision),
         })
     return pd.DataFrame(rows)
 
@@ -814,9 +815,9 @@ def _to_latex(df, precision: int) -> str:
 
     p = precision
     multi_var = df['Variable'].nunique() > 1
-    is_pres   = bool(df['is_pres'].any())
-    is_meter  = bool(df['is_meter'].any())
-    lev_hdr   = 'Pres (hPa)' if is_pres else ('Alt (km)' if is_meter else 'Level')
+    is_pres = bool(df['is_pres'].any())
+    is_meter = bool(df['is_meter'].any())
+    lev_hdr = 'Pres (hPa)' if is_pres else ('Alt (km)' if is_meter else 'Level')
 
     def escape_latex(text: str) -> str:
         if not isinstance(text, str):
@@ -923,11 +924,11 @@ def _to_latex(df, precision: int) -> str:
         cells = [
             escape_latex(lev_cell),
             f'{int(row["N"]):,}',
-            fmt_val(row['Bias'],  p, sign=True),
-            fmt_val(row['RMSE'],  p),
+            fmt_val(row['Bias'], p, sign=True),
+            fmt_val(row['RMSE'], p),
             fmt_val(row['cRMSE'], p),
-            fmt_val(row['MAE'],   p),
-            fmt_val(row['r'],     p),
+            fmt_val(row['MAE'], p),
+            fmt_val(row['r'], p),
             fmt_val(row['σ_ref'], p),
             fmt_val(row['σ_cmp'], p),
             fmt_val(row['Skill'], p),
@@ -937,7 +938,7 @@ def _to_latex(df, precision: int) -> str:
             cells = [escape_latex(v_cell)] + cells
 
         lines.append(' & '.join(cells) + ' \\\\')
-        prev_var   = cur_var
+        prev_var = cur_var
         prev_units = cur_units
 
     lines.append('\\bottomrule')
@@ -954,14 +955,14 @@ def _make_stat_headers(lev_hdr: str, units: str) -> list[str]:
 
 
 def _print_table(df, precision: int, no_color: bool) -> None:
-    isatty  = sys.stdout.isatty()
+    isatty = sys.stdout.isatty()
     do_color = not no_color and isatty
     p = precision
 
     multi_var = df['Variable'].nunique() > 1
-    is_pres   = bool(df['is_pres'].any())
-    is_meter  = bool(df['is_meter'].any())
-    lev_hdr   = 'Pres (hPa)' if is_pres else ('Alt (km)' if is_meter else 'Level')
+    is_pres = bool(df['is_pres'].any())
+    is_meter = bool(df['is_meter'].any())
+    lev_hdr = 'Pres (hPa)' if is_pres else ('Alt (km)' if is_meter else 'Level')
 
     # Per-variable unit lookup (preserves insertion order)
     var_units: dict[str, str] = {}
@@ -992,10 +993,10 @@ def _print_table(df, precision: int, no_color: bool) -> None:
         cells = [
             lev_cell,
             f'{int(row["N"]):,}',
-            _fmt_num(row['Bias'],  p, sign=True),
-            _fmt_num(row['RMSE'],  p),
+            _fmt_num(row['Bias'], p, sign=True),
+            _fmt_num(row['RMSE'], p),
             _fmt_num(row['cRMSE'], p),
-            _fmt_num(row['MAE'],   p),
+            _fmt_num(row['MAE'], p),
             r_str,
             _fmt_num(row['σ_ref'], p),
             _fmt_num(row['σ_cmp'], p),
@@ -1018,8 +1019,8 @@ def _print_table(df, precision: int, no_color: bool) -> None:
             for i, h in enumerate(alt_headers):
                 widths[i] = max(widths[i], len(h))
 
-    sep    = '  '.join('─' * w for w in widths)
-    thin   = '  '.join('╌' * w for w in widths)
+    sep = '  '.join('─' * w for w in widths)
+    thin = '  '.join('╌' * w for w in widths)
 
     print(_fmt_row(headers, widths, left_cols=left_cols))
     print(sep)
@@ -1043,7 +1044,7 @@ def _print_table(df, precision: int, no_color: bool) -> None:
             if cur_units != prev_units:
                 # Units changed — re-emit header with new unit suffix
                 new_stat = _make_stat_headers(lev_hdr, cur_units)
-                new_hdr  = (['Variable'] + new_stat)
+                new_hdr = (['Variable'] + new_stat)
                 print(sep)
                 print()
                 print(_fmt_row(new_hdr, widths, left_cols=left_cols))
@@ -1051,11 +1052,12 @@ def _print_table(df, precision: int, no_color: bool) -> None:
             else:
                 print()
 
-        prev_var   = cur_var
+        prev_var = cur_var
         prev_units = cur_units
 
         _lv = row['Level']
-        if (_lv is None or (isinstance(_lv, float) and np.isnan(_lv))) and var_has_level_rows.get(cur_var, False):
+        if (_lv is None or (isinstance(_lv, float) and np.isnan(_lv))) and var_has_level_rows.get(
+                cur_var, False):
             print(thin)
         print(_fmt_row(cells, widths, left_cols=left_cols))
 

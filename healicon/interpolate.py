@@ -156,7 +156,8 @@ class HealpixInterpolator:
             raise ValueError(
                 "Could not automatically determine longitude/latitude coordinate names.")
 
-        self._target_lon, self._target_lat = get_healpix_coords(self.nside, nest=(self.order == 'nested'))
+        self._target_lon, self._target_lat = get_healpix_coords(self.nside,
+                                                                nest=(self.order == 'nested'))
 
         lon_dims = ds[self._lon_name].dims
         lat_dims = ds[self._lat_name].dims
@@ -249,7 +250,8 @@ class HealpixInterpolator:
                     from .grid import get_cells_dim
                     cell_dim = get_cells_dim(ds)
                     out_ds = ds.copy()
-                    target_lon, target_lat = get_healpix_coords(self.nside, nest=(self.order == 'nested'))
+                    target_lon, target_lat = get_healpix_coords(self.nside,
+                                                                nest=(self.order == 'nested'))
                     out_ds['lon'] = (cell_dim, target_lon)
                     out_ds['lat'] = (cell_dim, target_lat)
                     out_ds['lon'].attrs = {"standard_name": "longitude", "units": "degrees_east"}
@@ -258,9 +260,11 @@ class HealpixInterpolator:
                         if cell_dim in da.dims:
                             r2n = (self.order == 'nested')
                             n2r = (self.order == 'ring')
+
                             def _reorder_block(arr):
                                 import healpy as hp
                                 return hp.reorder(arr, r2n=r2n, n2r=n2r)
+
                             reordered_da = xr.apply_ufunc(
                                 _reorder_block,
                                 da,
@@ -272,16 +276,20 @@ class HealpixInterpolator:
                             )
                             out_ds[var_name] = reordered_da
                     out_ds = add_healpix_grid_mapping(out_ds, self.nside, order=self.order)
-                    history_msg = f"Reordered HEALPix grid (nside={self.nside}, from {current_order} to {self.order}) using HealICON."
+                    history_msg = (f"Reordered HEALPix grid (nside={self.nside}, "
+                                   f"from {current_order} to {self.order}) using HealICON.")
                     out_ds.attrs = append_history(out_ds.attrs, history_msg)
                     return out_ds
             else:
                 logger.info(
-                    f"Dataset is HEALPix (nside={self._current_nside}, order={current_order}), but target is nside={self.nside}. Regrading resolution...")
+                    f"Dataset is HEALPix (nside={self._current_nside}, order={current_order}), "
+                    f"but target is nside={self.nside}. Regrading resolution...")
                 from .analysis import regrade_resolution
                 ds_regraded = regrade_resolution(ds, new_nside=self.nside)
                 if self.order == 'nested':
-                    reorder_interpolator = HealpixInterpolator(nside=self.nside, use_gpu=self.use_gpu, order=self.order)
+                    reorder_interpolator = HealpixInterpolator(nside=self.nside,
+                                                               use_gpu=self.use_gpu,
+                                                               order=self.order)
                     return reorder_interpolator(ds_regraded)
                 return ds_regraded
 
@@ -303,6 +311,7 @@ class HealpixInterpolator:
 
         for var_name, da in ds.data_vars.items():
             if self._grid_type in ['unstructured', 'curvilinear']:
+                # Unstructured / Curvilinear grids: using inverse distance weighting
                 if self._spatial_dim not in da.dims:
                     out_ds[var_name] = da
                     continue
@@ -320,7 +329,7 @@ class HealpixInterpolator:
                         dask_gufunc_kwargs={'output_sizes': {'cells': len(self._target_lon)},
                                             'allow_rechunk': True}
                     )
-            else:  # regular
+            else:  # Regular grids: using fast scipy interpolation
                 if self._lat_name not in da.dims or self._lon_name not in da.dims:
                     out_ds[var_name] = da
                     continue
@@ -361,7 +370,8 @@ class HealpixInterpolator:
         return out_ds
 
 
-def interpolate_to_healpix(ds: xr.Dataset, nside: int = None, use_gpu: bool = False, order: str = 'ring') -> xr.Dataset:
+def interpolate_to_healpix(ds: xr.Dataset, nside: int = None, use_gpu: bool = False,
+                           order: str = 'ring') -> xr.Dataset:
     """
     Interpolate a dataset to a HEALPix grid.
     

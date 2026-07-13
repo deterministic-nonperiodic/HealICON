@@ -13,15 +13,15 @@ logger = logging.getLogger(__name__)
 
 
 def plot_section(
-    ds: xr.Dataset,
-    var_name: str,
-    x_dim: str = 'lat',
-    y_dim: str = 'z_mc',
-    out_dir: str = ".",
-    prefix: str = "section",
-    v_range=None,
-    y_limits=None,
-    lon: float | None = None,
+        ds: xr.Dataset,
+        var_name: str,
+        x_dim: str = 'lat',
+        y_dim: str = 'z_mc',
+        out_dir: str = ".",
+        prefix: str = "section",
+        v_range=None,
+        y_limits=None,
+        lon: float | None = None,
 ):
     """Plot a 2D cross-section (latitude x height or time x height).
 

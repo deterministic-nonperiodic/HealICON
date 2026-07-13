@@ -158,7 +158,9 @@ def _load_and_ensure_healpix(ifile, target_nside=None):
               help='Enable GPU acceleration for KDTree interpolation if available.')
 @click.option('--cat', is_flag=True, default=False,
               help='Combine files matching the input pattern into a single dataset before processing (mimics CDO cat).')
-@click.option('--order', type=click.Choice(['RING', 'NESTED', 'ring', 'nested'], case_sensitive=False), default='RING',
+@click.option('--order',
+              type=click.Choice(['RING', 'NESTED', 'ring', 'nested'], case_sensitive=False),
+              default='RING',
               help='HEALPix ordering scheme for output grid (RING or NESTED). Defaults to RING.')
 @profile_command
 def convert(ifile, ofile, nside, ut_bins, config_path, grid_file, gpu, cat, order):
@@ -695,7 +697,8 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim,
 @cli.command()
 @click.argument('ifile')
 @click.option('--type', 'plot_type',
-              type=click.Choice(['tides', 'section', 'keogram', 'map', 'spectrum', 'ep-flux', 'epflux']),
+              type=click.Choice(
+                  ['tides', 'section', 'keogram', 'map', 'spectrum', 'ep-flux', 'epflux']),
               required=True,
               help='Type of plot to generate.')
 @click.option('--var', 'var_name', default=None,
@@ -719,7 +722,8 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim,
                    'Default: no masking (vmax already handles dynamic range). '
                    'Use e.g. 1e-6 to cut off above ~100 km in height coordinates.')
 @profile_command
-def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, lat, lon, out_dir, prefix, vmax, rho_min):
+def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, lat, lon, out_dir, prefix, vmax,
+         rho_min):
     """
     Generate simple visualizations for healicon products.
 
@@ -932,11 +936,11 @@ def compare(ref, cmp, variables, by_level, select_levels, reduce, lat_range,
     actual_level = df.attrs.get('actual_level_range')
     if actual_level:
         lo, hi = actual_level
-        meta['level'] = (f'{lo/1000:.1f}–{hi/1000:.1f} km'
+        meta['level'] = (f'{lo / 1000:.1f}–{hi / 1000:.1f} km'
                          if lo > 1000 else f'{lo:.0f}–{hi:.0f} m')
     elif level_range:
         lo, hi = level_range
-        meta['level'] = (f'{lo/1000:.1f}–{hi/1000:.1f} km'
+        meta['level'] = (f'{lo / 1000:.1f}–{hi / 1000:.1f} km'
                          if lo > 1000 else f'{lo:.0f}–{hi:.0f} m')
 
     print_table(df, fmt=fmt, precision=precision, no_color=no_color, meta=meta,

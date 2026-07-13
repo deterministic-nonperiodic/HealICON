@@ -20,7 +20,7 @@ def _is_valid_npix(n: int) -> bool:
     return 12 * nside * nside == n and hp.isnsideok(nside, nest=True)
 
 
-def get_healpix_coords(nside: int):
+def get_healpix_coords(nside: int, nest: bool = False):
     """
     Generate longitude and latitude coordinates for a HEALPix grid.
     Returns:
@@ -30,7 +30,7 @@ def get_healpix_coords(nside: int):
     npix = hp.nside2npix(nside)
 
     # healpy pix2ang returns colatitude (theta) and longitude (phi) in radians
-    theta, phi = hp.pix2ang(nside, np.arange(npix))
+    theta, phi = hp.pix2ang(nside, np.arange(npix), nest=nest)
 
     # Convert colatitude to latitude (-90 to 90)
     lat = 90.0 - np.rad2deg(theta)

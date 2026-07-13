@@ -160,3 +160,63 @@ def test_write_dataset_dask_backed_netcdf():
         out = xr.open_dataset(ofile)
         assert "temperature" in out.data_vars
         out.close()
+
+
+def test_run_sequential_order_options():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create a simple unstructured dataset (like mock ICON)
+        lat = np.array([45.0, -45.0, 0.0])
+        lon = np.array([0.0, 180.0, 90.0])
+        data = np.array([10.0, 20.0, 30.0], dtype=np.float32)
+        
+        ds = xr.Dataset(
+            {'temp': (['cells'], data)},
+            coords={'lat': (['cells'], lat), 'lon': (['cells'], lon)}
+        )
+        ds.lon.attrs = {"standard_name": "longitude", "units": "degrees_east"}
+        ds.lat.attrs = {"standard_name": "latitude", "units": "degrees_north"}
+        
+        ifile = os.path.join(tmpdir, "input.nc")
+        ds.to_netcdf(ifile)
+        ds.close()
+        
+        # 1. Convert to RING
+        ofile_ring = os.path.join(tmpdir, "output_ring.nc")
+        run_sequential(
+            input_pattern=ifile,
+            output_template=ofile_ring,
+            nside=2,
+            order='ring'
+        )
+        
+        ds_ring = xr.open_dataset(ofile_ring)
+        assert ds_ring.attrs.get('healpix_scheme') == 'RING'
+        assert ds_ring['healpix'].attrs.get('healpix_order') == 'ring'
+        ds_ring.close()
+        
+        # 2. Convert to NESTED
+        ofile_nested = os.path.join(tmpdir, "output_nested.nc")
+        run_sequential(
+            input_pattern=ifile,
+            output_template=ofile_nested,
+            nside=2,
+            order='nested'
+        )
+        
+        ds_nested = xr.open_dataset(ofile_nested)
+        assert ds_nested.attrs.get('healpix_scheme') == 'NESTED'
+        assert ds_nested['healpix'].attrs.get('healpix_order') == 'nested'
+        ds_nested.close()
+        
+        # 3. Convert from RING output to NESTED (reordering)
+        ofile_reordered = os.path.join(tmpdir, "output_reordered.nc")
+        run_sequential(
+            input_pattern=ofile_ring,
+            output_template=ofile_reordered,
+            nside=2,
+            order='nested'
+        )
+        ds_reordered = xr.open_dataset(ofile_reordered)
+        assert ds_reordered.attrs.get('healpix_scheme') == 'NESTED'
+        assert ds_reordered['healpix'].attrs.get('healpix_order') == 'nested'
+        ds_reordered.close()

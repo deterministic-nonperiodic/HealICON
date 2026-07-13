@@ -9,7 +9,7 @@ from .cf_coords import _find_coordinate
 logger = logging.getLogger(__name__)
 
 
-def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None) -> xr.Dataset:
+def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None, order: str = 'ring') -> xr.Dataset:
     """
     Parse SABER satellite data and bin it to a HEALPix grid.
     The input dataset is expected to have dimensions (event, altitude)
@@ -60,7 +60,7 @@ def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None) -> xr.Da
     # Map to pixels. Invalid coordinates will be mapped to pixel 0 temporarily, but we'll mask them out.
     theta_safe = np.where(valid_coords, theta, 0.0)
     phi_safe = np.where(valid_coords, phi, 0.0)
-    pix = hp.ang2pix(nside, theta_safe, phi_safe)
+    pix = hp.ang2pix(nside, theta_safe, phi_safe, nest=(order.lower() == 'nested'))
 
     n_alt = ds.sizes[alt_name]
 
@@ -179,7 +179,7 @@ def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None) -> xr.Da
     # Add HEALPix metadata
     out_ds.attrs['healpix_nside'] = nside
     out_ds.attrs['healpix_npix'] = npix
-    out_ds.attrs['healpix_scheme'] = 'RING'
+    out_ds.attrs['healpix_scheme'] = order.upper()
     out_ds.attrs['healpix_cell_area_sr'] = f"{cell_area:.6e}"
 
     out_ds["healpix"] = xr.DataArray(
@@ -187,7 +187,7 @@ def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None) -> xr.Da
         attrs={
             "grid_mapping_name": "healpix",
             "healpix_nside": np.int32(nside),
-            "healpix_order": "ring"
+            "healpix_order": order.lower()
         }
     )
 
@@ -197,13 +197,13 @@ def parse_saber(ds: xr.Dataset, nside: int = None, ut_bins: int = None) -> xr.Da
 
     # Add lon/lat coordinates for cells (optional but standard for HealICON)
     from .grid import get_healpix_coords
-    target_lon, target_lat = get_healpix_coords(nside)
+    target_lon, target_lat = get_healpix_coords(nside, nest=(order.lower() == 'nested'))
     out_ds.coords["lon"] = ("cells", target_lon)
     out_ds.coords["lat"] = ("cells", target_lat)
     out_ds.coords["lon"].attrs = {"standard_name": "longitude", "units": "degrees_east"}
     out_ds.coords["lat"].attrs = {"standard_name": "latitude", "units": "degrees_north"}
 
-    history_msg = f"Parsed SABER Level2A dataset and binned to HEALPix grid (nside={nside}, RING) using HealICON."
+    history_msg = f"Parsed SABER Level2A dataset and binned to HEALPix grid (nside={nside}, {order.upper()}) using HealICON."
     out_ds.attrs['history'] = out_ds.attrs.get('history',
                                                '') + '\n' + history_msg if 'history' in out_ds.attrs else history_msg
 

@@ -2,7 +2,7 @@
 
 Public API
 ----------
-compute_stats(arr_ref, arr_cmp)         → dict of scalar metrics
+compute_stats(arr_ref, arr_cmp)        → dict of scalar metrics
 compare(ds_ref, ds_cmp, variables, …)  → pd.DataFrame
 print_table(df, fmt, precision, …)     → None (writes to stdout / stderr)
 """
@@ -424,6 +424,17 @@ def compare(
     actual_lat_range = None
     actual_level_range = None
 
+    def _subset_dataset(ds, vars_list):
+        vars_to_keep = list(vars_list)
+        for name, var in ds.variables.items():
+            if var.attrs.get('grid_mapping_name') == 'healpix':
+                vars_to_keep.append(name)
+            elif var.attrs.get('grid_mapping') in ds.variables:
+                vars_to_keep.append(var.attrs['grid_mapping'])
+        seen = set()
+        unique_vars = [v for v in vars_to_keep if v in ds.variables and not (v in seen or seen.add(v))]
+        return ds[unique_vars]
+
     # ── Optional low-pass spectral filter (before spatial reduction) ──────
     if lmax is not None or wavelength_km is not None:
         from .grid import is_healpix as _is_healpix
@@ -435,11 +446,14 @@ def compare(
         from .analysis import filter_spatial as _filter_spatial
         filt_kw = dict(lmax=lmax) if lmax is not None else dict(wavelength_km=wavelength_km)
         logger.info(f"Applying spectral low-pass filter: {filt_kw}")
-        ds_ref = _filter_spatial(ds_ref[variables], **filt_kw)
-        ds_cmp = _filter_spatial(ds_cmp[variables], **filt_kw)
+        ds_ref = _filter_spatial(_subset_dataset(ds_ref, variables), **filt_kw)
+        ds_cmp = _filter_spatial(_subset_dataset(ds_cmp, variables), **filt_kw)
+    else:
+        ds_ref = _subset_dataset(ds_ref, variables)
+        ds_cmp = _subset_dataset(ds_cmp, variables)
 
-    ds_ref = _apply_spatial_reduce(ds_ref[variables], reduce, lat_range)
-    ds_cmp = _apply_spatial_reduce(ds_cmp[variables], reduce, lat_range)
+    ds_ref = _apply_spatial_reduce(ds_ref, reduce, lat_range)
+    ds_cmp = _apply_spatial_reduce(ds_cmp, reduce, lat_range)
 
     from .cf_coords import _find_coordinate, _coord_is_meter, _is_pressure_coord
     from .visualize.common import VARIABLE_ATTRS
@@ -463,12 +477,43 @@ def compare(
                 return _d
         return None
 
+    DISPLAY_MAPPING = {
+        'temp': 'Temperature',
+        'ta': 'Temperature',
+        'temperature': 'Temperature',
+        'u': 'Zonal wind',
+        'ua': 'Zonal wind',
+        'v': 'Meridional wind',
+        'va': 'Meridional wind',
+        'w': 'Vertical wind',
+        'wa': 'Vertical wind',
+        'wind': 'Wind speed',
+        'wind_speed': 'Wind speed',
+        'pres': 'Pressure',
+        'p': 'Pressure',
+        'pressure': 'Pressure',
+        'qv': 'Specific humidity',
+        'hus': 'Specific humidity',
+        'zg': 'Geopotential height',
+        'tke': 'TKE',
+    }
+
     records = []
     _vector_cache: dict[str, dict] = {}
 
     for var in variables:
         da_ref = ds_ref[var]
         da_cmp = ds_cmp[var]
+
+        display_name = DISPLAY_MAPPING.get(var.lower())
+        if not display_name:
+            display_name = VARIABLE_ATTRS.get(var, {}).get('label')
+        if not display_name and var in ds_ref:
+            long_name = ds_ref[var].attrs.get('long_name')
+            if long_name and len(long_name) <= 20:
+                display_name = long_name
+        if not display_name:
+            display_name = var
 
         attrs  = VARIABLE_ATTRS.get(var, {})
         factor = attrs.get('factor', 1.0)
@@ -580,14 +625,14 @@ def compare(
                     for i, stats in zip(indices, stats_list):
                         lev_f = float(lev_vals[i])
                         lev_display = lev_f / 1000.0 if is_meter else lev_f
-                        records.append({'Variable': var, 'Units': units,
+                        records.append({'Variable': display_name, 'Units': units,
                                          'is_pres': is_pres, 'is_meter': is_meter,
                                          'Level': lev_display, **stats})
 
         if not _skip_scalar:
             # GLOBAL row: flatten all remaining dimensions
             stats_g = compute_stats(arr_ref, arr_cmp)
-            records.append({'Variable': var, 'Units': units,
+            records.append({'Variable': display_name, 'Units': units,
                              'is_pres': is_pres, 'is_meter': is_meter,
                              'Level': None, **stats_g})
 
@@ -626,13 +671,13 @@ def compare(
                         np.take(u_c, i, axis=cla_u), np.take(v_c, i, axis=cla_v),
                     )
                     lev_f = float(lv_vals[i])
-                    records.append({'Variable': 'wind', 'Units': vec_u,
+                    records.append({'Variable': 'Winds', 'Units': vec_u,
                                      'is_pres': vec_pres, 'is_meter': vec_m,
                                      'Level': lev_f / 1000.0 if vec_m else lev_f,
                                      **stats})
 
             stats_vec = compute_vector_stats(u_r, v_r, u_c, v_c)
-            records.append({'Variable': 'wind', 'Units': vec_u,
+            records.append({'Variable': 'Winds', 'Units': vec_u,
                              'is_pres': vec_pres, 'is_meter': vec_m,
                              'Level': None, **stats_vec})
         else:
@@ -688,7 +733,7 @@ def print_table(
     ----------
     df : pd.DataFrame
         Output of :func:`compare`.
-    fmt : {'table', 'csv', 'markdown'}
+    fmt : {'table', 'csv', 'markdown', 'latex'}
     precision : int
         Decimal places for floating-point columns.
     no_color : bool
@@ -696,7 +741,7 @@ def print_table(
     meta : dict, optional
         Key-value pairs printed as a header line to stderr.
     output_file : str, optional
-        Write CSV or Markdown output to this path instead of stdout.
+        Write CSV, Markdown, or LaTeX output to this path instead of stdout.
     """
     if meta:
         header_str = '  ·  '.join(f'{k}: {v}' for k, v in meta.items())
@@ -712,6 +757,8 @@ def print_table(
 
     if fmt == 'markdown':
         export = _export_df(df, precision)
+        if 'Variable' in export.columns:
+            export.loc[export['Variable'].duplicated(), 'Variable'] = ''
         try:
             md_text = export.to_markdown(index=False)
         except ImportError:
@@ -723,6 +770,16 @@ def print_table(
             logger.info(f"Markdown written to {output_file}")
         else:
             print(md_text)
+        return
+
+    if fmt == 'latex':
+        latex_text = _to_latex(df, precision)
+        if output_file:
+            with open(output_file, 'w') as fh:
+                fh.write(latex_text + '\n')
+            logger.info(f"LaTeX written to {output_file}")
+        else:
+            print(latex_text)
         return
 
     _print_table(df, precision, no_color)
@@ -750,6 +807,142 @@ def _export_df(df, precision: int):
             'Skill':    round(row['Skill'], precision),
         })
     return pd.DataFrame(rows)
+
+
+def _to_latex(df, precision: int) -> str:
+    import numpy as np
+
+    p = precision
+    multi_var = df['Variable'].nunique() > 1
+    is_pres   = bool(df['is_pres'].any())
+    is_meter  = bool(df['is_meter'].any())
+    lev_hdr   = 'Pres (hPa)' if is_pres else ('Alt (km)' if is_meter else 'Level')
+
+    def escape_latex(text: str) -> str:
+        if not isinstance(text, str):
+            return text
+        if '$' in text:
+            return text.replace('%', '\\%')
+
+        text = text.replace('\\', '\\textbackslash{}')
+        for char in '&%$#_':
+            text = text.replace(char, f'\\{char}')
+        text = text.replace('{', '\\{').replace('}', '\\}')
+
+        text = text.replace('⁻¹', '\\textsuperscript{-1}')
+        text = text.replace('⁻²', '\\textsuperscript{-2}')
+        text = text.replace('²', '\\textsuperscript{2}')
+        text = text.replace('³', '\\textsuperscript{3}')
+        text = text.replace('°', '\\textdegree{}')
+
+        if '^' in text or '**' in text:
+            text = text.replace('^-1', '\\textsuperscript{-1}')
+            text = text.replace('**-1', '\\textsuperscript{-1}')
+            text = text.replace('^-2', '\\textsuperscript{-2}')
+            text = text.replace('**-2', '\\textsuperscript{-2}')
+            text = text.replace('^2', '\\textsuperscript{2}')
+            text = text.replace('**2', '\\textsuperscript{2}')
+            text = text.replace('^3', '\\textsuperscript{3}')
+            text = text.replace('**3', '\\textsuperscript{3}')
+
+        return text
+
+    def make_latex_headers(lev_hdr: str, units: str) -> list[str]:
+        u = f' ({escape_latex(units)})' if units else ''
+        stat_hdrs = [
+            escape_latex(lev_hdr),
+            'N',
+            f'Bias{u}',
+            f'RMSE{u}',
+            f'cRMSE{u}',
+            f'MAE{u}',
+            'r',
+            f'$\\sigma_{{\\text{{ref}}}}${u}',
+            f'$\\sigma_{{\\text{{cmp}}}}${u}',
+            'Skill'
+        ]
+        if multi_var:
+            return ['Variable'] + stat_hdrs
+        return stat_hdrs
+
+    var_units: dict[str, str] = {}
+    for _, row in df.iterrows():
+        v = row['Variable']
+        if v not in var_units:
+            var_units[v] = row['Units'] or ''
+
+    first_units = next(iter(var_units.values()), '')
+    align = ('l' if multi_var else '') + 'l' + 'r' * 9
+
+    lines = []
+    lines.append(f'\\begin{{tabular}}{{{align}}}')
+    lines.append('\\toprule')
+
+    headers = make_latex_headers(lev_hdr, first_units)
+    lines.append(' & '.join(headers) + ' \\\\')
+    lines.append('\\midrule')
+
+    prev_var = None
+    prev_units = first_units
+
+    var_has_level_rows: dict[str, bool] = {}
+    for _, row in df.iterrows():
+        v = row['Variable']
+        if v not in var_has_level_rows:
+            var_has_level_rows[v] = False
+        lv = row['Level']
+        if lv is not None and not (isinstance(lv, float) and np.isnan(lv)):
+            var_has_level_rows[v] = True
+
+    for _, row in df.iterrows():
+        cur_var = row['Variable']
+        cur_units = var_units.get(cur_var, '')
+
+        if multi_var and prev_var is not None and cur_var != prev_var:
+            if cur_units != prev_units:
+                new_hdrs = make_latex_headers(lev_hdr, cur_units)
+                lines.append('\\midrule')
+                lines.append(' & '.join(new_hdrs) + ' \\\\')
+                lines.append('\\midrule')
+            else:
+                lines.append('\\midrule')
+
+        lev = row['Level']
+        is_global = lev is None or (isinstance(lev, float) and np.isnan(lev))
+        lev_cell = 'GLOBAL' if is_global else (f'{lev:.2g}' if is_pres else f'{lev:.1f}')
+
+        if is_global and var_has_level_rows.get(cur_var, False):
+            lines.append('\\midrule')
+
+        def fmt_val(val, precision: int, sign: bool = False) -> str:
+            if not isinstance(val, (int, float)) or (isinstance(val, float) and np.isnan(val)):
+                return '---'
+            fmt = f'+.{precision}f' if sign else f'.{precision}f'
+            return format(val, fmt)
+
+        cells = [
+            escape_latex(lev_cell),
+            f'{int(row["N"]):,}',
+            fmt_val(row['Bias'],  p, sign=True),
+            fmt_val(row['RMSE'],  p),
+            fmt_val(row['cRMSE'], p),
+            fmt_val(row['MAE'],   p),
+            fmt_val(row['r'],     p),
+            fmt_val(row['σ_ref'], p),
+            fmt_val(row['σ_cmp'], p),
+            fmt_val(row['Skill'], p),
+        ]
+        if multi_var:
+            v_cell = cur_var if cur_var != prev_var else ""
+            cells = [escape_latex(v_cell)] + cells
+
+        lines.append(' & '.join(cells) + ' \\\\')
+        prev_var   = cur_var
+        prev_units = cur_units
+
+    lines.append('\\bottomrule')
+    lines.append('\\end{tabular}')
+    return '\n'.join(lines)
 
 
 def _make_stat_headers(lev_hdr: str, units: str) -> list[str]:
@@ -784,6 +977,7 @@ def _print_table(df, precision: int, no_color: bool) -> None:
 
     # Build string rows
     str_rows = []
+    prev_v_prep = None
     for _, row in df.iterrows():
         lev = row['Level']
         lev_cell = ('GLOBAL' if lev is None or (isinstance(lev, float) and np.isnan(lev))
@@ -808,7 +1002,9 @@ def _print_table(df, precision: int, no_color: bool) -> None:
             _fmt_num(row['Skill'], p),
         ]
         if multi_var:
-            cells = [row['Variable']] + cells
+            v_cell = row['Variable'] if row['Variable'] != prev_v_prep else ""
+            prev_v_prep = row['Variable']
+            cells = [v_cell] + cells
         str_rows.append(cells)
 
     left_cols = 2 if multi_var else 1

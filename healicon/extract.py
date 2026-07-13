@@ -280,9 +280,22 @@ def _unstructured_zonal_mean_block(data_block, bin_indices, n_bins, counts):
     orig_shape = data_block.shape
     data_2d = data_block.reshape(-1, data_block.shape[-1])
     out = np.empty((data_2d.shape[0], n_bins), dtype=data_2d.dtype)
-    for i in range(data_2d.shape[0]):
-        sums = np.bincount(bin_indices, weights=data_2d[i], minlength=n_bins)
-        out[i] = sums / counts
+    
+    has_nans = np.isnan(data_2d).any()
+    if not has_nans:
+        for i in range(data_2d.shape[0]):
+            sums = np.bincount(bin_indices, weights=data_2d[i], minlength=n_bins)
+            out[i] = sums / counts
+    else:
+        nan_mask = np.isnan(data_2d)
+        clean_data = np.where(nan_mask, 0.0, data_2d)
+        valid_counts = (~nan_mask).astype(clean_data.dtype)
+        for i in range(data_2d.shape[0]):
+            sums = np.bincount(bin_indices, weights=clean_data[i], minlength=n_bins)
+            counts_i = np.bincount(bin_indices, weights=valid_counts[i], minlength=n_bins)
+            counts_i = np.where(counts_i == 0, np.nan, counts_i)
+            out[i] = sums / counts_i
+            
     return out.reshape(orig_shape[:-1] + (n_bins,))
 
 
@@ -366,16 +379,38 @@ def _zonal_mean_block(data_block, sort_order, ring_indices, ring_boundaries, cou
     data_2d = data_block.reshape(-1, data_block.shape[-1])
     n_rings = len(ring_boundaries)
 
-    if sort_order is None:
-        # RING ordering: pixels are already contiguous within each ring.
-        ring_sums = np.add.reduceat(data_2d, ring_boundaries, axis=1)
-        out = ring_sums / counts
+    has_nans = np.isnan(data_2d).any()
+
+    if not has_nans:
+        if sort_order is None:
+            # RING ordering: pixels are already contiguous within each ring.
+            ring_sums = np.add.reduceat(data_2d, ring_boundaries, axis=1)
+            out = ring_sums / counts
+        else:
+            # NESTED ordering: sequential bincount scatter into small output.
+            out = np.empty((data_2d.shape[0], n_rings), dtype=data_2d.dtype)
+            for i in range(data_2d.shape[0]):
+                sums = np.bincount(ring_indices, weights=data_2d[i], minlength=n_rings)
+                out[i] = sums / counts
     else:
-        # NESTED ordering: sequential bincount scatter into small output.
-        out = np.empty((data_2d.shape[0], n_rings), dtype=data_2d.dtype)
-        for i in range(data_2d.shape[0]):
-            sums = np.bincount(ring_indices, weights=data_2d[i], minlength=n_rings)
-            out[i] = sums / counts
+        nan_mask = np.isnan(data_2d)
+        clean_data = np.where(nan_mask, 0.0, data_2d)
+        valid_counts = (~nan_mask).astype(clean_data.dtype)
+
+        if sort_order is None:
+            # RING ordering: pixels are already contiguous within each ring.
+            ring_sums = np.add.reduceat(clean_data, ring_boundaries, axis=1)
+            ring_counts = np.add.reduceat(valid_counts, ring_boundaries, axis=1)
+            ring_counts = np.where(ring_counts == 0, np.nan, ring_counts)
+            out = ring_sums / ring_counts
+        else:
+            # NESTED ordering: sequential bincount scatter into small output.
+            out = np.empty((data_2d.shape[0], n_rings), dtype=data_2d.dtype)
+            for i in range(data_2d.shape[0]):
+                sums = np.bincount(ring_indices, weights=clean_data[i], minlength=n_rings)
+                counts_i = np.bincount(ring_indices, weights=valid_counts[i], minlength=n_rings)
+                counts_i = np.where(counts_i == 0, np.nan, counts_i)
+                out[i] = sums / counts_i
 
     return out.reshape(orig_shape[:-1] + (n_rings,))
 

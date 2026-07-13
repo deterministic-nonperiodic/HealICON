@@ -59,9 +59,10 @@ def _interp_regular_block(data_block, lon_coords, lat_coords, target_lon, target
 
 
 class HealpixInterpolator:
-    def __init__(self, nside: int | None = None, use_gpu: bool = False):
+    def __init__(self, nside: int | None = None, use_gpu: bool = False, order: str = 'ring'):
         self.nside = nside
         self.use_gpu = use_gpu
+        self.order = order.lower()
         self._is_setup = False
         self._grid_type = None
         self._lon_name = None
@@ -155,7 +156,7 @@ class HealpixInterpolator:
             raise ValueError(
                 "Could not automatically determine longitude/latitude coordinate names.")
 
-        self._target_lon, self._target_lat = get_healpix_coords(self.nside)
+        self._target_lon, self._target_lat = get_healpix_coords(self.nside, nest=(self.order == 'nested'))
 
         lon_dims = ds[self._lon_name].dims
         lat_dims = ds[self._lat_name].dims
@@ -235,17 +236,54 @@ class HealpixInterpolator:
             self.setup(ds)
 
         if self._grid_type == 'healpix':
+            from .grid import get_healpix_order
+            current_order = get_healpix_order(ds)
             if self.nside == self._current_nside:
-                logger.info(
-                    "Dataset is already on the target HEALPix grid. Ensuring grid mapping metadata.")
-                from .grid import get_healpix_order
-                order = get_healpix_order(ds)
-                return add_healpix_grid_mapping(ds, self.nside, order=order)
+                if self.order == current_order:
+                    logger.info(
+                        "Dataset is already on the target HEALPix grid with correct ordering. Ensuring grid mapping metadata.")
+                    return add_healpix_grid_mapping(ds, self.nside, order=self.order)
+                else:
+                    logger.info(
+                        f"Dataset is HEALPix (nside={self._current_nside}), reordering from {current_order} to {self.order}...")
+                    from .grid import get_cells_dim
+                    cell_dim = get_cells_dim(ds)
+                    out_ds = ds.copy()
+                    target_lon, target_lat = get_healpix_coords(self.nside, nest=(self.order == 'nested'))
+                    out_ds['lon'] = (cell_dim, target_lon)
+                    out_ds['lat'] = (cell_dim, target_lat)
+                    out_ds['lon'].attrs = {"standard_name": "longitude", "units": "degrees_east"}
+                    out_ds['lat'].attrs = {"standard_name": "latitude", "units": "degrees_north"}
+                    for var_name, da in ds.data_vars.items():
+                        if cell_dim in da.dims:
+                            r2n = (self.order == 'nested')
+                            n2r = (self.order == 'ring')
+                            def _reorder_block(arr):
+                                import healpy as hp
+                                return hp.reorder(arr, r2n=r2n, n2r=n2r)
+                            reordered_da = xr.apply_ufunc(
+                                _reorder_block,
+                                da,
+                                input_core_dims=[[cell_dim]],
+                                output_core_dims=[[cell_dim]],
+                                dask="parallelized",
+                                output_dtypes=[da.dtype],
+                                keep_attrs=True
+                            )
+                            out_ds[var_name] = reordered_da
+                    out_ds = add_healpix_grid_mapping(out_ds, self.nside, order=self.order)
+                    history_msg = f"Reordered HEALPix grid (nside={self.nside}, from {current_order} to {self.order}) using HealICON."
+                    out_ds.attrs = append_history(out_ds.attrs, history_msg)
+                    return out_ds
             else:
                 logger.info(
-                    f"Dataset is HEALPix (nside={self._current_nside}), but target is nside={self.nside}. Regrading resolution...")
+                    f"Dataset is HEALPix (nside={self._current_nside}, order={current_order}), but target is nside={self.nside}. Regrading resolution...")
                 from .analysis import regrade_resolution
-                return regrade_resolution(ds, new_nside=self.nside)
+                ds_regraded = regrade_resolution(ds, new_nside=self.nside)
+                if self.order == 'nested':
+                    reorder_interpolator = HealpixInterpolator(nside=self.nside, use_gpu=self.use_gpu, order=self.order)
+                    return reorder_interpolator(ds_regraded)
+                return ds_regraded
 
         # Handle rad/deg conversion on the fly if needed
         lon_units = str(ds[self._lon_name].attrs.get('units', '')).lower()
@@ -315,15 +353,15 @@ class HealpixInterpolator:
             if c in out_ds.coords and c not in [self._lon_name, self._lat_name, "cells"]:
                 out_ds[c].attrs.update(ds[c].attrs)
 
-        out_ds = add_healpix_grid_mapping(out_ds, self.nside, order='ring')
+        out_ds = add_healpix_grid_mapping(out_ds, self.nside, order=self.order)
 
-        history_msg = f"Interpolated to HEALPix grid (nside={self.nside}, scheme=RING) using HealICON."
+        history_msg = f"Interpolated to HEALPix grid (nside={self.nside}, scheme={self.order.upper()}) using HealICON."
         out_ds.attrs = append_history(out_ds.attrs, history_msg)
 
         return out_ds
 
 
-def interpolate_to_healpix(ds: xr.Dataset, nside: int = None, use_gpu: bool = False) -> xr.Dataset:
+def interpolate_to_healpix(ds: xr.Dataset, nside: int = None, use_gpu: bool = False, order: str = 'ring') -> xr.Dataset:
     """
     Interpolate a dataset to a HEALPix grid.
     
@@ -331,9 +369,10 @@ def interpolate_to_healpix(ds: xr.Dataset, nside: int = None, use_gpu: bool = Fa
         ds: Input xarray dataset.
         nside: Target NSIDE for the HEALPix grid.
         use_gpu: Whether to use GPU acceleration for interpolation.
+        order: Target ordering scheme ('ring' or 'nested').
     
     Returns:
         xarray.Dataset on the target HEALPix grid.
     """
-    interpolator = HealpixInterpolator(nside=nside, use_gpu=use_gpu)
+    interpolator = HealpixInterpolator(nside=nside, use_gpu=use_gpu, order=order)
     return interpolator(ds)

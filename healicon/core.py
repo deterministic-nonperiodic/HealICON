@@ -23,7 +23,8 @@ def process_dataset(
         grid_file: Optional[str] = None,
         use_gpu: bool = False,
         interpolator: Optional[HealpixInterpolator] = None,
-        ut_bins: Optional[int] = None
+        ut_bins: Optional[int] = None,
+        order: str = 'ring'
 ):
     """
     Process a dataset, interpolate to HEALPix, and save to output file.
@@ -38,7 +39,7 @@ def process_dataset(
     if ds.attrs.get('Mission') == 'TIMED' and 'SABER' in str(ds.attrs.get('Title', '')):
         logger.info("Detected SABER dataset. Using native parser.")
         from .parsers import parse_saber
-        ds = parse_saber(ds, nside=nside, ut_bins=ut_bins)
+        ds = parse_saber(ds, nside=nside, ut_bins=ut_bins, order=order)
         is_saber = True
 
     if grid_file and not is_saber:
@@ -93,7 +94,7 @@ def process_dataset(
 
     if not is_saber:
         if interpolator is None:
-            interpolator = HealpixInterpolator(nside=nside, use_gpu=use_gpu)
+            interpolator = HealpixInterpolator(nside=nside, use_gpu=use_gpu, order=order)
 
         # Perform interpolation
         out_ds = interpolator(ds)
@@ -127,14 +128,15 @@ def process_file(
         grid_file: Optional[str] = None,
         use_gpu: bool = False,
         interpolator: Optional[HealpixInterpolator] = None,
-        ut_bins: Optional[int] = None
+        ut_bins: Optional[int] = None,
+        order: str = 'ring'
 ):
     """
     Process a single input file, interpolate to HEALPix, and save to output file.
     """
     ds = xr.open_dataset(input_file, chunks='auto')
     process_dataset(ds, input_file, output_file, nside, config_path, grid_file, use_gpu,
-                    interpolator, ut_bins)
+                    interpolator, ut_bins, order)
 
 
 def run_sequential(
@@ -145,7 +147,8 @@ def run_sequential(
         grid_file: Optional[str] = None,
         use_gpu: bool = False,
         ut_bins: Optional[int] = None,
-        cat: bool = False
+        cat: bool = False,
+        order: str = 'ring'
 ):
     """
     Process multiple files. If cat=True, combine them into a single dataset before processing.
@@ -170,7 +173,7 @@ def run_sequential(
         logger.info("Using default Dask threaded scheduler.")
         client = None
 
-    interpolator = HealpixInterpolator(nside=nside, use_gpu=use_gpu)
+    interpolator = HealpixInterpolator(nside=nside, use_gpu=use_gpu, order=order)
 
     if cat:
         # Use open_mfdataset to combine all input files
@@ -211,7 +214,7 @@ def run_sequential(
         os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
 
         process_dataset(ds, "Combined_MFDataset", output_template, nside, config_path, grid_file,
-                        use_gpu, interpolator, ut_bins)
+                        use_gpu, interpolator, ut_bins, order)
     else:
         for input_file in input_files:
             basename = os.path.basename(input_file)
@@ -230,7 +233,7 @@ def run_sequential(
             os.makedirs(os.path.dirname(os.path.abspath(output_file)) or '.', exist_ok=True)
 
             process_file(input_file, output_file, nside, config_path, grid_file, use_gpu,
-                         interpolator=interpolator, ut_bins=ut_bins)
+                         interpolator=interpolator, ut_bins=ut_bins, order=order)
 
     if client:
         client.close()

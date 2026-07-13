@@ -158,8 +158,10 @@ def _load_and_ensure_healpix(ifile, target_nside=None):
               help='Enable GPU acceleration for KDTree interpolation if available.')
 @click.option('--cat', is_flag=True, default=False,
               help='Combine files matching the input pattern into a single dataset before processing (mimics CDO cat).')
+@click.option('--order', type=click.Choice(['RING', 'NESTED', 'ring', 'nested'], case_sensitive=False), default='RING',
+              help='HEALPix ordering scheme for output grid (RING or NESTED). Defaults to RING.')
 @profile_command
-def convert(ifile, ofile, nside, ut_bins, config_path, grid_file, gpu, cat):
+def convert(ifile, ofile, nside, ut_bins, config_path, grid_file, gpu, cat, order):
     """
     Convert model output to HEALPix grid.
 
@@ -170,6 +172,7 @@ def convert(ifile, ofile, nside, ut_bins, config_path, grid_file, gpu, cat):
     config_path: Optional path to YAML configuration file for variable mapping.
     grid_file: Optional path to external grid file containing coordinates.
     gpu: Enable GPU acceleration for KDTree interpolation if available.
+    order: HEALPix ordering scheme for output grid (RING or NESTED).
     """
     _check_io_safety(ifile, ofile)
 
@@ -181,7 +184,8 @@ def convert(ifile, ofile, nside, ut_bins, config_path, grid_file, gpu, cat):
         grid_file=grid_file,
         use_gpu=gpu,
         ut_bins=ut_bins,
-        cat=cat
+        cat=cat,
+        order=order
     )
 
 
@@ -840,7 +844,7 @@ def epflux_cmd(ifile, ofile, mode, time_mean):
 @click.option('--level-range', type=(float, float), default=None,
               metavar='LEV_MIN LEV_MAX',
               help='Restrict vertical range (native units: m for height, hPa for pressure).')
-@click.option('--format', 'fmt', type=click.Choice(['table', 'csv', 'markdown']),
+@click.option('--format', 'fmt', type=click.Choice(['table', 'csv', 'markdown', 'latex']),
               default='table', show_default=True,
               help='Output format.')
 @click.option('--precision', type=int, default=3, show_default=True,
@@ -849,7 +853,7 @@ def epflux_cmd(ifile, ofile, mode, time_mean):
               help='Suppress ANSI colour in terminal output.')
 @click.option('--output', '-o', 'output_file', default=None,
               type=click.Path(dir_okay=False, writable=True),
-              help='Write CSV or Markdown output to this file instead of stdout.')
+              help='Write CSV, Markdown, or LaTeX output to this file instead of stdout.')
 @click.option('--vector', is_flag=True, default=False,
               help='Append a "wind" row with vector correlation statistics '
                    '(Crosby et al. 1993) when both u and v are present.')

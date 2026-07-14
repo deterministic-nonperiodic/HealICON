@@ -934,14 +934,24 @@ def compare(ref, cmp, variables, by_level, select_levels, reduce, lat_range,
         meta['lat'] = f'{lat_range[0]:.1f}°–{lat_range[1]:.1f}°'
 
     actual_level = df.attrs.get('actual_level_range')
+    is_pres = False
+    if not df.empty and 'is_pres' in df.columns:
+        is_pres = bool(df['is_pres'].any())
+
     if actual_level:
         lo, hi = actual_level
-        meta['level'] = (f'{lo / 1000:.1f}–{hi / 1000:.1f} km'
-                         if lo > 1000 else f'{lo:.0f}–{hi:.0f} m')
+        if is_pres:
+            meta['level'] = f'{lo / 100.0:.2g}–{hi / 100.0:.2g} hPa'
+        else:
+            meta['level'] = (f'{lo / 1000:.1f}–{hi / 1000:.1f} km'
+                             if lo > 1000 else f'{lo:.0f}–{hi:.0f} m')
     elif level_range:
         lo, hi = level_range
-        meta['level'] = (f'{lo / 1000:.1f}–{hi / 1000:.1f} km'
-                         if lo > 1000 else f'{lo:.0f}–{hi:.0f} m')
+        if is_pres:
+            meta['level'] = f'{lo / 100.0:.2g}–{hi / 100.0:.2g} hPa'
+        else:
+            meta['level'] = (f'{lo / 1000:.1f}–{hi / 1000:.1f} km'
+                             if lo > 1000 else f'{lo:.0f}–{hi:.0f} m')
 
     print_table(df, fmt=fmt, precision=precision, no_color=no_color, meta=meta,
                 output_file=output_file)

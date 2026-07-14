@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 _RESET = '\033[0m'
 _GREEN = '\033[92m'
 _YELLOW = '\033[93m'
+_ORANGE = '\033[38;5;208m'
 _RED = '\033[91m'
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
@@ -415,6 +416,26 @@ def compare(
         hold the actual coordinate ranges used in the comparison.
     """
     import pandas as pd
+    from .cf_coords import check_convert_units, _find_coordinate
+
+    def _standardize_dataset(ds):
+        rename_dict = {}
+        for standard_name, cf_type in [('lat', 'lat'), ('lon', 'lon'), ('level', 'level')]:
+            try:
+                coord = _find_coordinate(ds, cf_type, raise_notfound=False)
+                if coord is not None and coord.name != standard_name:
+                    if coord.name in ds.dims:
+                        rename_dict[coord.name] = standard_name
+                    elif coord.name in ds.coords:
+                        ds = ds.rename({coord.name: standard_name})
+            except Exception as e:
+                logger.warning(f"Error standardizing coordinate for {cf_type}: {e}")
+        if rename_dict:
+            ds = ds.rename(rename_dict)
+        return check_convert_units(ds)
+
+    ds_ref = _standardize_dataset(ds_ref)
+    ds_cmp = _standardize_dataset(ds_cmp)
 
     ds_ref, ds_cmp = _align_time(ds_ref, ds_cmp)
     variables = _common_variables(ds_ref, ds_cmp, variables)
@@ -987,8 +1008,12 @@ def _print_table(df, precision: int, no_color: bool) -> None:
         r_val = row['r']
         r_str = _fmt_num(r_val, p)
         if do_color and isinstance(r_val, float) and not np.isnan(r_val):
-            code = _GREEN if r_val >= 0.99 else (_YELLOW if r_val >= 0.95 else _RED)
+            code = (_GREEN if r_val >= 0.99
+                    else (_YELLOW if r_val >= 0.95
+                          else (_ORANGE if r_val >= 0.6
+                                else _RED)))
             r_str = f'{code}{r_str}{_RESET}'
+
 
         cells = [
             lev_cell,

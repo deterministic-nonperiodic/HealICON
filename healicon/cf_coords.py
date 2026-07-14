@@ -221,6 +221,12 @@ def check_convert_units(dataset_or_array: xr.Dataset | xr.DataArray) -> xr.Datas
         var = ds[varname]
         var_units = _get_units_str(var)
         expected_unit = expected_units[varname]
+        if varname == 'level':
+            if _is_pressure_coord(varname, ds.coords):
+                expected_unit = 'Pa'
+            elif _is_z(varname, ds.coords):
+                expected_unit = 'm'
+
 
         if not var_units:
             # Range-based unit inference: assign expected unit if values are in bounds.

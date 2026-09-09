@@ -220,19 +220,13 @@ def test_sym_and_asy_sum_to_the_total(westward_dw1_ds):
                            whole['temp_amp_total'].values, atol=1e-3)
 
 
-def test_mode_phase_carries_minus_2m_lambda(westward_dw1_ds):
-    """The rotation in `get_phase` has the wrong sign, and this pins it.
+def test_mode_phase_does_not_depend_on_longitude(westward_dw1_ds):
+    """A filtered mode's phase is a property of the mode, not of where you
+    stand: it must be constant along a latitude circle.
 
-    Rotating by exp(-i*m*phi) is meant to leave a mode phase that does not
-    depend on longitude. For every field the filter actually produces,
-    arg(cos + i sin) already goes as -m*phi, so the rotation doubles the
-    dependence instead of removing it: d(phase)/d(lambda) = -2m. The stored
-    phase is therefore not a Greenwich-referenced mode phase, and a mode is
-    not constant along a latitude circle.
-
-    Changing the sign would make it one, and would also change every file the
-    package has written, so the behaviour is pinned here rather than altered.
-    `test_local_coefficient_is_recovered` covers what callers actually need.
+    The rotation in `get_phase` is there to make that true. Its sign was
+    wrong, so it doubled the longitude term instead of cancelling it and the
+    stored phase carried -2m*lambda.
     """
     ds = westward_dw1_ds
     m = 1
@@ -241,22 +235,22 @@ def test_mode_phase_carries_minus_2m_lambda(westward_dw1_ds):
 
     nside = hp.npix2nside(ds.sizes['cells'])
     theta, phi = hp.pix2ang(nside, np.arange(ds.sizes['cells']))
-    # one ring, not a band: a band repeats longitudes across rings and the
-    # spacing between neighbours is then zero
     ring = theta == theta[np.argmin(np.abs(theta - np.pi / 2))]
-    order = np.argsort(phi[ring])
-    pha = out['temp_pha_total'].isel(period=0, m=0).values[ring][order]
-    lam = phi[ring][order]
+    pha = out['temp_pha_total'].isel(period=0, m=0).values[ring]
 
-    # the median wrapped increment; summing them around a closed circle
-    # cancels the wraps and reports zero whatever the slope really is
-    slope = (np.median(np.angle(np.exp(1j * np.diff(pha))))
-             / np.median(np.diff(lam)))
-    np.testing.assert_allclose(slope, -2 * m, atol=1e-6)
+    concentration = np.abs(np.mean(np.exp(1j * pha)))
+    assert concentration > 0.9999, (
+        f"phase varies along the circle (R={concentration:.4f})")
+
+    # and the slope, which is what the sign error changed
+    order = np.argsort(phi[ring])
+    slope = (np.median(np.angle(np.exp(1j * np.diff(pha[order]))))
+             / np.median(np.diff(phi[ring][order])))
+    assert abs(slope) < 1e-6, f"d(phase)/d(lambda) = {slope:+.3f}, expected 0"
 
 
 def test_local_coefficient_is_recovered(westward_dw1_ds):
-    """What a caller needs: amp * exp(i*(phase + m*lambda)) is the field.
+    """What a caller needs: amp * exp(i*(phase - m*lambda)) is the field.
 
     Checked against the analytic coefficients of the input rather than
     against another output of the same code.
@@ -271,21 +265,79 @@ def test_local_coefficient_is_recovered(westward_dw1_ds):
     pha = out['temp_pha_total'].isel(period=0, m=0).values
     amp = out['temp_amp_total'].isel(period=0, m=0).values
 
-    # the phase of a vanishing amplitude is arbitrary, so judge it only where
-    # there is something to judge
-    lat_shape = 1.0 + 0.6 * np.cos(theta)
-    strong = amp > 0.2 * amp.max()
-
     # signal = A(lat) cos(m*phi + omega*t + p) fits as
     # cos coefficient  A cos(m*phi + p), sin coefficient  -A sin(m*phi + p)
     arg_true = -(m * phi + phase_true)
-    err = np.abs(np.angle(np.exp(1j * (pha + m * phi - arg_true))))[strong]
+    strong = amp > 0.2 * amp.max()      # phase of nothing is arbitrary
+    err = np.abs(np.angle(np.exp(1j * (pha - m * phi - arg_true))))[strong]
     assert err.max() < 1e-6, f"max phase error {err.max():.2e} rad"
 
     # 8% rather than 5%: the directional filter works through spherical
     # harmonics truncated at lmax, which does not reproduce the analytic
     # latitude shape exactly at the few most extreme pixels
+    lat_shape = 1.0 + 0.6 * np.cos(theta)
     np.testing.assert_allclose(amp[strong], (amp_true * lat_shape)[strong],
                                rtol=0.08)
 
-    assert 'exp(+i*m*lambda)' in out['temp_pha_total'].attrs['comment']
+    assert 'exp(-i*m*lambda)' in out['temp_pha_total'].attrs['comment']
+
+
+@pytest.mark.parametrize('method', ['sh', 'fourier'])
+def test_methods_agree_on_the_mode(westward_dw1_ds, method):
+    """The three analyses must return one convention, not three.
+
+    Phase and spatial shape are checked; the absolute amplitude is not, and
+    `test_wavelet_amplitude_normalisation` says why.
+
+    This is what pinned down the sign of the least-squares rotation. The
+    fourier path applies no longitude rotation at all, so it was already
+    right and is the independent reference the other two are held to.
+    """
+    ds = westward_dw1_ds
+    kw = dict(periods_hours=[24.0], m_filters=[1], time_dim='lst')
+    ls = compute_leastsquares_tidal_analysis(ds, 'temp', **kw)
+    other = compute_wavelet_tidal_analysis(
+        ds, 'temp', dj=0.1, temporal_mean=True, method=method, **kw)
+
+    a_ls = ls['temp_amp_sym'].isel(period=0, m=0).values
+    a_other = other['temp_amp_sym'].isel(period=0, m=0).values
+    strong = a_ls > 0.2 * a_ls.max()
+
+    dp = np.angle(np.exp(1j * (other['temp_pha_sym'].isel(period=0, m=0).values
+                               - ls['temp_pha_sym'].isel(period=0, m=0).values)))
+    assert np.abs(dp[strong]).max() < np.deg2rad(10), (
+        f"{method} phase differs from ls by up to "
+        f"{np.rad2deg(np.abs(dp[strong]).max()):.1f} deg")
+
+    # the same field up to one scale factor: the ratio is flat even though
+    # its value is not 1
+    ratio = a_other[strong] / a_ls[strong]
+    assert ratio.std() / ratio.mean() < 0.05, (
+        f"{method} amplitude differs in shape, not only in scale "
+        f"(ratio {ratio.min():.3f}-{ratio.max():.3f})")
+
+
+@pytest.mark.xfail(strict=True,
+                   reason="wavelet amplitude is ~0.59 of the least-squares "
+                          "amplitude; normalisation of the demodulated "
+                          "envelope, not a phase convention")
+def test_wavelet_amplitude_normalisation(westward_dw1_ds):
+    """Both wavelet paths return about 59% of the amplitude least squares
+    recovers, and least squares is the one that matches the analytic input
+    (`test_westward_tide_is_recovered`).
+
+    The two share `_demodulate_mode`, so they are wrong together and nothing
+    compared them. Recorded as a known failure rather than fixed here: it
+    needs the envelope normalisation worked through, and it does not touch
+    the phase conventions this module was corrected for.
+    """
+    ds = westward_dw1_ds
+    kw = dict(periods_hours=[24.0], m_filters=[1], time_dim='lst')
+    ls = compute_leastsquares_tidal_analysis(ds, 'temp', **kw)
+    wav = compute_wavelet_tidal_analysis(
+        ds, 'temp', dj=0.1, temporal_mean=True, method='sh', **kw)
+
+    a_ls = ls['temp_amp_sym'].isel(period=0, m=0).values
+    a_wav = wav['temp_amp_sym'].isel(period=0, m=0).values
+    strong = a_ls > 0.2 * a_ls.max()
+    np.testing.assert_allclose(a_wav[strong], a_ls[strong], rtol=0.1)

@@ -152,8 +152,12 @@ def _extract_spatial_tide_components(da_cos: xr.DataArray, da_sin: xr.DataArray,
         def get_phase(c, s_coef, target_m):
             if target_m is None:
                 return np.arctan2(s_coef, c)
-            real_part = c * np.cos(target_m * phi_da) + s_coef * np.sin(target_m * phi_da)
-            imag_part = s_coef * np.cos(target_m * phi_da) - c * np.sin(target_m * phi_da)
+            # rotate by exp(+i*m*phi). The filtered coefficients have
+            # arg(c + i*s) = -m*phi + const, so this is the sign that cancels
+            # the longitude term and leaves the mode phase; exp(-i*m*phi)
+            # doubles it instead.
+            real_part = c * np.cos(target_m * phi_da) - s_coef * np.sin(target_m * phi_da)
+            imag_part = s_coef * np.cos(target_m * phi_da) + c * np.sin(target_m * phi_da)
             return np.arctan2(imag_part, real_part)
 
         if decompose_sym_asy:
@@ -309,15 +313,13 @@ def compute_leastsquares_tidal_analysis(ds: xr.Dataset, var_name: str, periods_h
     # not recoverable from the numbers, and getting it wrong shifts every mode
     # by m*lambda -- about an hour at mid-latitudes, small enough to read as
     # physics. It is therefore written down.
-    phase_ref = ('Phase of the zonal wavenumber m. The coefficients are '
-                 'rotated by exp(-i*m*phi) before the argument is taken, which '
-                 'does not cancel the longitude dependence of a filtered mode '
-                 'but doubles it: d(phase)/d(lambda) = -2m. To recover the '
-                 'local coefficient at longitude lambda, multiply by '
-                 'exp(+i*m*lambda). See test_mode_phase_carries_minus_2m_lambda.'
+    phase_ref = ('Phase of the zonal wavenumber m, with the longitude term '
+                 'divided out: constant along a latitude circle. For the local '
+                 'coefficient at longitude lambda, multiply by '
+                 'exp(-i*m*lambda).'
                  if m_filters is not None else
                  'Phase referenced to the first sample of the time series; no '
-                 'longitude rotation is applied.')
+                 'longitude rotation is applied, so this is already local.')
     comp_types = {'sym': 'Symmetric', 'asy': 'Antisymmetric', 'total': 'Total'}
     for k, combined in spatial_res.items():
         combined = combined.assign_coords({cell_dim: ds[cell_dim]})
@@ -423,6 +425,13 @@ def _demodulate_mode(
     S_mean = S_t.mean(axis=0)
 
     if lon_phase is not None:
+        # exp(-i*lon_phase), the opposite sign to `get_phase` in the
+        # least-squares path, and deliberately so: `pha_total` above has
+        # already *added* the longitude term, so the intermediate carries
+        # +m*phi here where the least-squares coefficients carry -m*phi.
+        # Opposite intermediates need opposite rotations to reach the same
+        # longitude-independent mode phase, which
+        # `test_methods_agree_on_the_mode` checks.
         real_part = C_mean * np.cos(lon_phase) + S_mean * np.sin(lon_phase)
         imag_part = S_mean * np.cos(lon_phase) - C_mean * np.sin(lon_phase)
     else:
@@ -708,11 +717,14 @@ def _wavelet_fourier_analysis_block(
                                 want_phase=('pha' in comp), lon_phase=None,
                             )
                     else:
-                        # total field: legacy fallback only produces sym/asy —
-                        # use sym as a proxy for the total field
-                        sa = 'sym'
-                        amp_arr = ds_w[f"amp_sym_{direction}_{best_p_str}"].values
-                        pha_arr = ds_w[f"pha_sym_{direction}_{best_p_str}"].values
+                        # the wavelet stage only produces sym/asy, so the total
+                        # is their complex sum. Taking sym alone, as this did,
+                        # silently drops the antisymmetric half of the field.
+                        z = (ds_w[f"amp_sym_{direction}_{best_p_str}"].values
+                             * np.exp(1j * ds_w[f"pha_sym_{direction}_{best_p_str}"].values)
+                             + ds_w[f"amp_asy_{direction}_{best_p_str}"].values
+                             * np.exp(1j * ds_w[f"pha_asy_{direction}_{best_p_str}"].values))
+                        amp_arr, pha_arr = np.abs(z), np.angle(z)
                         if temporal_mean:
                             arr = _demodulate_mode(
                                 amp_arr, pha_arr,

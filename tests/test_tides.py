@@ -341,3 +341,36 @@ def test_wavelet_amplitude_normalisation(westward_dw1_ds):
     a_wav = wav['temp_amp_sym'].isel(period=0, m=0).values
     strong = a_ls > 0.2 * a_ls.max()
     np.testing.assert_allclose(a_wav[strong], a_ls[strong], rtol=0.1)
+
+
+def test_zonal_mean_phase_survives_the_plotting_path(westward_dw1_ds):
+    """`visualize.tides` averages the phase around a latitude circle.
+
+    It does so circularly, via cos/sin, which is correct arithmetic but only
+    means anything if the phase is a mode phase. Under the previous sign the
+    stored phase went as -2m*lambda, so the resultant of that average was
+    zero to machine precision and the plotted phase was the arctan2 of two
+    cancelled sums -- noise, for every m != 0. This is the property that
+    makes those plots readable, so it is pinned here.
+    """
+    ds = westward_dw1_ds
+    m, phase_true = 1, 0.5
+    out = compute_leastsquares_tidal_analysis(
+        ds, 'temp', [24.0], [m], time_dim='lst', decompose_sym_asy=False)
+
+    nside = hp.npix2nside(ds.sizes['cells'])
+    theta, phi = hp.pix2ang(nside, np.arange(ds.sizes['cells']))
+    ring = theta == theta[np.argmin(np.abs(theta - np.pi / 2))]
+    pha = out['temp_pha_total'].isel(period=0, m=0).values[ring]
+
+    resultant = np.mean(np.exp(1j * pha))
+    assert np.abs(resultant) > 0.9999, (
+        f"zonal mean of the phase cancels (R={np.abs(resultant):.4f})")
+
+    # and it is the right phase: the analytic argument is -(m*phi + p),
+    # which the rotation reduces to -p
+    assert abs(np.angle(np.exp(1j * (np.angle(resultant) + phase_true)))) < 1e-6
+
+    # the previous sign, for contrast
+    old = pha - 2 * m * phi[ring]
+    assert np.abs(np.mean(np.exp(1j * old))) < 1e-3

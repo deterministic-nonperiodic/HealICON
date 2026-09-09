@@ -113,7 +113,8 @@ def _directional_filter_block(a_block, b_block, target_m, lmax, is_nested):
 def _extract_spatial_tide_components(da_cos: xr.DataArray, da_sin: xr.DataArray,
                                      m_filters: list[int] | None, cell_dim: str,
                                      sym_idx_da: xr.DataArray, phi_da: xr.DataArray,
-                                     apply_filter_fn) -> dict:
+                                     apply_filter_fn,
+                                     decompose_sym_asy: bool = True) -> dict:
     """
     Decomposes the cosine and sine tidal coefficients into symmetric/antisymmetric 
     amplitudes and phases, optionally filtering by specific wavenumbers.
@@ -126,12 +127,18 @@ def _extract_spatial_tide_components(da_cos: xr.DataArray, da_sin: xr.DataArray,
         sym_idx_da: Array of symmetric pixel indices
         phi_da: Array of longitudinal angles
         apply_filter_fn: Function to apply filters to the data
+        decompose_sym_asy: Split each field into its parts symmetric and
+            antisymmetric about the equator. When False the field is returned
+            whole, as 'amp_total'/'pha_total'.
 
     Returns:
-        Dictionary containing symmetric and antisymmetric amplitudes and phases
+        Dictionary of amplitudes and phases, keyed 'amp_sym'/'pha_sym' and
+        'amp_asy'/'pha_asy', or 'amp_total'/'pha_total' when the
+        decomposition is switched off.
     """
     ms = m_filters if m_filters is not None else [None]
-    results = {'amp_sym': [], 'pha_sym': [], 'amp_asy': [], 'pha_asy': []}
+    results = ({'amp_sym': [], 'pha_sym': [], 'amp_asy': [], 'pha_asy': []}
+               if decompose_sym_asy else {'amp_total': [], 'pha_total': []})
 
     for m in ms:
         cos_m, sin_m = apply_filter_fn(da_cos, da_sin, m) if m is not None else (da_cos, da_sin)
@@ -149,12 +156,20 @@ def _extract_spatial_tide_components(da_cos: xr.DataArray, da_sin: xr.DataArray,
             imag_part = s_coef * np.cos(target_m * phi_da) - c * np.sin(target_m * phi_da)
             return np.arctan2(imag_part, real_part)
 
-        res_m = {
-            'amp_sym': np.sqrt(cos_sym ** 2 + sin_sym ** 2),
-            'pha_sym': get_phase(cos_sym, sin_sym, m),
-            'amp_asy': np.sqrt(cos_asy ** 2 + sin_asy ** 2),
-            'pha_asy': get_phase(cos_asy, sin_asy, m)
-        }
+        if decompose_sym_asy:
+            res_m = {
+                'amp_sym': np.sqrt(cos_sym ** 2 + sin_sym ** 2),
+                'pha_sym': get_phase(cos_sym, sin_sym, m),
+                'amp_asy': np.sqrt(cos_asy ** 2 + sin_asy ** 2),
+                'pha_asy': get_phase(cos_asy, sin_asy, m)
+            }
+        else:
+            # the undecomposed field: sym and asy sum back to it by
+            # construction, so this is the same quantity without the split
+            res_m = {
+                'amp_total': np.sqrt(cos_m ** 2 + sin_m ** 2),
+                'pha_total': get_phase(cos_m, sin_m, m)
+            }
 
         if m is not None:
             res_m = {k: v.expand_dims(m=[m]) for k, v in res_m.items()}
@@ -169,7 +184,8 @@ def _extract_spatial_tide_components(da_cos: xr.DataArray, da_sin: xr.DataArray,
 
 def compute_leastsquares_tidal_analysis(ds: xr.Dataset, var_name: str, periods_hours: list[float],
                                         m_filters: list[int] | None = None, lmax: int | None = None,
-                                        time_dim: str = 'time') -> xr.Dataset:
+                                        time_dim: str = 'time',
+                                        decompose_sym_asy: bool = True) -> xr.Dataset:
     """
     Performs a full tidal analysis on a HEALPix dataset over time.
     
@@ -197,6 +213,10 @@ def compute_leastsquares_tidal_analysis(ds: xr.Dataset, var_name: str, periods_h
             Defaults to None.
         time_dim (str, optional): Name of the time or local solar time dimension. 
             Defaults to 'time'.
+        decompose_sym_asy (bool, optional): Split each field into its parts
+            symmetric and antisymmetric about the equator. When False the
+            field is returned whole, as '{var}_amp_total'/'{var}_pha_total'.
+            Defaults to True.
 
     Returns:
         xr.Dataset: A new dataset containing the tidal components. 
@@ -272,7 +292,8 @@ def compute_leastsquares_tidal_analysis(ds: xr.Dataset, var_name: str, periods_h
     da_sin = xr.dot(ds[var_name], M_B, dims=[time_dim])
 
     spatial_res = _extract_spatial_tide_components(
-        da_cos, da_sin, m_filters, cell_dim, sym_idx_da, phi_da, apply_directional_filter
+        da_cos, da_sin, m_filters, cell_dim, sym_idx_da, phi_da,
+        apply_directional_filter, decompose_sym_asy=decompose_sym_asy
     )
 
     out_ds = xr.Dataset(coords={c: ds.coords[c] for c in ds.coords if c != time_dim})
@@ -284,9 +305,23 @@ def compute_leastsquares_tidal_analysis(ds: xr.Dataset, var_name: str, periods_h
         if len(ds[v].dims) == 0:
             out_ds[v] = ds[v]
 
+    # Whether the phase is referenced to Greenwich or to the time origin is
+    # not recoverable from the numbers, and getting it wrong shifts every mode
+    # by m*lambda -- about an hour at mid-latitudes, small enough to read as
+    # physics. It is therefore written down.
+    phase_ref = ('Phase of the zonal wavenumber m. The coefficients are '
+                 'rotated by exp(-i*m*phi) before the argument is taken, which '
+                 'does not cancel the longitude dependence of a filtered mode '
+                 'but doubles it: d(phase)/d(lambda) = -2m. To recover the '
+                 'local coefficient at longitude lambda, multiply by '
+                 'exp(+i*m*lambda). See test_mode_phase_carries_minus_2m_lambda.'
+                 if m_filters is not None else
+                 'Phase referenced to the first sample of the time series; no '
+                 'longitude rotation is applied.')
+    comp_types = {'sym': 'Symmetric', 'asy': 'Antisymmetric', 'total': 'Total'}
     for k, combined in spatial_res.items():
         combined = combined.assign_coords({cell_dim: ds[cell_dim]})
-        comp_type = 'Symmetric' if 'sym' in k else 'Antisymmetric'
+        comp_type = comp_types[k.split('_')[1]]
         metric = 'Amplitude' if 'amp' in k else 'Phase'
         units = var_units if 'amp' in k else 'rad'
         combined.attrs = {
@@ -294,6 +329,13 @@ def compute_leastsquares_tidal_analysis(ds: xr.Dataset, var_name: str, periods_h
             'grid_mapping': 'healpix',
             'long_name': f'{comp_type} {metric}'
         }
+        if 'pha' in k:
+            combined.attrs['comment'] = phase_ref
+        elif decompose_sym_asy:
+            combined.attrs['comment'] = (
+                'Symmetric and antisymmetric parts sum to the field as complex '
+                'numbers: A = amp_sym*exp(i*pha_sym) + amp_asy*exp(i*pha_asy). '
+                'Neither part alone is the field.')
         out_ds[f'{var_name}_{k}'] = combined
 
     # Add metadata for the output dataset

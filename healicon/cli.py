@@ -585,9 +585,10 @@ def helmholtz(ifile, ofile, u_var, v_var, lmax, psi, chi):
               help='Average wavelet/fourier amplitudes over time (comparable to LS).')
 @click.option('--dj', type=float, default=0.1, show_default=True,
               help='Spacing between discrete wavelet scales (for fourier and wavelet methods).')
-@click.option('--no-sym-asy', 'decompose_sym_asy', is_flag=True, default=True,
-              flag_value=False,
-              help='Skip symmetric/antisymmetric decomposition; output the total tidal field directly.')
+@click.option('--sym-asy/--no-sym-asy', 'decompose_sym_asy', default=True,
+              show_default=True,
+              help='Split the field into parts symmetric and antisymmetric about '
+                   'the equator. --no-sym-asy outputs the total tidal field directly.')
 @profile_command
 def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim, method,
           temporal_mean, dj, decompose_sym_asy):
@@ -665,7 +666,8 @@ def tides(ifile, ofile, var_name, periods_str, m_str, modes_str, lmax, time_dim,
         from .analysis import compute_leastsquares_tidal_analysis
         out_ds = compute_leastsquares_tidal_analysis(
             ds, var_name=var_name, periods_hours=periods_hours,
-            m_filters=m_filters, lmax=lmax, time_dim=time_dim
+            m_filters=m_filters, lmax=lmax, time_dim=time_dim,
+            decompose_sym_asy=decompose_sym_asy
         )
     elif method in ('sh', 'fourier'):
         from .analysis import compute_wavelet_tidal_analysis

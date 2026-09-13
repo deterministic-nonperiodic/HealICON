@@ -783,9 +783,11 @@ def plot(ifile, plot_type, var_name, x_dim, y_dim, target_height, lat, lon, out_
 @cli.command('ep-flux')
 @click.argument('ifile', type=click.Path(exists=True))
 @click.argument('ofile')
-@click.option('--mode', type=click.Choice(['auto', 'full', 'qg']), default='auto',
+@click.option('--mode', type=click.Choice(['auto', 'full', 'tem', 'qg']), default='auto',
               show_default=True,
-              help='EP flux mode: full TEM, QG approximation, or auto (full when w is present).')
+              help='EP flux mode: full TEM; tem (f_hat and shear, no vertical eddy flux); '
+                   'qg (strict quasi-geostrophic); auto picks full when w is present '
+                   'and tem otherwise.')
 @click.option('--time-mean', is_flag=True, default=False,
               help='Average over the time dimension before saving.')
 @profile_command
@@ -811,7 +813,7 @@ def ep_flux_cmd(ifile, ofile, mode, time_mean):
 @cli.command('epflux')
 @click.argument('ifile', type=click.Path(exists=True))
 @click.argument('ofile')
-@click.option('--mode', type=click.Choice(['auto', 'full', 'qg']), default='auto',
+@click.option('--mode', type=click.Choice(['auto', 'full', 'tem', 'qg']), default='auto',
               show_default=True,
               help='EP flux mode: full TEM, QG approximation, or auto.')
 @click.option('--time-mean', is_flag=True, default=False,

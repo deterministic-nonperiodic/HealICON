@@ -132,3 +132,37 @@ def test_zonal_mean_unstructured():
                 assert np.allclose(temp_nan_vals[i], lat_val, atol=10.0)
             elif lat_val < -10.0:
                 assert np.isnan(temp_nan_vals[i])
+
+
+@pytest.mark.parametrize("n_time", [12, 48, 108, 192])
+def test_cells_dim_not_taken_from_a_time_axis(n_time):
+    """A lat/lon dataset is not HEALPix, whatever its record length.
+
+    ``12 * nside**2`` is 12, 48, 108, 192, ... and those are ordinary lengths
+    for a time axis: 48 six-hourly steps is twelve days, 12 is a year of
+    months. Identifying the cells dimension by size alone therefore picked
+    ``time``, and the failure surfaced much later inside ``zonal_mean`` as an
+    apply_ufunc complaint about ``lat`` -- with no mention of time.
+    """
+    from healicon.grid import get_cells_dim
+
+    ds = xr.Dataset(
+        {"u": (("time", "lat", "lon"), np.zeros((n_time, 16, 32)))},
+        coords={"time": np.arange(n_time),
+                "lat": np.linspace(-87, 87, 16),
+                "lon": np.linspace(0, 348.75, 32)},
+    )
+    ds.lat.attrs.update(standard_name="latitude", units="degrees_north")
+    ds.lon.attrs.update(standard_name="longitude", units="degrees_east")
+
+    with pytest.raises(ValueError, match="HEALPix spatial dimension"):
+        get_cells_dim(ds)
+
+
+def test_cells_dim_still_found_for_a_real_healpix_dataset():
+    """The guard above must not cost the case it is guarding."""
+    from healicon.grid import get_cells_dim
+
+    ds = create_healpix_dataset(nside=4)
+    ds["u"] = (("cells",), np.zeros(hp.nside2npix(4)))
+    assert get_cells_dim(ds) == "cells"

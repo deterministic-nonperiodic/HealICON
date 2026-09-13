@@ -897,6 +897,18 @@ def compute_eddy_fluxes(
         upwp_zm = _zonal_mean(xr.Dataset({'upwp': u_prime * w_prime}))['upwp']
         upwp_zm.attrs = {'long_name': "Zonal-mean eddy vertical flux [u'w']", 'units': 'm2 s-2'}
         out['upwp_zm'] = upwp_zm
+
+    # A supplied omega is used as given rather than derived from w. The
+    # hydrostatic conversion below assumes constant gravity, which is 2.1% high
+    # at 70 km and 2.8% at 90 km; a caller working in the middle atmosphere can
+    # compute omega with g(z) and pass it here instead.
+    if 'omega' in ds:
+        om_zm_px = _broadcast_to_pixels(ds_zm['omega'])
+        om_prime = ds['omega'] - om_zm_px
+        upom_zm = _zonal_mean(xr.Dataset({'upom': u_prime * om_prime}))['upom']
+        upom_zm.attrs = {'long_name': "Zonal-mean eddy vertical flux [u'omega']",
+                         'units': 'Pa m s-2'}
+        out['upomega_zm'] = upom_zm
         wptp_zm = _zonal_mean(xr.Dataset({'wptp': w_prime * theta_prime}))['wptp']
         wptp_zm.attrs = {'long_name': "Zonal-mean eddy vertical heat flux [w'theta']",
                          'units': 'K m s-1'}
@@ -1009,13 +1021,29 @@ def compute_ep_flux(eddy_ds, mode="auto"):
 
     QG limit (mode='qg'): Ψ = 0, f̂ → f.
 
-    mode='auto' uses 'full' when [u'w'] is available, 'qg' otherwise.
+    mode='tem' keeps f̂ and the ū-shear term but sets [u'ω'] = [u'w'] = 0.
+    Those two approximations are independent and were previously bundled:
+    f̂ = f + ζ̄ is built from ū alone, so requiring w to obtain it charged a
+    field the caller may not have for a correction that does not need it. In a
+    polar-night jet ζ̄ reaches ~13% of f, so 'qg' discards a larger term than
+    the vertical eddy flux it is usually invoked to avoid.
+
+    mode='auto' uses 'full' when [u'w'] is available and 'tem' otherwise, so a
+    dataset without w still gets the vorticity correction. Ask for 'qg'
+    explicitly to get the strict quasi-geostrophic limit.
     """
-    has_upwp = 'upwp_zm' in eddy_ds
+    has_upwp = 'upwp_zm' in eddy_ds or 'upomega_zm' in eddy_ds
     if mode == 'full' and not has_upwp:
         raise ValueError("mode='full' requires 'upwp_zm' (needs w in the input).")
-    use_full = has_upwp if mode == 'auto' else (mode == 'full')
-    mode_used = 'full' if use_full else 'qg'
+    if mode == 'auto':
+        mode_used = 'full' if has_upwp else 'tem'
+    else:
+        mode_used = mode
+    # f̂ and the ū-shear term need only u_zm; [u'ω] needs w.
+    use_full = mode_used in ('full', 'tem')
+    use_upwp = mode_used == 'full'
+    if mode_used == 'tem':
+        logger.info("f_hat and the shear term retained; [u'omega] dropped (no w).")
 
     alt_name = _find_alt_name(eddy_ds)
     is_pres = _is_pressure_coord(alt_name, eddy_ds)
@@ -1056,8 +1084,12 @@ def compute_ep_flux(eddy_ds, mode="auto"):
 
         if is_pres:
             # isobaric: no rho0 prefactor; vertical eddy flux is [u'omega]
-            upwp = eddy_ds['upwp_zm']
-            upomega = -rho0 * _G * upwp  # w -> omega (hydrostatic)
+            if use_upwp and 'upomega_zm' in eddy_ds:
+                upomega = eddy_ds['upomega_zm']
+                logger.info("[u'omega]: using the supplied omega, not -rho0*g*[u'w].")
+            else:
+                upwp = eddy_ds['upwp_zm'] if use_upwp else xr.zeros_like(upvp)
+                upomega = -rho0 * _G * upwp  # w -> omega (hydrostatic, constant g)
             F_phi = _A * cos_phi * (u_shear * vptp / theta_s - upvp)
             F_vert = _A * cos_phi * (f_hat * vptp / theta_s - upomega)
         else:
@@ -1065,7 +1097,7 @@ def compute_ep_flux(eddy_ds, mode="auto"):
             # Ψ uses the full θ-gradient (both θ_z and θ_φ/a); when [w'θ'] is
             # absent (no w in input) wptp is zero and Ψ → a cosφ ρ₀[v'θ']/θ_z,
             # recovering the AHL87 formula exactly.
-            upwp = eddy_ds['upwp_zm']
+            upwp = eddy_ds['upwp_zm'] if use_upwp else xr.zeros_like(upvp)
             wptp = eddy_ds.get('wptp_zm', xr.zeros_like(vptp))
             Psi = _theta_stream_function(
                 rho0, vptp, wptp, eddy_ds['theta_zm'], alt_name, cos_phi
@@ -1235,7 +1267,7 @@ def _reorder_output_dims(ds: xr.Dataset) -> xr.Dataset:
 
 def eliassen_palm(
         ds: xr.Dataset,
-        mode: Literal['auto', 'full', 'qg'] = 'auto',
+        mode: Literal['auto', 'full', 'tem', 'qg'] = 'auto',
         time_mean: bool = False,
         vertical: Literal['auto', 'native'] = 'auto',
         lmax: int | None = None,
@@ -1252,7 +1284,7 @@ def eliassen_palm(
 
     Parameters
     ----------
-    mode : {'auto', 'full', 'qg'}
+    mode : {'auto', 'full', 'tem', 'qg'}
         'auto': full TEM when [u'w'] is available, QG otherwise.
         'full': full primitive-equation TEM (requires w in input).
         'qg':  quasi-geostrophic limit (no Ψ stream function correction).

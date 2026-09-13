@@ -202,10 +202,30 @@ def get_cells_dim(ds: xr.Dataset | xr.DataArray) -> str:
     if fallback is not None:
         return fallback
 
-    # Pass 3: scan every dimension for a valid HEALPix pixel count.
-    # This catches CDO-produced files that use non-standard dim names
-    # (e.g. a future CDO version that changes the naming convention).
+    # Pass 3: scan for a valid HEALPix pixel count, but only among dimensions
+    # that could plausibly be spatial.
+    #
+    # Size alone is not evidence. 12*nside**2 is 12, 48, 108, 192, 768, ... and
+    # those are ordinary lengths for other axes: 48 timesteps is twelve days at
+    # six-hourly, 12 is a year of months. Scanning every dimension therefore
+    # identified `time` as the HEALPix cells dimension whenever a record
+    # happened to be that long, and the zonal mean then tried to average over
+    # time while emitting a `lat` dimension the input already had -- which is
+    # where it failed, several calls later and with no mention of `time`.
+    # Dimensions carrying a recognised longitude, latitude or vertical
+    # coordinate are excluded, as is any dimension named like a time axis.
+    from .cf_coords import _find_coordinate
+    excluded: set[str] = set()
+    for _cf_type in ('lon', 'lat', 'level'):
+        _c = _find_coordinate(ds, _cf_type, raise_notfound=False)
+        if _c is not None:
+            excluded.update(str(d) for d in _c.dims)
+    excluded.update(str(d) for d in ds.dims
+                    if str(d).lower() in ('time', 't', 'date', 'valid_time'))
+
     for dim, size in ds.sizes.items():
+        if str(dim) in excluded:
+            continue
         if _is_valid_npix(size):
             return str(dim)
 

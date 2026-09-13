@@ -603,6 +603,80 @@ def _resolve_scale_height(ds_zm: xr.Dataset) -> xr.DataArray:
     return xr.DataArray(7000.0, attrs={'long_name': 'Scale height', 'units': 'm'})
 
 
+_RE = 6.371e6  # m            Earth mean radius (for g(z))
+
+
+def _resolve_gravity(ds_zm: xr.Dataset) -> xr.DataArray:
+    """Gravity as a function of height, g(z) = g0 (RE/(RE+z))^2 [m s-2].
+
+    Standard gravity is 2.1% too large at 70 km and 2.8% at 90, and the error
+    runs one way through every hydrostatic conversion, so in the middle
+    atmosphere it biases the vertical eddy flux and with it F_z and its
+    divergence. This resolves a height to evaluate g at, in descending order of
+    directness:
+
+    1. a geometric or geopotential height already in the dataset, converting
+       geopotential to geometric where it is the latter (1.4% at 90 km, the
+       same sign again);
+    2. the altitude coordinate itself, when it is a height rather than a
+       pressure;
+    3. log-pressure height from the resolved scale height, which is what the
+       isobaric path has to fall back on.
+
+    Returns standard gravity unchanged if no height can be resolved, so the
+    behaviour without one is exactly what it was.
+    """
+    # Geopotential height and geometric height differ by 1.4% at 90 km, so the
+    # two families are kept apart by name rather than guessed at: 'z', 'geopot'
+    # and 'zg' are geopotential and are converted, while a name that says
+    # geometric is taken at its word.
+    _GEOPOTENTIAL = ('z', 'geopot', 'zg', 'geopotential_height')
+    _GEOMETRIC = ('z_geom', 'altitude', 'height_geom')
+
+    z = None
+    for cand in _GEOMETRIC:
+        if cand in ds_zm:
+            z = ds_zm[cand]
+            logger.debug(f"g(z): geometric height from '{cand}'.")
+            break
+    if z is None:
+        for cand in _GEOPOTENTIAL:
+            if cand in ds_zm:
+                g_in = ds_zm[cand]
+                units = str(g_in.attrs.get('units', '')).lower()
+                zg = g_in / _G if ('m2' in units or 'm**2' in units) else g_in
+                z = _RE * zg / (_RE - zg)
+                logger.debug(f"g(z): geopotential height from '{cand}'.")
+                break
+
+    if z is None:
+        try:
+            alt_name = _find_alt_name(ds_zm)
+        except Exception:
+            logger.debug("g(z): no vertical coordinate; using standard gravity.")
+            return xr.DataArray(_G, attrs={'long_name': 'Gravity',
+                                           'units': 'm s-2'})
+        if not _is_pressure_coord(alt_name, ds_zm):
+            z = ds_zm[alt_name]
+            logger.debug(f"g(z): height from the '{alt_name}' coordinate.")
+        else:
+            try:
+                H = _resolve_scale_height(ds_zm)
+                p = ds_zm[alt_name]
+                p0 = float(np.nanmax(np.asarray(p, dtype=float)))
+                z = -H * np.log(p / p0)
+                logger.debug("g(z): log-pressure height from the scale height.")
+            except Exception:
+                logger.debug("g(z): no height resolvable; using standard gravity.")
+                return xr.DataArray(_G, attrs={'long_name': 'Gravity',
+                                               'units': 'm s-2'})
+
+    g = _G * (_RE / (_RE + z)) ** 2
+    g = xr.where(np.isfinite(g), g, _G)
+    g.attrs = {'long_name': 'Gravity at height', 'units': 'm s-2'}
+    return g
+
+
 def _resolve_density(ds_zm: xr.Dataset, H: xr.DataArray) -> xr.DataArray:
     """Return ρ₀(z, φ) in kg m⁻³.
 
@@ -1089,7 +1163,8 @@ def compute_ep_flux(eddy_ds, mode="auto"):
                 logger.info("[u'omega]: using the supplied omega, not -rho0*g*[u'w].")
             else:
                 upwp = eddy_ds['upwp_zm'] if use_upwp else xr.zeros_like(upvp)
-                upomega = -rho0 * _G * upwp  # w -> omega (hydrostatic, constant g)
+                g_z = _resolve_gravity(eddy_ds)
+                upomega = -rho0 * g_z * upwp  # w -> omega (hydrostatic, g(z))
             F_phi = _A * cos_phi * (u_shear * vptp / theta_s - upvp)
             F_vert = _A * cos_phi * (f_hat * vptp / theta_s - upomega)
         else:

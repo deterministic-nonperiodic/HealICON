@@ -225,3 +225,34 @@ class TestUnitConversionInvariance:
             rtol=1e-4, atol=1e-30,
             err_msg="div_F differs between Pa and hPa inputs",
         )
+
+
+def test_gravity_falls_with_height():
+    """g(z) must decline, and match the closed form where a height is given."""
+    import numpy as np
+    import xarray as xr
+    from healicon.analysis.ep_flux import _resolve_gravity, _G, _RE
+
+    z = np.array([0.0, 30e3, 70e3, 90e3])
+    ds = xr.Dataset({"z_geom": ("height", z)},
+                    coords={"height": z})
+    ds.height.attrs.update(standard_name="height", units="m")
+    g = np.asarray(_resolve_gravity(ds))
+
+    expect = _G * (_RE / (_RE + z)) ** 2
+    assert np.allclose(g, expect, rtol=1e-12)
+    assert g[0] > g[-1]
+    # the corrections the constant hides
+    assert 0.020 < 1 - g[2] / _G < 0.022          # ~2.1% at 70 km
+    assert 0.027 < 1 - g[3] / _G < 0.029          # ~2.8% at 90 km
+
+
+def test_gravity_falls_back_to_standard_without_a_height():
+    """No height resolvable: behaviour is exactly what it was before."""
+    import numpy as np
+    import xarray as xr
+    from healicon.analysis.ep_flux import _resolve_gravity, _G
+
+    ds = xr.Dataset({"u_zm": ("lat", np.zeros(8))},
+                    coords={"lat": np.linspace(-80, 80, 8)})
+    assert float(np.asarray(_resolve_gravity(ds))) == _G

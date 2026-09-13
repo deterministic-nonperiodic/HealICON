@@ -1,0 +1,24 @@
+{
+  "upload_type": "software",
+  "title": "HealICON: spectral and wave analysis of ICON output on the HEALPix grid",
+  "description": "<p>HealICON is a command-line tool for wave and tidal analysis of global atmospheric simulations. It uses HEALPix as the base grid for interpolation, providing an equal-area environment for mapping tidal harmonics and gravity-wave spectra across the globe.</p><p>This release is the version used for the global tidal decomposition reported in Morfa et al., <em>Whole-atmosphere modeling with regional refinement: strengths and drawbacks assessed with observations from the VortEx campaign</em>, Journal of Advances in Modeling Earth Systems. The tidal analysis follows Yamazaki (2023).</p>",
+  "creators": [
+    {
+      "name": "Morfa, Yanmichel A.",
+      "affiliation": "Leibniz-Institut für Atmosphärenphysik e.V. an der Universität Rostock, Germany"
+    }
+  ],
+  "license": "mit",
+  "access_right": "open",
+  "version": "v0.1.0",
+  "language": "eng",
+  "keywords": [
+    "atmospheric-science",
+    "HEALPix",
+    "ICON",
+    "atmospheric tides",
+    "gravity waves",
+    "spectral analysis",
+    "middle atmosphere"
+  ]
+}

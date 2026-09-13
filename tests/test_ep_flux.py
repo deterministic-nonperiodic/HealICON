@@ -288,3 +288,33 @@ def test_eddy_covariances_reach_the_output():
         assert v in out, f"{v} missing from the EP flux output"
     assert out["upvp_zm"].attrs["units"] == "m2 s-2"
     assert out["vptp_zm"].attrs["units"] == "K m s-1"
+
+
+def test_omega_without_w():
+    """A reanalysis on pressure levels carries omega and no vertical velocity.
+
+    The two are independent inputs. Bundling them raised UnboundLocalError on
+    w_prime the first time a dataset supplied omega alone -- which is the usual
+    shape of the data this path exists for.
+    """
+    import numpy as np
+    import xarray as xr
+    import healpy as hp
+    from healicon.analysis.ep_flux import eliassen_palm
+    from healicon.grid import create_healpix_dataset
+
+    nside = 8
+    ds = create_healpix_dataset(nside)
+    npix, nlev = hp.nside2npix(nside), 6
+    rng = np.random.default_rng(1)
+    plev = np.array([9e4, 7e4, 5e4, 3e4, 1e4, 1e3])
+    for name, scale in (("u", 20.0), ("v", 5.0), ("temp", 250.0)):
+        ds[name] = (("plev", "cells"), scale + rng.normal(0, 1.0, (nlev, npix)))
+    ds["omega"] = (("plev", "cells"), rng.normal(0, 1e-3, (nlev, npix)))
+    ds = ds.assign_coords(plev=("plev", plev))
+    ds.plev.attrs.update(standard_name="air_pressure", units="Pa", axis="Z")
+
+    out = eliassen_palm(ds, mode="full")          # omega alone must enable full
+    assert "upomega_zm" in out
+    assert "w_zm" not in out                       # there is no w to report
+    assert np.isfinite(out["F_z"]).any()

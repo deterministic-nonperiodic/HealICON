@@ -971,11 +971,17 @@ def compute_eddy_fluxes(
         upwp_zm = _zonal_mean(xr.Dataset({'upwp': u_prime * w_prime}))['upwp']
         upwp_zm.attrs = {'long_name': "Zonal-mean eddy vertical flux [u'w']", 'units': 'm2 s-2'}
         out['upwp_zm'] = upwp_zm
+        wptp_zm = _zonal_mean(xr.Dataset({'wptp': w_prime * theta_prime}))['wptp']
+        wptp_zm.attrs = {'long_name': "Zonal-mean eddy vertical heat flux [w'theta']",
+                         'units': 'K m s-1'}
+        out['wptp_zm'] = wptp_zm
 
     # A supplied omega is used as given rather than derived from w. The
-    # hydrostatic conversion below assumes constant gravity, which is 2.1% high
-    # at 70 km and 2.8% at 90 km; a caller working in the middle atmosphere can
-    # compute omega with g(z) and pass it here instead.
+    # hydrostatic conversion elsewhere assumes constant gravity, which is 2.1%
+    # high at 70 km and 2.8% at 90 km; a caller working in the middle
+    # atmosphere can compute omega with g(z) and pass it here instead. This is
+    # independent of w: a dataset may carry omega and no vertical velocity at
+    # all, which is the usual shape of a reanalysis on pressure levels.
     if 'omega' in ds:
         om_zm_px = _broadcast_to_pixels(ds_zm['omega'])
         om_prime = ds['omega'] - om_zm_px
@@ -983,10 +989,6 @@ def compute_eddy_fluxes(
         upom_zm.attrs = {'long_name': "Zonal-mean eddy vertical flux [u'omega']",
                          'units': 'Pa m s-2'}
         out['upomega_zm'] = upom_zm
-        wptp_zm = _zonal_mean(xr.Dataset({'wptp': w_prime * theta_prime}))['wptp']
-        wptp_zm.attrs = {'long_name': "Zonal-mean eddy vertical heat flux [w'theta']",
-                         'units': 'K m s-1'}
-        out['wptp_zm'] = wptp_zm
 
     if has_vor:
         vor_zm = ds_zm['vor']

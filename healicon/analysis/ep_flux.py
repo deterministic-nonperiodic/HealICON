@@ -1214,7 +1214,16 @@ def compute_ep_flux(eddy_ds, mode="auto"):
             out['w_star'] = w_star.assign_attrs(
                 {'long_name': 'TEM residual vertical velocity', 'units': 'm s-1'})
 
-    for passthrough in ('u_zm', 'v_zm', 'w_zm', 'pres_zm', 'temp_zm', 'wptp_zm', 'vor_zm'):
+    # The eddy covariances travel with the flux they build. F_phi and F_z are
+    # each a difference of two terms, so a model-minus-reanalysis difference in
+    # the divergence says nothing on its own about which physics moved: a
+    # disagreement in [u'v'] is meridional convergence of momentum, one in
+    # [v'theta'] is vertical propagation, and they are not the same story.
+    # [u'v'] is also the horizontal eddy momentum flux in its own right, which
+    # is comparable with momentum fluxes computed any other way.
+    for passthrough in ('u_zm', 'v_zm', 'w_zm', 'pres_zm', 'temp_zm',
+                        'theta_zm', 'upvp_zm', 'vptp_zm', 'upwp_zm',
+                        'upomega_zm', 'wptp_zm', 'vor_zm'):
         if passthrough in eddy_ds:
             out[passthrough] = eddy_ds[passthrough]
     out.attrs['ep_flux_mode'] = mode_used

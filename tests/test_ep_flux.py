@@ -256,3 +256,35 @@ def test_gravity_falls_back_to_standard_without_a_height():
     ds = xr.Dataset({"u_zm": ("lat", np.zeros(8))},
                     coords={"lat": np.linspace(-80, 80, 8)})
     assert float(np.asarray(_resolve_gravity(ds))) == _G
+
+
+def test_eddy_covariances_reach_the_output():
+    """F_phi and F_z are each a difference of two terms; keep the terms.
+
+    A difference in div_F says nothing on its own about which physics moved:
+    [u'v'] is meridional convergence of momentum, [v'theta'] is vertical
+    propagation. Dropping them left the output undecomposable, and [u'v'] is
+    a momentum flux worth having in its own right.
+    """
+    import numpy as np
+    import xarray as xr
+    import healpy as hp
+    from healicon.analysis.ep_flux import eliassen_palm
+    from healicon.grid import create_healpix_dataset
+
+    nside = 8
+    ds = create_healpix_dataset(nside)
+    npix, nlev = hp.nside2npix(nside), 6
+    rng = np.random.default_rng(0)
+    plev = np.array([9e4, 7e4, 5e4, 3e4, 1e4, 1e3])
+    for name, scale in (("u", 20.0), ("v", 5.0), ("temp", 250.0)):
+        ds[name] = (("plev", "cells"),
+                    scale + rng.normal(0, 1.0, (nlev, npix)))
+    ds = ds.assign_coords(plev=("plev", plev))
+    ds.plev.attrs.update(standard_name="air_pressure", units="Pa", axis="Z")
+
+    out = eliassen_palm(ds, mode="qg")
+    for v in ("upvp_zm", "vptp_zm", "theta_zm"):
+        assert v in out, f"{v} missing from the EP flux output"
+    assert out["upvp_zm"].attrs["units"] == "m2 s-2"
+    assert out["vptp_zm"].attrs["units"] == "K m s-1"

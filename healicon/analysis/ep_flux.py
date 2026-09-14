@@ -513,8 +513,28 @@ def _find_alt_name(ds: xr.Dataset | xr.DataArray) -> str:
 
     coord = _find_coordinate(ds, 'level', raise_notfound=False)
 
+    # Whatever is returned has to be a dimension of the data. Everything
+    # downstream differentiates and chunks along it, and an auxiliary
+    # coordinate cannot carry either -- `.chunk({name: -1})` raises
+    # "chunks keys not found in data dimensions".
+    #
+    # This is not a corner case. ICON-like output on height levels routinely
+    # carries `z_mc` as the dimension in metres and the pressure of each level
+    # as an auxiliary coordinate alongside it; the reanalysis interpolated onto
+    # those levels is exactly that shape. Picking the auxiliary one made the
+    # height path unusable for the files it was written for.
+    if coord is not None and coord.name not in ds.dims:
+        for cname in ds.coords:
+            if cname in ds.dims and _is_z(cname, ds.coords):
+                logger.debug(
+                    f"Vertical candidate '{coord.name}' is an auxiliary "
+                    f"coordinate, not a dimension; using height dimension "
+                    f"'{cname}'."
+                )
+                return str(cname)
+
     # Happy path: found a real height coordinate (metres).
-    if coord is not None and _is_z(coord.name, ds.coords):
+    if coord is not None and _is_z(coord.name, ds.coords) and coord.name in ds.dims:
         return str(coord.name)
 
     # Candidate is a model-level index (or absent) → prefer pressure.
@@ -527,7 +547,7 @@ def _find_alt_name(ds: xr.Dataset | xr.DataArray) -> str:
 
     # Second: search by well-known pressure coordinate names.
     for pres_name in ('pres', 'pres_zm', 'plev', 'pressure'):
-        if pres_name in ds.coords or pres_name in ds.dims:
+        if pres_name in ds.dims:
             logger.debug(
                 f"Vertical coord '{getattr(coord, 'name', None)}' is not height "
                 f"in metres; using pressure coordinate '{pres_name}'."
@@ -540,8 +560,8 @@ def _find_alt_name(ds: xr.Dataset | xr.DataArray) -> str:
             logger.debug(f"Found pressure coordinate '{cname}' via CF scan.")
             return cname
 
-    # Last resort: use whatever _find_coordinate found (or raise).
-    if coord is not None:
+    # Last resort: use whatever _find_coordinate found, if it is usable.
+    if coord is not None and coord.name in ds.dims:
         logger.warning(
             f"Vertical coord '{coord.name}' is not height in metres and no "
             "pressure coordinate found; using it as-is."

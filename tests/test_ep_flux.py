@@ -318,3 +318,30 @@ def test_omega_without_w():
     assert "upomega_zm" in out
     assert "w_zm" not in out                       # there is no w to report
     assert np.isfinite(out["F_z"]).any()
+
+
+def test_vertical_axis_must_be_a_dimension():
+    """An auxiliary pressure coordinate is not the vertical axis.
+
+    ICON-like output on height levels carries `z_mc` as the dimension in metres
+    and each level's pressure as an auxiliary coordinate alongside it. Picking
+    the auxiliary one made the height path unusable: everything downstream
+    differentiates and chunks along the name returned here, and an auxiliary
+    coordinate can carry neither.
+    """
+    import numpy as np
+    import xarray as xr
+    from healicon.analysis.ep_flux import _find_alt_name
+
+    z = np.linspace(1e3, 1.4e5, 20)
+    ds = xr.Dataset(
+        {"u": (("z_mc", "lat"), np.zeros((20, 8)))},
+        coords={"z_mc": ("z_mc", z),
+                "plev": ("z_mc", 1e5 * np.exp(-z / 7e3)),   # auxiliary
+                "lat": np.linspace(-80, 80, 8)},
+    )
+    ds.z_mc.attrs.update(standard_name="height", units="m", axis="Z", positive="up")
+
+    got = _find_alt_name(ds)
+    assert got == "z_mc", f"expected the height dimension, got {got!r}"
+    assert got in ds.dims

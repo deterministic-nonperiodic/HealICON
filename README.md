@@ -136,9 +136,10 @@ healicon tides --modes DW1,SW2,DE3,SE2 "input_time_series.nc" "output_tides.nc"
 #    the full primitive-equation TEM with Psi, v*, w* in the output.
 #    When a relative vorticity field (vor/vorticity/zeta) is present, it is used
 #    directly for f_hat = f + zeta_bar instead of finite-differencing u_zm.
-healicon ep-flux "data.nc" "ep_flux.nc"                        # auto: full TEM if w present, else QG
-healicon ep-flux --mode full "data.nc" "ep_flux.nc"            # force full TEM (requires w)
-healicon ep-flux --mode qg   "data.nc" "ep_flux_qg.nc"         # quasi-geostrophic
+healicon ep-flux "data.nc" "ep_flux.nc"                        # auto: full TEM if w present, else tem
+healicon ep-flux --mode full "data.nc" "ep_flux.nc"            # force full TEM (requires w or omega)
+healicon ep-flux --mode tem  "data.nc" "ep_flux_tem.nc"         # TEM: f_hat and shear, no vertical eddy flux
+healicon ep-flux --mode qg   "data.nc" "ep_flux_qg.nc"         # strict quasi-geostrophic
 healicon ep-flux --time-mean "data.nc" "ep_flux_mean.nc"       # time-average before saving
 
 # 9. Regrade Resolution: Change HEALPix resolution using nside or zoom (nside=2^zoom)
@@ -173,21 +174,21 @@ All analysis routines are accessible directly in Python:
 
 ```python
 import xarray as xr
-from healicon.analysis.ep_flux import eliassen_palm
+import healicon
 
 ds = xr.open_dataset("data.nc")
 
 # Full pipeline: eddy covariances -> F_phi, F_z, div_F, a_EP
-ep_ds = eliassen_palm(ds, mode="auto")   # mode: 'auto' | 'full' | 'qg'
+ep_ds = healicon.eliassen_palm(ds, mode="auto")   # mode: 'auto' | 'full' | 'tem' | 'qg'
 
 # Output variables (height-coordinate full TEM):
 #   F_phi   [kg s-2]       EP flux, meridional component
-#   F_z     [kg m-1 s-2]   EP flux, vertical component
-#   div_F   [kg m-1 s-2]   EP flux divergence
+#   F_z     [kg s-2]       EP flux, vertical component
+#   div_F   [Pa]           EP flux divergence
 #   a_EP    [m s-1 day-1]  wave-induced zonal acceleration
 #   Psi     [kg s-1]       TEM mass stream function
 #   v_star, w_star         residual-mean meridional / vertical velocity
-#   u_zm, temp_zm, ...     zonal-mean diagnostics passed through
+#   u_zm, temp_zm, ...     zonal-mean diagnostics and eddy covariances passed through
 ```
 
 ## Output Metadata

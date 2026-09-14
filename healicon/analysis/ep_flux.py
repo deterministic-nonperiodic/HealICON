@@ -111,8 +111,13 @@ def _find_var(ds: xr.Dataset, target: str) -> str | None:
     # 2. CF-aware guess (standard_name, then units-only fallback)
     cf_hit = _cf_guess(ds, target)
     if cf_hit is not None:
+        # Prevent stealing a variable that belongs to another target
+        for other_target, other_aliases in _VAR_NAME_ALIASES.items():
+            if other_target != target and cf_hit in other_aliases:
+                return None
         return cf_hit
     return None
+
 
 
 def _parse_dataset(ds: xr.Dataset) -> xr.Dataset:
@@ -650,7 +655,7 @@ def _resolve_gravity(ds_zm: xr.Dataset) -> xr.DataArray:
     # two families are kept apart by name rather than guessed at: 'z', 'geopot'
     # and 'zg' are geopotential and are converted, while a name that says
     # geometric is taken at its word.
-    _GEOPOTENTIAL = ('z', 'geopot', 'zg', 'geopotential_height')
+    _GEOPOTENTIAL = ('z', 'geopot', 'geopotential', 'zg', 'geopotential_height')
     _GEOMETRIC = ('z_geom', 'altitude', 'height_geom')
 
     z = None
@@ -1217,7 +1222,8 @@ def compute_ep_flux(eddy_ds, mode="auto"):
     F_vert.attrs = {'long_name': f'EP flux, vertical component ({coord_kind})',
                     'units': 'kg s-2' if not is_pres else 'Pa m2 s-2'}
 
-    out = xr.Dataset({'F_phi': F_phi, 'F_z': F_vert, 'rho0': rho0})
+    out = xr.Dataset({'F_phi': F_phi, 'F_z': F_vert, 'rho0': rho0},
+                     attrs=dict(eddy_ds.attrs))
 
     # Ψ and residual velocities — height coords only (Ψ is undefined for isobaric)
     if not is_pres and use_full:
@@ -1391,9 +1397,11 @@ def eliassen_palm(
     Parameters
     ----------
     mode : {'auto', 'full', 'tem', 'qg'}
-        'auto': full TEM when [u'w'] is available, QG otherwise.
-        'full': full primitive-equation TEM (requires w in input).
-        'qg':  quasi-geostrophic limit (no Ψ stream function correction).
+        'auto': full TEM when [u'w'] or [u'omega'] is available, 'tem' otherwise.
+        'full': full primitive-equation TEM (requires w or omega in input).
+        'tem':  retains absolute vorticity factor f_hat and u-shear term while
+                dropping vertical eddy momentum flux (no w required).
+        'qg':   strict quasi-geostrophic limit (f_hat -> f, drops u-shear and Ψ).
     time_mean : bool
         Average output over the time dimension after computing EP flux.
     vertical : {'auto', 'native'}
@@ -1436,8 +1444,8 @@ def eliassen_palm(
 
     out = _reorder_output_dims(out)
     out.attrs = append_history(
-        ds.attrs,
-        f"Computed Eliassen-Palm flux (mode={ep_ds.attrs.get('ep_flux_mode', mode)}, "
+        out.attrs,
+        f"Computed Eliassen-Palm flux (mode={out.attrs.get('ep_flux_mode', mode)}, "
         f"coord={coord_kind}) using HealICON.",
     )
     return out

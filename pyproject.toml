@@ -7,7 +7,7 @@ include = ["healicon*"]
 
 [project]
 name = "healicon"
-version = "0.1.0"
+version = "0.1.1"
 description = "HealICON: A command-line tool designed for wave and tidal analysis in global atmospheric simulations. Uses HEALPix as the base grid for interpolation, providing an equal-area environment optimized for mapping tidal harmonics and gravity wave spectra across the globe."
 authors = [{ name = "Yanmichel A. Morfa", email = "morfa@iap-kborn.de" }]
 readme = "README.md"
@@ -39,3 +39,6 @@ test = ["pytest", "matplotlib"]
 
 [project.scripts]
 healicon = "healicon.cli:cli"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

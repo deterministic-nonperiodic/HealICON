@@ -21,6 +21,8 @@ from .analysis import (
     spherical_harmonic_wavelet_spectrum,
     compute_wavelet_tidal_analysis,
     wavelet,
+    eliassen_palm,
+    compute_ep_flux,
 )
 from .extract import (
     extract_along_latitude,
@@ -48,6 +50,8 @@ __all__ = [
     "spherical_harmonic_wavelet_spectrum",
     "compute_wavelet_tidal_analysis",
     "compute_leastsquares_tidal_analysis",
+    "eliassen_palm",
+    "compute_ep_flux",
     "visualize",
     "wavelet",
 ]

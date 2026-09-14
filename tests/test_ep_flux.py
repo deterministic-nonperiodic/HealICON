@@ -345,3 +345,194 @@ def test_vertical_axis_must_be_a_dimension():
     got = _find_alt_name(ds)
     assert got == "z_mc", f"expected the height dimension, got {got!r}"
     assert got in ds.dims
+
+
+def test_tem_mode_without_w_pressure_and_height():
+    """mode='tem' retains absolute vorticity and shear while dropping vertical eddy flux.
+
+    It must execute cleanly without w in both pressure and height coordinates,
+    and differ from mode='qg' by retaining the vorticity factor and shear term.
+    """
+    from healicon.grid import create_healpix_dataset
+
+    nside = 8
+    npix, nlev = hp.nside2npix(nside), 6
+    rng = np.random.default_rng(42)
+
+    # 1. Pressure coordinates without w
+    ds_pres = create_healpix_dataset(nside)
+    plev = np.array([9e4, 7e4, 5e4, 3e4, 1e4, 1e3])
+    lats = 90.0 - np.rad2deg(hp.pix2ang(nside, np.arange(npix))[0])
+    # Build u with strong meridional shear so f_hat != f
+    u_shear_pattern = 30.0 * np.sin(np.deg2rad(lats))[None, :]
+    for name, scale in (("v", 5.0), ("temp", 250.0)):
+        ds_pres[name] = (("plev", "cells"), scale + rng.normal(0, 1.0, (nlev, npix)))
+    ds_pres["u"] = (("plev", "cells"), u_shear_pattern + rng.normal(0, 1.0, (nlev, npix)))
+    ds_pres = ds_pres.assign_coords(plev=("plev", plev))
+    ds_pres.plev.attrs.update(standard_name="air_pressure", units="Pa", axis="Z")
+
+    out_tem = eliassen_palm(ds_pres, mode="tem")
+    out_qg = eliassen_palm(ds_pres, mode="qg")
+
+    assert out_tem.attrs["ep_flux_mode"] == "tem"
+    assert out_qg.attrs["ep_flux_mode"] == "qg"
+    assert "upwp_zm" not in out_tem
+    assert "upomega_zm" not in out_tem
+    assert np.isfinite(out_tem["F_phi"]).all()
+    assert np.isfinite(out_tem["F_z"]).all()
+    # In tem mode, f_hat includes vorticity and F_phi includes shear, so values differ from QG
+    assert not np.allclose(out_tem["F_z"].values, out_qg["F_z"].values)
+    assert not np.allclose(out_tem["F_phi"].values, out_qg["F_phi"].values)
+
+    # 2. Height coordinates without w (w dropped from _make_ds)
+    ds_hgt = _make_ds(seed=42).drop_vars("w")
+    out_hgt_tem = eliassen_palm(ds_hgt, mode="tem", vertical="native")
+    assert out_hgt_tem.attrs["ep_flux_mode"] == "tem"
+    assert "Psi" in out_hgt_tem
+    assert np.isfinite(out_hgt_tem["Psi"]).all()
+    assert np.isfinite(out_hgt_tem["F_z"]).all()
+
+
+def test_auto_mode_selection():
+    """mode='auto' picks 'full' when w is present, and 'tem' when w is absent."""
+    ds_with_w = _make_ds(seed=10)
+    out_full = eliassen_palm(ds_with_w, mode="auto", vertical="native")
+    assert out_full.attrs["ep_flux_mode"] == "full"
+
+    ds_no_w = ds_with_w.drop_vars("w")
+    out_tem = eliassen_palm(ds_no_w, mode="auto", vertical="native")
+    assert out_tem.attrs["ep_flux_mode"] == "tem"
+
+    # Explicit full must reject dataset without w or omega
+    with pytest.raises(ValueError, match="mode='full' requires 'upwp_zm'"):
+        eliassen_palm(ds_no_w, mode="full", vertical="native")
+
+
+def test_all_eddy_covariances_and_vorticity_passthrough():
+    """When w, vor, and thermodynamics are present, all covariances pass through."""
+    ds = _make_ds(seed=20)
+    rng = np.random.default_rng(20)
+    ds["vor"] = xr.DataArray(
+        rng.standard_normal((_NLEV, _NPIX)).astype("f4") * 1e-5,
+        dims=["height", "cell"],
+        attrs={"units": "s-1", "standard_name": "relative_vorticity"},
+    )
+    out = eliassen_palm(ds, mode="full", vertical="native")
+
+    expected_vars = [
+        "u_zm", "v_zm", "w_zm", "pres_zm", "temp_zm", "theta_zm",
+        "upvp_zm", "vptp_zm", "upwp_zm", "wptp_zm", "vor_zm",
+    ]
+    for var in expected_vars:
+        assert var in out, f"Expected {var} in EP flux output"
+
+    assert out["upvp_zm"].attrs["units"] == "m2 s-2"
+    assert out["vptp_zm"].attrs["units"] == "K m s-1"
+    assert out["upwp_zm"].attrs["units"] == "m2 s-2"
+    assert out["wptp_zm"].attrs["units"] == "K m s-1"
+    assert out["vor_zm"].attrs["units"] == "s-1"
+
+
+def test_gravity_geopotential_and_log_pressure():
+    """_resolve_gravity correctly resolves geopotential height and log-p heights."""
+    from healicon.analysis.ep_flux import _resolve_gravity, _G, _RE
+
+    # 1. Geopotential height in m2 s-2
+    zg_m = 50e3
+    phi_val = zg_m * _G
+    ds_phi = xr.Dataset({"geopotential": ("level", [phi_val])},
+                        coords={"level": [1]})
+    ds_phi.geopotential.attrs["units"] = "m2 s-2"
+    g_phi = float(np.asarray(_resolve_gravity(ds_phi)).flat[0])
+    z_geom = _RE * zg_m / (_RE - zg_m)
+    expected_g = _G * (_RE / (_RE + z_geom)) ** 2
+    assert np.isclose(g_phi, expected_g, rtol=1e-6)
+
+    # 2. Geopotential height in metres (zg / gpm)
+    ds_zg = xr.Dataset({"zg": ("level", [zg_m])},
+                       coords={"level": [1]})
+    ds_zg.zg.attrs["units"] = "m"
+    g_zg = float(np.asarray(_resolve_gravity(ds_zg)).flat[0])
+    assert np.isclose(g_zg, expected_g, rtol=1e-6)
+
+    # 3. Log-pressure fallback from pressure and temperature
+    p = np.array([1e5, 1e4, 1e2, 1e0])  # Pa
+    ds_logp = xr.Dataset(
+        {"temp_zm": (("plev", "lat"), 250.0 * np.ones((4, 6)))},
+        coords={"plev": ("plev", p), "lat": np.linspace(-60, 60, 6)},
+    )
+    ds_logp.plev.attrs.update(standard_name="air_pressure", units="Pa", axis="Z")
+    g_logp = np.asarray(_resolve_gravity(ds_logp))
+    assert (g_logp[0] > g_logp[-1]).all()
+    assert g_logp[0, 0] == pytest.approx(_G, rel=1e-4)
+
+
+def test_ep_flux_auxiliary_plev_end_to_end():
+    """ICON-like vertical coordinate with height dimension and auxiliary plev."""
+    from healicon.grid import create_healpix_dataset
+
+    nside = 8
+    ds = create_healpix_dataset(nside)
+    npix, nlev = hp.nside2npix(nside), 10
+    z = np.linspace(1e3, 5e4, nlev)
+    plev_aux = 1e5 * np.exp(-z / 7e3)
+    rng = np.random.default_rng(33)
+
+    for name, scale in (("u", 25.0), ("v", 5.0), ("w", 0.02), ("temp", 240.0)):
+        ds[name] = (("z_mc", "cells"), scale + rng.normal(0, 1.0, (nlev, npix)))
+
+    ds = ds.assign_coords(
+        z_mc=("z_mc", z),
+        plev=("z_mc", plev_aux),
+    )
+    ds.z_mc.attrs.update(standard_name="height", units="m", axis="Z", positive="up")
+    ds.plev.attrs.update(standard_name="air_pressure", units="Pa")
+
+    out = eliassen_palm(ds, mode="full", vertical="native")
+    assert "z_mc" in out.dims
+    assert "div_F" in out
+    assert "a_EP" in out
+    assert np.isfinite(out["a_EP"]).any()
+
+
+def test_ep_flux_cli(tmp_path):
+    """Test CLI commands 'ep-flux' and 'epflux' end-to-end."""
+    from click.testing import CliRunner
+    from healicon.cli import cli
+
+    ds = _make_ds(seed=99)
+    ifile = tmp_path / "ep_input.nc"
+    ds.to_netcdf(ifile)
+
+    runner = CliRunner()
+
+    # 1. Test ep-flux with --mode tem
+    ofile_tem = tmp_path / "ep_out_tem.nc"
+    res_tem = runner.invoke(cli, [
+        "ep-flux",
+        str(ifile),
+        str(ofile_tem),
+        "--mode", "tem",
+    ])
+    assert res_tem.exit_code == 0, res_tem.output
+    assert ofile_tem.exists()
+    ds_tem = xr.open_dataset(ofile_tem)
+    assert ds_tem.attrs.get("ep_flux_mode") == "tem"
+    assert "F_phi" in ds_tem and "F_z" in ds_tem and "a_EP" in ds_tem
+    ds_tem.close()
+
+    # 2. Test epflux alias with --mode full and --time-mean
+    ofile_full = tmp_path / "ep_out_full.nc"
+    res_full = runner.invoke(cli, [
+        "epflux",
+        str(ifile),
+        str(ofile_full),
+        "--mode", "full",
+        "--time-mean",
+    ])
+    assert res_full.exit_code == 0, res_full.output
+    assert ofile_full.exists()
+    ds_full = xr.open_dataset(ofile_full)
+    assert ds_full.attrs.get("ep_flux_mode") == "full"
+    ds_full.close()
+

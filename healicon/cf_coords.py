@@ -281,12 +281,23 @@ def _cf_guess(ds: xr.Dataset, target: str) -> str | None:
     # belongs to a *different* physical quantity.
     # Additionally, check long_name to break ties: if long_name clearly
     # refers to a different physical quantity, skip the match.
+    _CONFLICTING_VAR_NAMES: dict[str, set[str]] = {
+        'w': {'u', 'ua', 'v', 'va', 'u_wind', 'v_wind'},
+        'u': {'v', 'va', 'w', 'wa', 'wap', 'v_wind', 'w_wind'},
+        'v': {'u', 'ua', 'w', 'wa', 'wap', 'u_wind', 'w_wind'},
+    }
     _CONFLICTING_LONG_NAMES: dict[str, set[str]] = {
         'theta': {'temperature', 'temp'},  # if long_name says "temperature", it's not theta
         'temperature': {'potential temperature', 'theta'},  # vice versa
+        'w': {'zonal', 'meridional', 'eastward', 'northward', 'u wind', 'v wind'},
+        'u': {'meridional', 'vertical', 'northward', 'upward', 'v wind', 'w wind'},
+        'v': {'zonal', 'vertical', 'eastward', 'upward', 'u wind', 'w wind'},
     }
     conflicts = _CONFLICTING_LONG_NAMES.get(target, set())
+    conflicting_names = _CONFLICTING_VAR_NAMES.get(target, set())
     for name, da in ds.data_vars.items():
+        if str(name).lower() in conflicting_names:
+            continue
         std = str(da.attrs.get("standard_name", "")).strip()
         if std:
             continue

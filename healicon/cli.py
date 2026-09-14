@@ -102,9 +102,24 @@ def _guess_variable(ds, target_type: str) -> str:
 def cli():
     """HealICON: Interpolate atmospheric model outputs to HEALPix grid."""
     try:
+        from dask.callbacks import Callback
         from dask.diagnostics import ProgressBar
-        ProgressBar(out=sys.stderr).register()
-    except ImportError:
+        Callback.active = {
+            cb for cb in Callback.active
+            if not getattr(getattr(getattr(cb[0], '__self__', None), '_file', None), 'closed', False)
+        }
+        if not getattr(sys.stderr, 'closed', False):
+            ProgressBar(out=sys.stderr).register()
+    except Exception:
+        pass
+
+
+@cli.result_callback()
+def _cleanup_callbacks(result, **kwargs):
+    try:
+        from dask.callbacks import Callback
+        Callback.active.clear()
+    except Exception:
         pass
 
 
@@ -815,7 +830,9 @@ def ep_flux_cmd(ifile, ofile, mode, time_mean):
 @click.argument('ofile')
 @click.option('--mode', type=click.Choice(['auto', 'full', 'tem', 'qg']), default='auto',
               show_default=True,
-              help='EP flux mode: full TEM, QG approximation, or auto.')
+              help='EP flux mode: full TEM; tem (f_hat and shear, no vertical eddy flux); '
+                   'qg (strict quasi-geostrophic); auto picks full when w is present '
+                   'and tem otherwise.')
 @click.option('--time-mean', is_flag=True, default=False,
               help='Average over the time dimension before saving.')
 @profile_command

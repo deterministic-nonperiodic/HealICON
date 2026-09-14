@@ -1,7 +1,7 @@
 {
   "upload_type": "software",
   "title": "HealICON: spectral and wave analysis of ICON output on the HEALPix grid",
-  "description": "<p>HealICON is a command-line tool for wave and tidal analysis of global atmospheric simulations. It uses HEALPix as the base grid for interpolation, providing an equal-area environment for mapping tidal harmonics and gravity-wave spectra across the globe.</p><p>This release is the version used for the global tidal decomposition reported in Morfa et al., <em>Whole-atmosphere modeling with regional refinement: strengths and drawbacks assessed with observations from the VortEx campaign</em>, Journal of Advances in Modeling Earth Systems. The tidal analysis follows Yamazaki (2023).</p>",
+  "description": "<p>HealICON is a command-line tool for wave and tidal analysis of global atmospheric simulations. It uses HEALPix as the base grid for interpolation, providing an equal-area environment for mapping tidal harmonics and gravity-wave spectra across the globe.</p><p>This release (v0.1.1) adds primitive-equation Eliassen--Palm (EP) flux wave driving diagnostics in pressure and geometric height coordinates (Hardiman et al. 2010; Edmon et al. 1980) alongside the global tidal decomposition. It provides the software used for the global tidal harmonics (Figure S2) and resolved EP-flux wave forcing analysis (Figure 4) reported in Morfa et al., <em>Whole-atmosphere modeling with regional refinement: strengths and drawbacks assessed with observations from the VortEx campaign</em>, Journal of Advances in Modeling Earth Systems.</p>",
   "creators": [
     {
       "name": "Morfa, Yanmichel A.",
@@ -19,6 +19,7 @@
     "ICON",
     "atmospheric tides",
     "gravity waves",
+    "Eliassen-Palm flux",
     "spectral analysis",
     "middle atmosphere"
   ]

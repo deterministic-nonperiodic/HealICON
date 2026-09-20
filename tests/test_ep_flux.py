@@ -536,3 +536,254 @@ def test_ep_flux_cli(tmp_path):
     assert ds_full.attrs.get("ep_flux_mode") == "full"
     ds_full.close()
 
+
+
+# ---------------------------------------------------------------------------
+# Analytic verification of the divergence discretisation
+# ---------------------------------------------------------------------------
+# The tests above check plumbing: units, dimensions, which variables survive.
+# None of them would notice a dropped cosφ or a flipped sign in
+#
+#     div F = (a cosφ)⁻¹ ∂(F_φ cosφ)/∂φ + ∂F_z/∂{p,z}
+#
+# These do. Each case prescribes zonal-mean covariances for which F, div F and
+# a_EP are exactly integrable, and compares. The inputs are not a balanced
+# atmosphere and do not need to be: what is under test is the discretisation,
+# not the physics that would produce such covariances.
+#
+# Two regimes. A term that is linear or quadratic in the differentiated
+# variable is integrated exactly by a three-point stencil on any spacing, so
+# it must come back at machine precision. A term in cosⁿφ is not, so it must
+# converge at second order. Both are asserted; a change that silently drops
+# to first order fails here rather than in a paper three years later.
+#
+# Constants come from the module under test. Using independent values turns a
+# constant mismatch into an apparent truncation error -- Ω differing in the
+# sixth digit shows up as a uniform 2e-6, which reads exactly like a
+# discretisation failure and is not one.
+
+_THETA0, _BETA = 300.0, 3.0e-4      # θ = θ₀ + βp; β stays above the 1e-10 floor
+_GAMMA, _T_ISO, _RHO_C = 5.0e-3, 250.0, 1.0e-3
+_P_REF, _Z_REF = 1.0e5, 1.0e5
+
+
+def _gauss_lats(n):
+    """Latitudes of an n-point Gaussian grid, as the reanalysis archives use."""
+    x, _ = np.polynomial.legendre.leggauss(n)
+    return np.rad2deg(np.arcsin(x))
+
+
+def _zm_dataset(lat, vert, vert_name, is_pres, **fields):
+    """Assemble the zonal-mean dataset compute_ep_flux consumes."""
+    coords = {
+        "lat": ("lat", lat, {"units": "degrees_north", "axis": "Y"}),
+        vert_name: (vert_name, vert, {
+            "units": "Pa" if is_pres else "m",
+            "standard_name": "air_pressure" if is_pres else "height",
+            "axis": "Z", "positive": "down" if is_pres else "up"}),
+    }
+    ds = xr.Dataset(coords=coords)
+    LAT, VERT = np.meshgrid(lat, vert, indexing="ij")
+    for name, fn in fields.items():
+        ds[name] = (("lat", vert_name), np.asarray(fn(LAT, VERT), float))
+    ds.attrs["ep_flux_coord"] = "pressure" if is_pres else "height"
+    return ds
+
+
+def _run(ds):
+    from healicon.analysis.ep_flux import compute_ep_divergence, compute_ep_flux
+    return compute_ep_divergence(compute_ep_flux(ds), mask_invalid=False)
+
+
+def _rel_err(got, want, lat, trim=2, latmax=85.0):
+    """Max and RMS error over the interior, normalised by the analytic scale.
+
+    The first and last rows use a one-sided stencil, and a_EP carries a 1/cosφ
+    that amplifies any error towards the pole without saying anything about
+    the scheme, so both are excluded.
+    """
+    sl = slice(trim, -trim or None)
+    g, w, la = np.asarray(got)[sl], np.asarray(want)[sl], np.asarray(lat)[sl]
+    keep = np.abs(la) <= latmax
+    g, w = g[keep], w[keep]
+    scale = np.nanmax(np.abs(w))
+    d = np.abs(g - w) / (scale if scale > 0 else 1.0)
+    return float(np.nanmax(d)), float(np.sqrt(np.nanmean(d ** 2)))
+
+
+def _case_meridional(lat, plev, upvp=12.0):
+    """[u'v'] = C alone.  F_φ = -a C cosφ,  a_EP = (2C/a) tanφ · 86400.
+
+    The cos²φ derivative is not exact under a three-point stencil: second order.
+    """
+    from healicon.analysis.ep_flux import _A, _SECS_PER_DAY
+    ds = _zm_dataset(
+        lat, plev, "plev", True,
+        upvp_zm=lambda L, P: np.full_like(L, upvp),
+        vptp_zm=lambda L, P: np.zeros_like(L),
+        upomega_zm=lambda L, P: np.zeros_like(L),
+        u_zm=lambda L, P: np.zeros_like(L),
+        theta_zm=lambda L, P: _THETA0 + _BETA * P)
+    phi = np.deg2rad(lat)
+    ones = np.ones(plev.size)
+    return ds, dict(
+        F_phi=(-_A * upvp * np.cos(phi))[:, None] * ones,
+        F_z=np.zeros((lat.size, plev.size)),
+        a_EP=((2.0 * upvp / _A) * np.tan(phi) * _SECS_PER_DAY)[:, None] * ones)
+
+
+def _case_vertical(lat, plev):
+    """ū = 0 so f̂ = f; [v'θ']/θ_p = p²/2p_ref.  a_EP = f (p/p_ref) · 86400.
+
+    Quadratic in p, so the stencil is exact on any spacing.
+    """
+    from healicon.analysis.ep_flux import _A, _OMEGA, _SECS_PER_DAY
+    G = lambda P: P ** 2 / (2.0 * _P_REF)
+    ds = _zm_dataset(
+        lat, plev, "plev", True,
+        upvp_zm=lambda L, P: np.zeros_like(L),
+        vptp_zm=lambda L, P: _BETA * G(P),
+        upomega_zm=lambda L, P: np.zeros_like(L),
+        u_zm=lambda L, P: np.zeros_like(L),
+        theta_zm=lambda L, P: _THETA0 + _BETA * P)
+    phi = np.deg2rad(lat)
+    f = 2.0 * _OMEGA * np.sin(phi)
+    _, P = np.meshgrid(lat, plev, indexing="ij")
+    return ds, dict(
+        F_phi=np.zeros((lat.size, plev.size)),
+        F_z=_A * np.cos(phi)[:, None] * f[:, None] * G(P),
+        a_EP=f[:, None] * (P / _P_REF) * _SECS_PER_DAY)
+
+
+def _case_all_terms(lat, plev, upvp=12.0, u0=40.0, v0=5.0):
+    """Momentum flux, shear x heat flux, relative vorticity and dF_z/dp at once.
+
+    ū = U₀ cosφ (p/p_ref), [u'v'] = C, [v'θ']/θ_p = V₀, so
+        f̂    = 2Ω sinφ + (2U₀p/(a p_ref)) sinφ
+        a_EP = [ -U₀V₀ sinφ/(a p_ref) + 2C tanφ/a ] · 86400
+    """
+    from healicon.analysis.ep_flux import _A, _OMEGA, _SECS_PER_DAY
+    ds = _zm_dataset(
+        lat, plev, "plev", True,
+        upvp_zm=lambda L, P: np.full_like(L, upvp),
+        vptp_zm=lambda L, P: np.full_like(L, _BETA * v0),
+        upomega_zm=lambda L, P: np.zeros_like(L),
+        u_zm=lambda L, P: u0 * np.cos(np.deg2rad(L)) * P / _P_REF,
+        theta_zm=lambda L, P: _THETA0 + _BETA * P)
+    LAT, P = np.meshgrid(lat, plev, indexing="ij")
+    PHI = np.deg2rad(LAT)
+    return ds, dict(
+        F_phi=_A * np.cos(PHI) * (u0 * np.cos(PHI) * v0 / _P_REF - upvp),
+        F_z=_A * np.cos(PHI) * v0 * (2 * _OMEGA * np.sin(PHI)
+                                     + 2 * u0 * P * np.sin(PHI) / (_A * _P_REF)),
+        a_EP=(-u0 * v0 * np.sin(PHI) / (_A * _P_REF)
+              + 2 * upvp * np.tan(PHI) / _A) * _SECS_PER_DAY)
+
+
+def _case_stream_function(lat, z):
+    """Height branch through Ψ. θ depends on z only, so θ_φ = 0 and
+
+        Ψ → a cosφ ρ₀ [v'θ']/θ_z        (Iwasaki 1989 / AHL87 eq. 3.5.3)
+
+    With ū = [u'v'] = [u'w'] = [w'θ'] = 0 and [v'θ']/θ_z = z²/2z_ref,
+    a_EP = f (z/z_ref) · 86400 -- quadratic in z, so exact.
+    """
+    from healicon.analysis.ep_flux import _A, _OMEGA, _RD, _SECS_PER_DAY
+    H = lambda Z: Z ** 2 / (2.0 * _Z_REF)
+    ds = _zm_dataset(
+        lat, z, "height", False,
+        upvp_zm=lambda L, Z: np.zeros_like(L),
+        upwp_zm=lambda L, Z: np.zeros_like(L),
+        wptp_zm=lambda L, Z: np.zeros_like(L),
+        vptp_zm=lambda L, Z: _GAMMA * H(Z),
+        u_zm=lambda L, Z: np.zeros_like(L),
+        theta_zm=lambda L, Z: _THETA0 + _GAMMA * Z,
+        temp_zm=lambda L, Z: np.full_like(L, _T_ISO),
+        pres_zm=lambda L, Z: np.full_like(L, _RHO_C * _RD * _T_ISO))
+    phi = np.deg2rad(lat)
+    f = 2.0 * _OMEGA * np.sin(phi)
+    _, Z = np.meshgrid(lat, z, indexing="ij")
+    return ds, dict(
+        F_phi=np.zeros((lat.size, z.size)),
+        F_z=_A * np.cos(phi)[:, None] * _RHO_C * f[:, None] * H(Z),
+        a_EP=f[:, None] * (Z / _Z_REF) * _SECS_PER_DAY)
+
+
+@pytest.mark.parametrize("name,case,coord", [
+    ("vertical term, pressure", _case_vertical, "plev"),
+    ("stream function, height", _case_stream_function, "height"),
+])
+def test_exactly_integrable_terms_are_exact(name, case, coord):
+    """Terms quadratic in the differentiated variable must return exactly.
+
+    This is the strongest statement available: no tolerance to tune, and it
+    pins dF_z/d{p,z}, f̂, Ψ and the a_EP normalisation -- div F/(a cosφ) on
+    pressure, div F/(ρ₀ a cosφ) on height -- all at once. A missing ρ₀ in the
+    height denominator, or a cosφ applied twice, moves this off zero.
+    """
+    lat = _gauss_lats(48)
+    vert = (np.exp(np.linspace(np.log(1e5), np.log(1e-2), 40)) if coord == "plev"
+            else np.linspace(0.0, 1.4e5, 40))
+    ds, exact = case(lat, vert)
+    out = _run(ds)
+    for var in ("F_phi", "F_z", "a_EP"):
+        mx, _ = _rel_err(out[var], exact[var], lat)
+        assert mx < 1e-10, f"{name}: {var} off by {mx:.2e}, expected machine precision"
+
+
+@pytest.mark.parametrize("name,case", [
+    ("meridional term", _case_meridional),
+    ("all terms", _case_all_terms),
+])
+def test_cos_phi_terms_converge_at_second_order(name, case):
+    """Terms in cosⁿφ must converge at the order of the stencil.
+
+    _gradient_1d is xarray's differentiate(edge_order=2), i.e. second-order
+    centred. Dropping to first order -- a one-sided difference slipped into
+    the interior, say -- halves nothing visibly on one grid but shows up
+    immediately in the refinement rate.
+
+    A uniform pressure grid is used deliberately. On a 7-decade log grid the
+    all-terms error floors at ~1e-6 in the top few levels, where the
+    synthetic F_z is a large constant plus a part 1e-8 of it and the dp
+    derivative cancels catastrophically. That is a property of these
+    contrived inputs, not of the scheme, and it would make the refinement
+    rate meaningless.
+    """
+    plev = np.linspace(2e4, 1e5, 40)
+    rms = []
+    for nlat in (64, 128, 256):
+        lat = _gauss_lats(nlat)
+        ds, exact = case(lat, plev)
+        rms.append(_rel_err(_run(ds)["a_EP"], exact["a_EP"], lat)[1])
+    orders = [np.log2(a / b) for a, b in zip(rms, rms[1:])]
+    assert all(o > 1.8 for o in orders), f"{name}: convergence orders {orders}"
+    assert rms[-1] < 1e-4, f"{name}: rms {rms[-1]:.2e} at the finest grid"
+
+
+def test_discretisation_error_is_negligible_on_a_reanalysis_grid():
+    """The error that reaches a published band mean, in physical units.
+
+    Convergence order says the scheme is right; this says the residual does
+    not matter at the resolution the archives are actually on. The setup is
+    the 127 x 124 grid of the JAWARA comparison, with [u'v'] scaled so a_EP
+    reaches 15 m s⁻¹ d⁻¹, and the reduction is the cosine-weighted 45-75°N
+    mean that the numbers are quoted from.
+    """
+    from healicon.analysis.ep_flux import _A, _SECS_PER_DAY
+    lat = _gauss_lats(127)
+    plev = np.exp(np.linspace(np.log(9.97e4), np.log(1.02e-4), 124))
+    upvp = 15.0 * _A / (2 * np.tan(np.deg2rad(60.0)) * _SECS_PER_DAY)
+
+    ds, exact = _case_meridional(lat, plev, upvp=upvp)
+    got, want = np.asarray(_run(ds)["a_EP"]), exact["a_EP"]
+
+    band = (lat >= 45.0) & (lat <= 75.0)
+    weights = np.cos(np.deg2rad(lat[band]))
+    mean = lambda x: np.average(x[band], axis=0, weights=weights)
+    band_error = np.nanmax(np.abs(mean(got) - mean(want)))
+
+    assert np.nanmax(np.abs(got - want)[band]) < 0.05
+    # two orders below the smallest model-reanalysis difference reported,
+    # and three below its confidence interval
+    assert band_error < 0.02, f"band-mean error {band_error:.3e} m s-1 d-1"
